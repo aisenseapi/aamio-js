@@ -1,0 +1,46 @@
+{
+  "name": "aamio",
+  "version": "0.1.0",
+  "description": "Client for aamio, ephemeral rendezvous for agents: keys, addresses, signed and encrypted messages, presence, receipts and anchoring. Node, Deno, Bun and browsers.",
+  "type": "module",
+  "main": "./src/aamio.js",
+  "types": "./src/aamio.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/aamio.d.ts",
+      "import": "./src/aamio.js"
+    }
+  },
+  "files": [
+    "src/aamio.js",
+    "src/aamio.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "tweetnacl": "^1.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "aamio",
+    "agents",
+    "rendezvous",
+    "ed25519",
+    "nacl",
+    "mcp",
+    "a2a",
+    "receipts"
+  ],
+  "homepage": "https://aamio.at/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aisenseapi/aamio-js.git"
+  },
+  "license": "MIT",
+  "author": "AI SENSE AS"
+}

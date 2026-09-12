@@ -1,0 +1,54 @@
+{
+ "sha256_abc": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+ "id": "abcdefghijklmnopqrstuvwxyz",
+ "w": "ohcibx4t22xc6hx22fch",
+ "a": {
+  "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "curvePublic": "4701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01",
+  "hash": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c"
+ },
+ "b": {
+  "seed": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "public": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+  "curvePublic": "4a3807d064d077181cc070989e76891d20dca5559548dc2c77c1a50273882b38"
+ },
+ "body": "{\"hello\":\"from python\"}",
+ "signInput": "aamio-v1\nohcibx4t22xc6hx22fch\n41749a11c112ecb7ef992a02abf17b934b6bfec8b9748ea852614c930a68bcae",
+ "signature": "u327kMqo4_mMzm__Wr7BrXcO4cHvx30IWw1K0cTpfTV6ODV4BFC9E0VkN3LlUvx--wFwe2J8kgSWugKXvwL8Dg",
+ "plaintext": "hello from python, opened in javascript",
+ "envelopeFromAToB": "{\"e2ee\":\"nacl.box.v1\",\"to\":\"65b60673\",\"nonce\":\"ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7\",\"ct\":\"FvzkdIlMZbSz7Fy-peiCPIGC1ueepILldiLQEKx02P1H2HMgrKuHPH0R7mjAD02MgMRpyrl_ew\"}",
+ "receipt": {
+  "label": "Supplier C",
+  "schema": "aamio-receipt-v1",
+  "w": "cwkwis3oqpeojy325lya",
+  "created_at": 1789201272,
+  "expire_at": 1789201459,
+  "count": 2,
+  "bytes": 1380,
+  "allow": [
+   "u-qCGhjMY7E-3fhbgSg3zkrXHrr2DPJP-J76ap61EEo"
+  ],
+  "messages": [
+   {
+    "seq": 1,
+    "at": 1789201283,
+    "sha256": "ed1e950d07af4419705bbf7b5a64b71124e324fcff4c9bd03f468d622096f8c0",
+    "from": "u-qCGhjMY7E-3fhbgSg3zkrXHrr2DPJP-J76ap61EEo"
+   },
+   {
+    "seq": 2,
+    "at": 1789201307,
+    "sha256": "1aa76cae3d87d5b265de1e8604466e83f97386d63c14938b202cce5972266f7c",
+    "from": "u-qCGhjMY7E-3fhbgSg3zkrXHrr2DPJP-J76ap61EEo"
+   }
+  ],
+  "keys": [
+   "u-qCGhjMY7E-3fhbgSg3zkrXHrr2DPJP-J76ap61EEo"
+  ],
+  "root": "9c7bc2537fcc23786cadb642dab94d4d53d92c1c3a8e27493edfd537b02379e7",
+  "commitment": "sha256:9c7bc2537fcc23786cadb642dab94d4d53d92c1c3a8e27493edfd537b02379e7",
+  "issued_at": 1789201462,
+  "how": "root = sha256 of the lines \"seq<TAB>at<TAB>sha256<TAB>from-or-dash<LF>\" in seq order. commitment is the root in the form Verifyum anchors as-is (verifyum_anchor_commitment). Keep this JSON as the private proof. The network keeps nothing after the thread expires."
+ }
+}
