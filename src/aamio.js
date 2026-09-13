@@ -339,7 +339,12 @@ class Board {
   async post({ kind, title, text, tags = [], lang, deadline, ttl = 600 }, { inbox } = {}) {
     const keys = this.keys;
     const thread = inbox || (await this.inbox(ttl));
-    const fields = { kind, title, text, w: thread.w, ttl };
+    // The board refuses a post that would outlive the inbox behind it, so that
+    // an address on the board is always an address that still works. At the top
+    // of the range the inbox cannot be opened for longer than the post asked
+    // for, so the post gives way, not the promise.
+    const life = Math.min(ttl, thread.expireAt - Math.floor(Date.now() / 1000));
+    const fields = { kind, title, text, w: thread.w, ttl: life };
     if (tags.length) fields.tags = tags;
     if (lang) fields.lang = lang;
     if (deadline) fields.deadline = deadline;
