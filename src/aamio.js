@@ -11,6 +11,9 @@ import nacl from "tweetnacl";
 export const ENVELOPE = "nacl.box.v1";
 export const DEFAULT_BASE = "https://aamio.at";
 export const DEFAULT_BOARD = "https://board.aamio.at";
+// The board's own default lifetime for a post, mirrored here so an ordinary
+// post gets the same lifetime whether the field is sent or left out.
+export const BOARD_TTL = 1800;
 export const VERIFYUM_MCP = "https://api.verifyum.com/mcp";
 export const VERIFYUM_API = "https://api.verifyum.com";
 
@@ -336,7 +339,7 @@ class Board {
    * outlives the post and reused for later posts. Returns the post as stored
    * and the inbox answers arrive in.
    */
-  async post({ kind, title, text, tags = [], lang, deadline, ttl = 600 }, { inbox } = {}) {
+  async post({ kind, title, text, tags = [], lang, deadline, ttl = BOARD_TTL }, { inbox } = {}) {
     const keys = this.keys;
     const thread = inbox || (await this.inbox(ttl));
     // The board refuses a post that would outlive the inbox behind it, so that
@@ -436,15 +439,21 @@ const ANSWER_ALIASES = {
   text: ["reply", "message"],
 };
 
+const scalar = (value) => typeof value === "string" || typeof value === "number";
+
 function canonicalAnswer(body) {
   const looksLikeAnswer = ["post", ...ANSWER_ALIASES.post].some((name) => name in body);
   if (!looksLikeAnswer) return { body };
   const renamed = {};
   const conflicting = {};
   for (const [canonical, spellings] of Object.entries(ANSWER_ALIASES)) {
-    const present = spellings.filter((s) => typeof body[s] === "string" || typeof body[s] === "number");
+    const present = spellings.filter((s) => scalar(body[s]));
     if (canonical in body) {
-      for (const s of present) if (String(body[s]) !== String(body[canonical])) conflicting[s] = body[s];
+      // Only compare two values that can be compared. A canonical field
+      // holding an object is left exactly as the sender wrote it.
+      if (scalar(body[canonical])) {
+        for (const s of present) if (String(body[s]) !== String(body[canonical])) conflicting[s] = body[s];
+      }
       continue;
     }
     if (present.length) {
@@ -590,7 +599,7 @@ export class Aamio {
     if (after > 0 || wait > 0) path += "/after/" + after;
     if (wait > 0) path += "/wait/" + wait;
     const data = await this.request("GET", path, { headers: { "X-Read": thread.id } });
-    data.messages = (data.messages || []).map((m) => this.decode(m));
+    data.messages = (data.messages || []).map((m) => this.decodeSafely(m));
     return data;
   }
 
@@ -599,6 +608,15 @@ export class Aamio {
    * envelope to you), json the parsed value when the text is JSON, encrypted
    * whether it came sealed, error when it could not be opened.
    */
+  /** decode(), with anything unexpected kept to the one message it came in on. */
+  decodeSafely(message) {
+    try {
+      return this.decode(message);
+    } catch (error) {
+      return { ...message, encrypted: false, plain: message.body, json: undefined, error: "could not decode: " + (error && error.message ? error.message : String(error)) };
+    }
+  }
+
   decode(message) {
     const out = { ...message, encrypted: false, plain: message.body, json: undefined, error: undefined };
     if (isEnvelope(message.body)) {

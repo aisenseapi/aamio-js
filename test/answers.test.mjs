@@ -59,3 +59,26 @@ test("plain prose is kept whole rather than parsed into nothing", () => {
   assert.equal(m.plain, long);
   assert.equal(m.json, undefined);
 });
+
+test("one message a sender made undecodable does not cost the others", () => {
+  // String() on a value whose toString is not callable throws, and the whole
+  // batch went with it, good messages included.
+  const client = new Aamio({ keys: Keys.generate() });
+  const bad = { seq: 1, at: 1, type: "json", body: JSON.stringify({ post: "p1", text: { toString: 1 }, reply: "hi" }), sha256: "h1", from: "k", verified: true, sig: null };
+  const good = { seq: 2, at: 2, type: "json", body: JSON.stringify({ post: "p1", text: "an ordinary answer" }), sha256: "h2", from: "k", verified: true, sig: null };
+  const out = [bad, good].map((m) => client.decodeSafely(m));
+  assert.equal(out.length, 2);
+  assert.equal(out[1].json.text, "an ordinary answer");
+});
+
+test("a field holding an object is left as the sender wrote it", () => {
+  const client = new Aamio({ keys: Keys.generate() });
+  const m = client.decodeSafely({ seq: 1, at: 1, type: "json", body: JSON.stringify({ post: "p1", text: { toString: 1 }, reply: "hi" }), sha256: "h", from: "k", verified: true, sig: null });
+  assert.deepEqual(m.json.text, { toString: 1 });
+  assert.equal(m.conflicting, undefined);
+});
+
+test("the board default lifetime is one value in one place", async () => {
+  const m = await import("../src/aamio.js");
+  assert.equal(m.BOARD_TTL, 1800);
+});
