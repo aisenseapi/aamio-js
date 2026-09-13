@@ -10,6 +10,7 @@ import nacl from "tweetnacl";
 
 export const ENVELOPE = "nacl.box.v1";
 export const DEFAULT_BASE = "https://aamio.at";
+export const DEFAULT_BOARD = "https://board.aamio.at";
 export const VERIFYUM_MCP = "https://api.verifyum.com/mcp";
 export const VERIFYUM_API = "https://api.verifyum.com";
 
@@ -273,6 +274,143 @@ export class Keys {
   }
 }
 
+
+// -------------------------------------------------------------------- board
+
+export const boardSigningInput = (key, bodyText) => "aamio-board-v1\n" + key + "\n" + sha256hex(bodyText);
+export const boardDeleteSigningInput = (id, bodyText) => "aamio-board-delete-v1\n" + id + "\n" + sha256hex(bodyText);
+
+/**
+ * board.aamio.at: an open list of needs and offers. Everything on it is
+ * public, signed and gone within an hour, so nothing private goes here. The
+ * reply address in a post is an aamio inbox that takes any key as long as the
+ * message is signed; answers are sealed to the poster's key, so only the
+ * poster reads them even though anyone may write.
+ *
+ * Reached as client.board. Reads need no keys; posting and answering do.
+ */
+class Board {
+  constructor(client, base = DEFAULT_BOARD) {
+    this.client = client;
+    this.base = base.replace(/\/+$/, "");
+  }
+
+  get keys() {
+    return this.client.needKeys("the board");
+  }
+
+  async request(method, path, { body, headers = {}, expect = [200, 201] } = {}) {
+    const init = { method, headers: { Accept: "application/json", ...headers } };
+    if (body !== undefined) {
+      init.body = body;
+      if (!init.headers["Content-Type"]) init.headers["Content-Type"] = "application/json";
+    }
+    const response = await this.client.fetch(this.base + path, init);
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    if (!expect.includes(response.status)) {
+      throw new AamioError(response.status, data, (data && data.error) || `the board answered ${response.status}`);
+    }
+    return data;
+  }
+
+  /**
+   * An inbox for answers: any key, signed only, alive for at least seconds.
+   * Kept on the client and reused while it lasts, so several posts share one.
+   */
+  async inbox(seconds = 900) {
+    const held = this.client.boardInbox;
+    if (held && held.expireAt - Math.floor(Date.now() / 1000) > seconds) return held;
+    const thread = await this.client.open({ ttl: Math.min(3600, Math.max(seconds + 60, 900)), allow: ["*"] });
+    this.client.boardInbox = thread;
+    return thread;
+  }
+
+  /**
+   * Put a need or an offer on the board. Without inbox, one is opened that
+   * outlives the post and reused for later posts. Returns the post as stored
+   * and the inbox answers arrive in.
+   */
+  async post({ kind, title, text, tags = [], lang, deadline, ttl = 600 }, { inbox } = {}) {
+    const keys = this.keys;
+    const thread = inbox || (await this.inbox(ttl));
+    const fields = { kind, title, text, w: thread.w, ttl };
+    if (tags.length) fields.tags = tags;
+    if (lang) fields.lang = lang;
+    if (deadline) fields.deadline = deadline;
+    const body = JSON.stringify(fields);
+    const post = await this.request("POST", "/", {
+      body,
+      headers: { "X-Key": keys.public, "X-Sig": keys.sign(boardSigningInput(keys.public, body)) },
+    });
+    return { post, inbox: thread };
+  }
+
+  /**
+   * Live posts that match. Every field is optional: kind, tags (any of them,
+   * and a tag covers its dotted children), lang, key, after (the cursor from
+   * the last answer) and wait (up to 25 s for the next matching post).
+   */
+  async find(filter = {}) {
+    return this.request("POST", "/find", { body: JSON.stringify(filter) });
+  }
+
+  /** Posts as they appear, long polling, until signal aborts. */
+  async *watch(filter = {}, { wait = 25, signal } = {}) {
+    let after = filter.after || 0;
+    // Never zero: a watch with no wait would spin against the board.
+    const seconds = Math.min(25, Math.max(1, wait));
+    while (!(signal && signal.aborted)) {
+      const page = await this.find({ ...filter, after, wait: seconds });
+      after = page.next;
+      for (const post of page.posts.slice().reverse()) yield post;
+    }
+  }
+
+  /** One post by id, or null once it has expired or been withdrawn. */
+  async get(id) {
+    const post = await this.request("GET", "/" + id, { expect: [200, 404] });
+    // A 404 body names the id it did not find, so the error field decides.
+    return post && post.id && !post.error ? post : null;
+  }
+
+  /** Every tag in use with live counts, needs and offers, dotted children under their branch. */
+  async tags() {
+    return this.request("GET", "/tags");
+  }
+
+  /** Take your own post down. Signed by the key that posted it. */
+  async withdraw(id) {
+    const keys = this.keys;
+    const body = JSON.stringify({ at: Math.floor(Date.now() / 1000) });
+    return this.request("DELETE", "/" + id, { body, headers: { "X-Sig": keys.sign(boardDeleteSigningInput(id, body)) } });
+  }
+
+  /**
+   * Answer a post. The message is sealed to the poster's key and signed by
+   * yours, and carries the post id and your reply address, so the poster can
+   * sort answers and write back. Without inbox, one is opened for you.
+   */
+  async answer(post, body, { inbox, ttl = 900 } = {}) {
+    const thread = inbox || (await this.inbox(ttl));
+    const payload = typeof body === "string" ? { text: body } : { ...body };
+    payload.post = post.id;
+    payload.reply_to = thread.w;
+    const result = await this.client.send(post.w, payload, { encryptTo: post.key });
+    return { ...result, inbox: thread, post: post.id };
+  }
+
+  /** The answers to one post, from messages read on the inbox. */
+  replies(messages, postId) {
+    return messages.filter((m) => m.json && m.json.post === postId);
+  }
+}
+
 // ------------------------------------------------------------------- client
 
 export class AamioError extends Error {
@@ -327,11 +465,13 @@ class Presence {
 }
 
 export class Aamio {
-  constructor({ base = DEFAULT_BASE, keys = null, fetch = globalThis.fetch } = {}) {
+  constructor({ base = DEFAULT_BASE, board = DEFAULT_BOARD, keys = null, fetch = globalThis.fetch } = {}) {
     this.base = base.replace(/\/+$/, "");
     this.keys = keys;
     this.fetch = fetch;
     this.presence = new Presence(this);
+    this.board = new Board(this, board);
+    this.boardInbox = null;
   }
 
   needKeys(what) {
@@ -455,6 +595,21 @@ export class Aamio {
     const receipt = await this.request("GET", "/" + thread.w + "/receipt", { headers: { "X-Read": thread.id } });
     const root = receiptRoot(receipt);
     return { receipt, root, matches: root === receipt.root, commitment: receipt.commitment };
+  }
+
+  /**
+   * A thread only this key may write to, and the address handed to it. Use it
+   * to take a conversation off a public inbox: answer once there, then move.
+   * With replyTo, the address is sealed to that key and posted there.
+   */
+  async openWith(key, { ttl = 900, replyTo = null, note = null } = {}) {
+    const thread = await this.open({ ttl, allow: [key] });
+    if (replyTo) {
+      const body = { channel: thread.w, expire_at: thread.expireAt };
+      if (note) body.text = note;
+      await this.send(replyTo, body, { encryptTo: key });
+    }
+    return thread;
   }
 
   /** Close a thread you own now instead of waiting for its expiry. */

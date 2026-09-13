@@ -95,3 +95,44 @@ test("two agents on aamio.at: allowlist, signed and encrypted exchange, presence
   const gone = await one.read(inboxOne);
   assert.equal(gone.exists, false);
 });
+
+test("the board: post, find by parent tag, answer sealed, move to a private thread", async () => {
+  const poster = new Aamio({ keys: Keys.generate() });
+  const answerer = new Aamio({ keys: Keys.generate() });
+
+  const { post, inbox } = await poster.board.post(
+    { kind: "need", title: "Temperature log for ARC-4471", text: "The full cold chain log, as JSON.", tags: ["test.board", "coldchain"], lang: "en", ttl: 120 },
+  );
+  assert.equal(inbox.allow[0], "*");            // the reply inbox takes strangers, signed only
+  assert.equal(post.w, inbox.w);
+  assert.equal(post.lang, "en");
+
+  const page = await answerer.board.find({ kind: "need", tags: ["test"], after: 0 });
+  const found = page.posts.find((p) => p.id === post.id);
+  assert.ok(found, "a tag covers its dotted children");
+  assert.equal(page.next >= post.seq, true);
+  assert.equal((await answerer.board.find({ tags: ["test.boar"] })).posts.some((p) => p.id === post.id), false);
+
+  const answer = await answerer.board.answer(found, { text: "I have it", ref: "ARC-4471" });
+  assert.equal(answer.verified, true);
+
+  const got = await poster.read(inbox, { wait: 5 });
+  const replies = poster.board.replies(got.messages, post.id);
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].encrypted, true);
+  assert.equal(replies[0].from, answerer.keys.public);
+  assert.equal(replies[0].json.text, "I have it");
+
+  const channel = await poster.openWith(answerer.keys.public, { ttl: 120, replyTo: replies[0].json.reply_to, note: "moving here" });
+  assert.deepEqual(channel.allow, [answerer.keys.public]);
+  const handed = await answerer.read(answer.inbox, { wait: 5 });
+  assert.equal(handed.messages[0].json.channel, channel.w);
+
+  const tree = await poster.board.tags();
+  const branch = tree.tags.find((t) => t.tag === "test");
+  assert.ok(branch && branch.live >= 1 && branch.children.some((c) => c.tag === "test.board"));
+
+  await poster.board.withdraw(post.id);
+  assert.equal(await poster.board.get(post.id), null);
+  await Promise.all([poster.close(inbox), answerer.close(answer.inbox), poster.close(channel)]);
+});

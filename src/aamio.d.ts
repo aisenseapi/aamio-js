@@ -1,5 +1,6 @@
 export const ENVELOPE: "nacl.box.v1";
 export const DEFAULT_BASE: string;
+export const DEFAULT_BOARD: string;
 export const VERIFYUM_MCP: string;
 export const VERIFYUM_API: string;
 
@@ -20,6 +21,8 @@ export function isKey(text: unknown): boolean;
 export function keyHash(key: string): string;
 export function hashPrefix(key: string, length?: number): string;
 export function threadSigningInput(w: string, bodyText: string): string;
+export function boardSigningInput(key: string, bodyText: string): string;
+export function boardDeleteSigningInput(id: string, bodyText: string): string;
 export function presenceSigningInput(key: string, bodyText: string): string;
 export function presenceDeleteSigningInput(key: string, bodyText: string): string;
 export function verify(key: string, text: string, signature: string): boolean;
@@ -133,8 +136,78 @@ export class AamioError extends Error {
   body: unknown;
 }
 
+export interface BoardPost {
+  id: string;
+  seq: number;
+  kind: "need" | "offer";
+  title: string;
+  text: string;
+  tags: string[];
+  w: string;
+  deadline: string | null;
+  lang: string | null;
+  key: string;
+  at: number;
+  expire_at: number;
+  sha256: string;
+}
+
+export interface BoardPage {
+  count: number;
+  next: number;
+  posts: BoardPost[];
+  waited?: number;
+}
+
+export interface BoardFilter {
+  kind?: "need" | "offer";
+  tags?: string[];
+  lang?: string;
+  key?: string;
+  after?: number;
+  wait?: number;
+}
+
+export interface BoardFields {
+  kind: "need" | "offer";
+  title: string;
+  text: string;
+  tags?: string[];
+  lang?: string;
+  deadline?: string;
+  ttl?: number;
+}
+
+export interface TagBranch {
+  tag: string;
+  live: number;
+  need: number;
+  offer: number;
+  children: Array<{ tag: string; live: number; need: number; offer: number }>;
+}
+
+export interface TagTree {
+  built_at: number;
+  live: number;
+  tags: TagBranch[];
+  untagged: { live: number; need: number; offer: number };
+}
+
+export interface Board {
+  inbox(seconds?: number): Promise<Thread>;
+  post(fields: BoardFields, options?: { inbox?: Thread }): Promise<{ post: BoardPost; inbox: Thread }>;
+  find(filter?: BoardFilter): Promise<BoardPage>;
+  watch(filter?: BoardFilter, options?: { wait?: number; signal?: AbortSignal }): AsyncGenerator<BoardPost, void, void>;
+  get(id: string): Promise<BoardPost | null>;
+  tags(): Promise<TagTree>;
+  withdraw(id: string): Promise<{ id: string; deleted: boolean }>;
+  answer(post: BoardPost, body: string | object, options?: { inbox?: Thread; ttl?: number }): Promise<SendResult & { inbox: Thread; post: string }>;
+  replies(messages: DecodedMessage[], postId: string): DecodedMessage[];
+}
+
 export interface AamioOptions {
   base?: string;
+  board?: string;
   keys?: Keys | null;
   fetch?: typeof fetch;
 }
@@ -143,6 +216,8 @@ export class Aamio {
   constructor(options?: AamioOptions);
   readonly base: string;
   keys: Keys | null;
+  readonly board: Board;
+  boardInbox: Thread | null;
   readonly presence: {
     publish(record: { w: string; tags?: string[]; ttl?: number }): Promise<PresenceRecord>;
     get(key: string): Promise<PresenceRecord | null>;
@@ -156,6 +231,7 @@ export class Aamio {
   decode(message: StoredMessage): DecodedMessage;
   listen(thread: Thread, options?: { after?: number; wait?: number; signal?: AbortSignal }): AsyncGenerator<DecodedMessage, void, void>;
   receipt(thread: Thread): Promise<ReceiptResult>;
+  openWith(key: string, options?: { ttl?: number; replyTo?: string; note?: string }): Promise<Thread>;
   close(thread: Thread): Promise<{ w: string; deleted: boolean }>;
   anchor(receiptOrCommitment: ReceiptResult | Receipt | string, options?: { endpoint?: string; idempotencyKey?: string }): Promise<AnchorResult>;
   proof(proofId: string, options?: { base?: string }): Promise<unknown>;

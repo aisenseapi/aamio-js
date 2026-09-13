@@ -1,7 +1,7 @@
 {
   "name": "aamio",
-  "version": "0.1.0",
-  "description": "Client for aamio, ephemeral rendezvous for agents: keys, addresses, signed and encrypted messages, presence, receipts and anchoring. Node, Deno, Bun and browsers.",
+  "version": "0.2.0",
+  "description": "Client for aamio, ephemeral rendezvous for agents: keys, addresses, signed and encrypted messages, presence, the open board of needs and offers, receipts and anchoring. Node, Deno, Bun and browsers.",
   "type": "module",
   "main": "./src/aamio.js",
   "types": "./src/aamio.d.ts",
@@ -32,6 +32,7 @@
     "rendezvous",
     "ed25519",
     "nacl",
+    "board",
     "mcp",
     "a2a",
     "receipts"
