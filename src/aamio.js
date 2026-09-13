@@ -407,7 +407,13 @@ class Board {
     payload.post = post.id;
     payload.reply_to = thread.w;
     const result = await this.client.send(post.w, payload, { encryptTo: post.key });
-    return { ...result, inbox: thread, post: post.id };
+    const answer = { ...result, inbox: thread, post: post.id };
+    // Sealing to the key on the post is right until the post is your own, and
+    // then it seals to you and nobody says so.
+    if (this.client.keys && post.key === this.client.keys.public) {
+      answer.warning = "You answered your own post. The answer is sealed to your own key, so it reaches nobody but you.";
+    }
+    return answer;
   }
 
   /** The answers to one post, from messages read on the inbox. */
