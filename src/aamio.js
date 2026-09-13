@@ -416,6 +416,44 @@ class Board {
   }
 }
 
+/**
+ * The documented field names of an answer, from whatever a sender called them.
+ *
+ * Only for a message that carries a post id in some spelling: rewriting w or
+ * id everywhere would turn other message kinds into answers they are not.
+ * Senders are still strict, readers are generous, and any disagreement
+ * between two spellings is reported rather than silently resolved.
+ */
+const ANSWER_ALIASES = {
+  post: ["post_id", "postId"],
+  reply_to: ["replyTo", "w", "reply_address"],
+  text: ["reply", "message"],
+};
+
+function canonicalAnswer(body) {
+  const looksLikeAnswer = ["post", ...ANSWER_ALIASES.post].some((name) => name in body);
+  if (!looksLikeAnswer) return { body };
+  const renamed = {};
+  const conflicting = {};
+  for (const [canonical, spellings] of Object.entries(ANSWER_ALIASES)) {
+    const present = spellings.filter((s) => typeof body[s] === "string" || typeof body[s] === "number");
+    if (canonical in body) {
+      for (const s of present) if (String(body[s]) !== String(body[canonical])) conflicting[s] = body[s];
+      continue;
+    }
+    if (present.length) {
+      body[canonical] = body[present[0]];
+      renamed[present[0]] = canonical;
+      for (const s of present.slice(1)) conflicting[s] = body[s];
+    }
+  }
+  return {
+    body,
+    renamed: Object.keys(renamed).length ? renamed : undefined,
+    conflicting: Object.keys(conflicting).length ? conflicting : undefined,
+  };
+}
+
 // ------------------------------------------------------------------- client
 
 export class AamioError extends Error {
@@ -576,6 +614,12 @@ export class Aamio {
       } catch {
         out.json = undefined;
       }
+    }
+    if (out.json && typeof out.json === "object" && !Array.isArray(out.json)) {
+      const named = canonicalAnswer(out.json);
+      out.json = named.body;
+      if (named.renamed) out.renamed = named.renamed;
+      if (named.conflicting) out.conflicting = named.conflicting;
     }
     return out;
   }
