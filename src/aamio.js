@@ -459,7 +459,12 @@ function canonicalAnswer(body) {
     if (present.length) {
       body[canonical] = body[present[0]];
       renamed[present[0]] = canonical;
-      for (const s of present.slice(1)) conflicting[s] = body[s];
+      // Two spellings carrying the same value are not a disagreement, and
+      // reporting them as one asks a caller to weigh a conflict that is not
+      // there.
+      for (const s of present.slice(1)) {
+        if (String(body[s]) !== String(body[present[0]])) conflicting[s] = body[s];
+      }
     }
   }
   return {

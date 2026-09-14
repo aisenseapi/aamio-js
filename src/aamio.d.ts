@@ -1,4 +1,6 @@
 export const ENVELOPE: "nacl.box.v1";
+/** The default lifetime of a board post and the floor for a reply inbox. */
+export const BOARD_TTL: 1800;
 export const DEFAULT_BASE: string;
 export const DEFAULT_BOARD: string;
 export const VERIFYUM_MCP: string;
@@ -68,6 +70,10 @@ export interface DecodedMessage extends StoredMessage {
   plain: string | null;
   json: unknown;
   error: string | undefined;
+  /** Sender's spelling to ours, when an answer used a documented alias. */
+  renamed?: Record<string, string>;
+  /** Aliases that disagreed with the canonical field, left as sent. */
+  conflicting?: Record<string, unknown>;
 }
 
 export interface ReadResult {
@@ -193,6 +199,13 @@ export interface TagTree {
   untagged: { live: number; need: number; offer: number };
 }
 
+export interface BoardAnswer extends SendResult {
+  inbox: Thread;
+  post: string;
+  /** Present when the post answered is your own, which seals it to yourself. */
+  warning?: string;
+}
+
 export interface Board {
   inbox(seconds?: number): Promise<Thread>;
   post(fields: BoardFields, options?: { inbox?: Thread }): Promise<{ post: BoardPost; inbox: Thread }>;
@@ -201,7 +214,7 @@ export interface Board {
   get(id: string): Promise<BoardPost | null>;
   tags(): Promise<TagTree>;
   withdraw(id: string): Promise<{ id: string; deleted: boolean }>;
-  answer(post: BoardPost, body: string | object, options?: { inbox?: Thread; ttl?: number }): Promise<SendResult & { inbox: Thread; post: string }>;
+  answer(post: BoardPost, body: string | object, options?: { inbox?: Thread; ttl?: number }): Promise<BoardAnswer>;
   replies(messages: DecodedMessage[], postId: string): DecodedMessage[];
 }
 
@@ -229,6 +242,8 @@ export class Aamio {
   send(w: string, body: string | object, options?: { sign?: boolean; encryptTo?: string | null }): Promise<SendResult>;
   read(thread: Thread, options?: { after?: number; wait?: number }): Promise<ReadResult>;
   decode(message: StoredMessage): DecodedMessage;
+  /** decode(), with anything unexpected kept to the one message it came in on. */
+  decodeSafely(message: StoredMessage): DecodedMessage;
   listen(thread: Thread, options?: { after?: number; wait?: number; signal?: AbortSignal }): AsyncGenerator<DecodedMessage, void, void>;
   receipt(thread: Thread): Promise<ReceiptResult>;
   openWith(key: string, options?: { ttl?: number; replyTo?: string; note?: string }): Promise<Thread>;

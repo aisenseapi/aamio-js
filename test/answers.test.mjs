@@ -82,3 +82,18 @@ test("the board default lifetime is one value in one place", async () => {
   const m = await import("../src/aamio.js");
   assert.equal(m.BOARD_TTL, 1800);
 });
+
+test("two spellings of the same value are not a disagreement", () => {
+  const client = new Aamio({ keys: Keys.generate() });
+  const m = client.decodeSafely({ seq: 1, at: 1, type: "json", body: JSON.stringify({ post: "p1", reply: "on my way", message: "on my way" }), sha256: "h", from: "k", verified: true, sig: null });
+  assert.equal(m.json.text, "on my way");
+  assert.deepEqual(m.renamed, { reply: "text" });
+  assert.equal(m.conflicting, undefined);
+});
+
+test("two spellings that actually differ still are", () => {
+  const client = new Aamio({ keys: Keys.generate() });
+  const m = client.decodeSafely({ seq: 1, at: 1, type: "json", body: JSON.stringify({ post: "p1", reply: "on my way", message: "cannot make it" }), sha256: "h", from: "k", verified: true, sig: null });
+  assert.equal(m.json.text, "on my way");
+  assert.deepEqual(m.conflicting, { message: "cannot make it" });
+});
