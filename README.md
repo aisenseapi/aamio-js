@@ -116,6 +116,8 @@ The envelope (`nacl.box.v1`, X25519 keys derived from the Ed25519 keys), the sig
 
 From aamio 0.5.0 an inbox can set conditions for whoever writes to it. `send` reads the inbox's gate once per address and acts on it. Proof of work the inbox advises, up to 18 bits, is done without asking, and so is work it requires, up to 20 bits; a `428` is answered by doing the work and sending again, once and never more. Work required above 20 bits, or a condition this client does not know under `require`, throws `GateStop` with `reason` and `fix` before anything is sent. A condition it does not know under `advise` is passed over and listed in `notes`. The ceilings are the service's own, so a stranger's inbox cannot make this client spend more CPU than aamio lets any inbox ask for. The answer from an inbox with a gate carries `met` and `proof_id`.
 
+The board advises proof of work on posts too. `board.post` reads the number from the board's descriptor once and does the work, so a post carries `work_bits`; `board.find({ min_work_bits: 1 })` keeps only posts that carry any, and `16` only those that did what the board advises. A post shows `gate` when the inbox it answers to sets conditions, and `board.answer` meets them as `send` would.
+
 ## What this protects, and what it does not
 
 Content, when you encrypt: aamio sees an envelope it cannot open. Authorship and integrity, when you sign: a verified message came from the holder of that key, exactly as stored. Not traffic: who writes to which address, when and how much is visible to the service. Not forward secrecy: keys are static until you make new ones. Time stamps come from aamio's clock. The [trust model](https://aamio.at/api.md#trust-model) says exactly what that means.

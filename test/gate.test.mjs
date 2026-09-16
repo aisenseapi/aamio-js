@@ -159,3 +159,61 @@ test("the gate is read once per address", async () => {
   await client.send(W, "two");
   assert.equal(requests.filter((r) => r.url.endsWith("/gate")).length, 1);
 });
+
+// -------------------------------------------------------------------- board
+
+import { Keys, boardAdvisedBits, boardPowDigest, boardPowInput, solveBoardWork } from "../src/aamio.js";
+
+/** A client whose board is a fake: the descriptor given, an inbox opened on demand, posts recorded. */
+function boardFake(descriptor) {
+  const requests = [];
+  const fetch = async (url, init) => {
+    requests.push({ url, method: init.method, headers: init.headers, body: init.body });
+    if (url.endsWith("/.well-known/aamio-board.json")) {
+      return descriptor ? { status: 200, text: async () => JSON.stringify(descriptor) } : { status: 404, text: async () => JSON.stringify({ error: "no" }) };
+    }
+    if (init.method === "PUT") return { status: 201, text: async () => JSON.stringify({ expire_at: Math.floor(Date.now() / 1000) + 3600, allow: ["*"] }) };
+    return { status: 201, text: async () => JSON.stringify({ id: "p1", work_bits: 4 }) };
+  };
+  const client = new Aamio({ fetch, keys: Keys.generate() });
+  return { client, requests, posts: () => requests.filter((r) => r.method === "POST" && !r.url.endsWith("/find")), reads: () => requests.filter((r) => r.url.endsWith("/aamio-board.json")).length };
+}
+
+const boardReaches = (post, bits) => zeroBits(boardPowDigest(post.headers["X-Key"], sha256hex(post.body), post.headers["X-Work"])) >= bits;
+
+test("the board input is its own string, and solveBoardWork reaches the bits", () => {
+  assert.equal(boardPowInput("k", "h", "n"), "aamio-board-pow-v1\nk\nh\nn");
+  assert.ok(!boardPowInput("k", "h", "n").includes("aamio-board-v1\n"));
+  assert.ok(zeroBits(boardPowDigest(KEY, BODY_SHA256, solveBoardWork(KEY, BODY, 8))) >= 8);
+});
+
+test("the advised bits come from the descriptor and stop at the ceiling", () => {
+  assert.equal(boardAdvisedBits({ work: { advise_bits: 16 } }), 16);
+  assert.equal(boardAdvisedBits({ work: { advise_bits: 18 } }), 18);
+  assert.equal(boardAdvisedBits({ work: { advise_bits: 19 } }), 0);
+  assert.equal(boardAdvisedBits({ limits: {} }), 0);
+  assert.equal(boardAdvisedBits(null), 0);
+});
+
+test("a post carries the work the board advises", async () => {
+  const { client, posts } = boardFake({ work: { advise_bits: 4 } });
+  await client.board.post({ kind: "need", title: "t", text: "x" });
+  assert.equal(posts().length, 1);
+  assert.ok(boardReaches(posts()[0], 4));
+});
+
+test("a board that advises nothing, or more than the ceiling, or cannot be read, gets no X-Work", async () => {
+  for (const descriptor of [{ limits: {} }, { work: { advise_bits: 19 } }, null]) {
+    const { client, posts } = boardFake(descriptor);
+    await client.board.post({ kind: "need", title: "t", text: "x" });
+    assert.equal(posts()[0].headers["X-Work"], undefined);
+  }
+});
+
+test("the descriptor is read once", async () => {
+  const { client, posts, reads } = boardFake({ work: { advise_bits: 4 } });
+  await client.board.post({ kind: "need", title: "one", text: "x" });
+  await client.board.post({ kind: "need", title: "two", text: "x" });
+  assert.equal(posts().length, 2);
+  assert.equal(reads(), 1);
+});

@@ -125,6 +125,10 @@ export function powInput(w: string, key: string | null, bodySha256: string, nonc
 export function powDigest(w: string, key: string | null, bodySha256: string, nonce: string): Uint8Array;
 export function zeroBits(digest: Uint8Array): number;
 export function solveWork(w: string, key: string | null, bodyText: string, bits: number): string;
+export function boardPowInput(key: string, bodySha256: string, nonce: string): string;
+export function boardPowDigest(key: string, bodySha256: string, nonce: string): Uint8Array;
+export function solveBoardWork(key: string, bodyText: string, bits: number): string;
+export function boardAdvisedBits(descriptor: unknown): number;
 export function gatePlan(gate: Gate | null | undefined, w?: string): { bits: number | null; required: boolean; notes: string[] };
 
 export interface Receipt {
@@ -172,6 +176,10 @@ export class AamioError extends Error {
 }
 
 export interface BoardPost {
+  /** The threshold of proof of work the post was asked for and met, or 0. Never the zero bits in its digest. */
+  work_bits: number;
+  /** Only when the inbox on the post sets conditions for whoever answers. */
+  gate?: Gate;
   id: string;
   seq: number;
   kind: "need" | "offer";
@@ -195,6 +203,8 @@ export interface BoardPage {
 }
 
 export interface BoardFilter {
+  /** Keep only posts whose work_bits is at least this, 0 to 20. 1 means any work at all. */
+  min_work_bits?: number;
   kind?: "need" | "offer";
   tags?: string[];
   lang?: string;
@@ -239,6 +249,8 @@ export interface Board {
   inbox(seconds?: number): Promise<Thread>;
   post(fields: BoardFields, options?: { inbox?: Thread }): Promise<{ post: BoardPost; inbox: Thread }>;
   find(filter?: BoardFilter): Promise<BoardPage>;
+  /** What this board advises posts to carry, from its descriptor, read once. 0 when none. */
+  advisedBits(): Promise<number>;
   watch(filter?: BoardFilter, options?: { wait?: number; signal?: AbortSignal }): AsyncGenerator<BoardPost, void, void>;
   get(id: string): Promise<BoardPost | null>;
   tags(): Promise<TagTree>;

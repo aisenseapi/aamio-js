@@ -222,6 +222,29 @@ export function solveWork(w, key, bodyText, bits) {
   }
 }
 
+/** What work on a board post is computed over. Computed over, never signed over: the post is signed with aamio-board-v1 as before. */
+export const boardPowInput = (key, bodySha256, nonce) => "aamio-board-pow-v1\n" + key + "\n" + bodySha256 + "\n" + nonce;
+export const boardPowDigest = (key, bodySha256, nonce) => sha256(boardPowInput(key, bodySha256, nonce));
+
+/** The first nonce whose board digest reaches bits, over the exact text posted. */
+export function solveBoardWork(key, bodyText, bits) {
+  const bodySha256 = sha256hex(bodyText);
+  for (let nonce = 0; ; nonce++) {
+    if (zeroBits(boardPowDigest(key, bodySha256, String(nonce))) >= bits) return String(nonce);
+  }
+}
+
+/**
+ * The work a board advises posts to carry, from its descriptor. 0 when it
+ * advises none, when the descriptor does not say, and when it advises more than
+ * this client does without asking: an advice above the ceiling is passed over.
+ */
+export function boardAdvisedBits(descriptor) {
+  const work = descriptor && typeof descriptor === "object" ? descriptor.work : null;
+  const bits = work && typeof work === "object" ? Number(work.advise_bits) || 0 : 0;
+  return bits > 0 && bits <= POW_ADVISE_MAX_BITS ? bits : 0;
+}
+
 /**
  * What to do about a gate before sending: { bits, required, notes }.
  *
@@ -405,6 +428,18 @@ class Board {
   constructor(client, base = DEFAULT_BOARD) {
     this.client = client;
     this.base = base.replace(/\/+$/, "");
+    this.advised = null;
+  }
+
+  /** What this board advises posts to carry, read from its descriptor once. 0 when none, or when it cannot be read. */
+  async advisedBits() {
+    if (this.advised !== null) return this.advised;
+    try {
+      this.advised = boardAdvisedBits(await this.request("GET", "/.well-known/aamio-board.json", { expect: [200] }));
+    } catch {
+      this.advised = 0;
+    }
+    return this.advised;
   }
 
   get keys() {
@@ -461,10 +496,12 @@ class Board {
     if (lang) fields.lang = lang;
     if (deadline) fields.deadline = deadline;
     const body = JSON.stringify(fields);
-    const post = await this.request("POST", "/", {
-      body,
-      headers: { "X-Key": keys.public, "X-Sig": keys.sign(boardSigningInput(keys.public, body)) },
-    });
+    const headers = { "X-Key": keys.public, "X-Sig": keys.sign(boardSigningInput(keys.public, body)) };
+    // The work the board advises is done without asking, as on an inbox, over
+    // the same bytes that are signed. The number is the board's, never ours.
+    const bits = await this.advisedBits();
+    if (bits) headers["X-Work"] = solveBoardWork(keys.public, body, bits);
+    const post = await this.request("POST", "/", { body, headers });
     return { post, inbox: thread };
   }
 
