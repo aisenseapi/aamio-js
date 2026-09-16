@@ -94,9 +94,38 @@ export interface SendResult {
   at: number;
   sha256: string;
   verified: boolean;
+  sealed?: boolean;
   count: number;
   expire_at: number;
+  /** Only from an inbox with a gate: pow is the threshold of work met, or 0. */
+  met?: { pow?: number };
+  /** Only from an inbox with a gate: the digest of the work this message brought, or null. */
+  proof_id?: string | null;
+  /** What the client passed over although the message went out, such as advice it does not know. */
+  notes?: string[];
 }
+
+/** The conditions an inbox sets for writers, in the canonical form GET /{w}/gate answers. */
+export interface Gate {
+  require?: { pow?: { bits: number; covers: number }; per_key?: number; write_until?: number; [condition: string]: unknown };
+  advise?: { pow?: { bits: number; covers: number }; [condition: string]: unknown };
+  [bucket: string]: unknown;
+}
+
+export const POW_REQUIRE_MAX_BITS: number;
+export const POW_ADVISE_MAX_BITS: number;
+
+/** The inbox asks for something this client cannot or will not do, so nothing was sent. */
+export class GateStop extends Error {
+  reason: string;
+  fix: string;
+}
+
+export function powInput(w: string, key: string | null, bodySha256: string, nonce: string): string;
+export function powDigest(w: string, key: string | null, bodySha256: string, nonce: string): Uint8Array;
+export function zeroBits(digest: Uint8Array): number;
+export function solveWork(w: string, key: string | null, bodyText: string, bits: number): string;
+export function gatePlan(gate: Gate | null | undefined, w?: string): { bits: number | null; required: boolean; notes: string[] };
 
 export interface Receipt {
   schema: string;
@@ -231,6 +260,8 @@ export class Aamio {
   keys: Keys | null;
   readonly board: Board;
   boardInbox: Thread | null;
+  /** Gates read so far, by write address. */
+  readonly gates: Map<string, Gate>;
   readonly presence: {
     publish(record: { w: string; tags?: string[]; ttl?: number }): Promise<PresenceRecord>;
     get(key: string): Promise<PresenceRecord | null>;
@@ -240,6 +271,8 @@ export class Aamio {
   };
   open(options?: { ttl?: number; allow?: string[] }): Promise<Thread>;
   send(w: string, body: string | object, options?: { sign?: boolean; encryptTo?: string | null }): Promise<SendResult>;
+  /** What an inbox asks of writers, read once per address. {} when it has none or it cannot be told. */
+  gate(w: string): Promise<Gate>;
   read(thread: Thread, options?: { after?: number; wait?: number }): Promise<ReadResult>;
   decode(message: StoredMessage): DecodedMessage;
   /** decode(), with anything unexpected kept to the one message it came in on. */

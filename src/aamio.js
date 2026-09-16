@@ -172,6 +172,115 @@ export const threadSigningInput = (w, bodyText) => "aamio-v1\n" + w + "\n" + sha
 export const presenceSigningInput = (key, bodyText) => "aamio-presence-v1\n" + key + "\n" + sha256hex(bodyText);
 export const presenceDeleteSigningInput = (key, bodyText) => "aamio-presence-delete-v1\n" + key + "\n" + sha256hex(bodyText);
 
+// ----------------------------------------------------------------------- gate
+
+// From aamio 0.5.0 an inbox can set conditions for whoever writes to it. The
+// ceilings are the service's own, 20 required and 18 advised: an inbox run by a
+// stranger can never make this client spend more CPU than aamio lets any inbox
+// ask for, and aamio can never advise something an up to date client skips.
+export const POW_REQUIRE_MAX_BITS = 20;
+export const POW_ADVISE_MAX_BITS = 18;
+
+// What this client knows how to read. per_key and write_until are limits the
+// service enforces; a writer meets them by not breaking them.
+const GATE_KNOWN = { require: ["per_key", "pow", "write_until"], advise: ["pow"] };
+
+/** The inbox asks for something this client cannot or will not do, so nothing was sent. */
+export class GateStop extends Error {
+  constructor(reason, fix) {
+    super(reason);
+    this.name = "GateStop";
+    this.reason = reason;
+    this.fix = fix;
+  }
+}
+
+/** What work is computed over. key is the X-Key as sent, or empty for an unsigned message. */
+export const powInput = (w, key, bodySha256, nonce) => "aamio-pow-v1\n" + w + "\n" + (key || "") + "\n" + bodySha256 + "\n" + nonce;
+
+/** The raw 32 byte digest of the work. Its lowercase hex is the proof_id. */
+export const powDigest = (w, key, bodySha256, nonce) => sha256(powInput(w, key, bodySha256, nonce));
+
+/** Leading zero bits, counted from the most significant bit of the first byte. */
+export function zeroBits(digest) {
+  let bits = 0;
+  for (const byte of digest) {
+    if (byte === 0) {
+      bits += 8;
+      continue;
+    }
+    return bits + Math.clz32(byte) - 24;
+  }
+  return bits;
+}
+
+/** The first nonce, counting up from 0, whose digest reaches bits, over the exact text that is sent. */
+export function solveWork(w, key, bodyText, bits) {
+  const bodySha256 = sha256hex(bodyText);
+  for (let nonce = 0; ; nonce++) {
+    if (zeroBits(powDigest(w, key, bodySha256, String(nonce))) >= bits) return String(nonce);
+  }
+}
+
+/**
+ * What to do about a gate before sending: { bits, required, notes }.
+ *
+ * Advised work up to 18 bits and required work up to 20 are done. A requirement
+ * above that, or a condition this client does not know under require, throws
+ * GateStop, since it cannot meet what it does not understand. A condition it
+ * does not know under advise is passed over, and noted.
+ */
+export function gatePlan(gate, w) {
+  const where = w ? `GET https://aamio.at/${w}/gate` : "GET /{w}/gate on the inbox";
+  const notes = [];
+  gate = gate && typeof gate === "object" && !Array.isArray(gate) ? gate : {};
+
+  for (const [bucket, conditions] of Object.entries(gate)) {
+    if (!GATE_KNOWN[bucket]) {
+      throw new GateStop(
+        `This inbox's gate has a part called ${bucket} that this client does not know, so it cannot tell whether a write would be refused, and sent nothing.`,
+        `Update the aamio client, which may know it. ${where} shows the whole gate.`,
+      );
+    }
+    if (!conditions || typeof conditions !== "object") continue;
+    for (const name of Object.keys(conditions)) {
+      if (GATE_KNOWN[bucket].includes(name)) continue;
+      if (bucket === "require") {
+        throw new GateStop(
+          `This inbox requires ${name}, a condition this client does not know how to meet, so nothing was sent.`,
+          `Update the aamio client, which may know it, or reach the owner another way. ${where} shows the whole gate.`,
+        );
+      }
+      notes.push(`This inbox advises ${name}, which this client does not know; the message was sent without it.`);
+    }
+  }
+
+  const required = gate.require && gate.require.pow;
+  const advised = gate.advise && gate.advise.pow;
+
+  if (required && typeof required === "object") {
+    const bits = Number(required.bits) || 0;
+    if (bits > POW_REQUIRE_MAX_BITS) {
+      throw new GateStop(
+        `This inbox requires proof of work of ${bits} bits, and this client computes at most ${POW_REQUIRE_MAX_BITS}, the most aamio lets any inbox require. Nothing was sent.`,
+        "The inbox asks for more than the service allows, so no client will meet it. Reach the owner another way.",
+      );
+    }
+    return { bits: bits > 0 ? bits : null, required: true, notes };
+  }
+
+  if (advised && typeof advised === "object") {
+    const bits = Number(advised.bits) || 0;
+    if (bits > POW_ADVISE_MAX_BITS) {
+      notes.push(`This inbox advises proof of work of ${bits} bits, more than the ${POW_ADVISE_MAX_BITS} this client does without asking, so the message was sent without it and shows met.pow 0.`);
+      return { bits: null, required: false, notes };
+    }
+    return { bits: bits > 0 ? bits : null, required: false, notes };
+  }
+
+  return { bits: null, required: false, notes };
+}
+
 export function verify(key, text, signature) {
   try {
     return nacl.sign.detached.verify(utf8(text), unb64url(signature), unb64url(key));
@@ -535,6 +644,7 @@ export class Aamio {
     this.presence = new Presence(this);
     this.board = new Board(this, board);
     this.boardInbox = null;
+    this.gates = new Map();
   }
 
   needKeys(what) {
@@ -595,7 +705,51 @@ export class Aamio {
       headers["X-Key"] = keys.public;
       headers["X-Sig"] = keys.sign(threadSigningInput(w, text));
     }
-    return this.request("POST", "/" + w, { body: text, headers });
+
+    // The inbox's gate is read before anything is sent. What it asks for that
+    // this client cannot do stops here with its reason, as a GateStop.
+    const key = headers["X-Key"] || "";
+    const advice = gatePlan(await this.gate(w), w);
+    let notes = advice.notes;
+    if (advice.bits) headers["X-Work"] = solveWork(w, key, text, advice.bits);
+
+    let result;
+    try {
+      result = await this.request("POST", "/" + w, { body: text, headers });
+    } catch (error) {
+      // One more attempt after a 428, never two: each costs a place in the rate
+      // window. Work already done and refused anyway is not done again, since
+      // the same bytes give the same nonce and the same refusal.
+      const gate = error instanceof AamioError && error.status === 428 && error.body && typeof error.body.gate === "object" ? error.body.gate : null;
+      if (!gate) throw error;
+      this.gates.set(w, gate);
+      const asked = gatePlan(gate, w);
+      if (!asked.bits || asked.bits === advice.bits) throw error;
+      headers["X-Work"] = solveWork(w, key, text, asked.bits);
+      notes = [...notes, ...asked.notes.filter((note) => !notes.includes(note))];
+      result = await this.request("POST", "/" + w, { body: text, headers });
+    }
+    return notes.length ? { ...result, notes } : result;
+  }
+
+  /**
+   * What an inbox asks of writers, read once per address and kept: a gate never
+   * changes while its thread lives. {} when the inbox has none, and also when
+   * that cannot be told right now; a 428 then carries the gate and is answered once.
+   */
+  async gate(w) {
+    if (this.gates.has(w)) return this.gates.get(w);
+    try {
+      const gate = await this.request("GET", "/" + w + "/gate", { expect: [200] });
+      if (gate && typeof gate === "object" && !Array.isArray(gate)) {
+        this.gates.set(w, gate);
+        return gate;
+      }
+    } catch {
+      // An inbox nobody has opened yet, a service older than gate, or no answer
+      // at all: go ahead without work, and let a 428 say what was wanted.
+    }
+    return {};
   }
 
   /** Read a thread you own. after: return messages with seq above it. wait: seconds, up to 25. */
