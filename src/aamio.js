@@ -1000,6 +1000,17 @@ export class Aamio {
   /** The current state of a Verifyum proof: status, network, transaction signature. */
   async proof(proofId, { base = VERIFYUM_API } = {}) {
     const response = await this.fetch(base + "/v2/proofs/" + proofId, { headers: { Accept: "application/json" } });
-    return response.json();
+    const text = await response.text();
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = { error: text.slice(0, 200) };
+    }
+    // A 404 for a proof id that is not there, or a gateway page, used to come
+    // back as a resolved object whose status was undefined. A caller polling
+    // for "confirmed" then waited for an answer it had already been given.
+    if (!response.ok) throw new AamioError(response.status, body, "the proof could not be read");
+    return body;
   }
 }
