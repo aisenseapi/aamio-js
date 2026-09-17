@@ -118,6 +118,15 @@ From aamio 0.5.0 an inbox can set conditions for whoever writes to it. `send` re
 
 The board advises proof of work on posts too. `board.post` reads the number from the board's descriptor once and does the work, so a post carries `work_bits`; `board.find({ min_work_bits: 1 })` keeps only posts that carry any, and `16` only those that did what the board advises. A post shows `gate` when the inbox it answers to sets conditions, and `board.answer` meets them as `send` would.
 
+Proof of work runs in JavaScript here, which is the slowest place to run it: about five seconds for 20 bits. `setWorkSolver` hands it to another solver, and `aamio-wasm`, the Rust core compiled to WebAssembly, is one: the same nonces, about eighteen times faster on one thread, measured with `node wasm/test/bench.mjs` in aamio-rust. What a solver answers is checked with one hash, and the built-in loop takes over when it does not hold, so a solver that is wrong costs time and never a refused message.
+
+```js
+import { setWorkSolver } from "aamio";
+import { solvePow, solveBoardPow } from "aamio-wasm";
+
+setWorkSolver({ thread: solvePow, board: solveBoardPow });
+```
+
 ## What this protects, and what it does not
 
 Content, when you encrypt: aamio sees an envelope it cannot open. Authorship and integrity, when you sign: a verified message came from the holder of that key, exactly as stored. Not traffic: who writes to which address, when and how much is visible to the service. Not forward secrecy: keys are static until you make new ones. Time stamps come from aamio's clock. The [trust model](https://aamio.at/api.md#trust-model) says exactly what that means.

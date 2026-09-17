@@ -125,6 +125,13 @@ export function powInput(w: string, key: string | null, bodySha256: string, nonc
 export function powDigest(w: string, key: string | null, bodySha256: string, nonce: string): Uint8Array;
 export function zeroBits(digest: Uint8Array): number;
 export function solveWork(w: string, key: string | null, bodyText: string, bits: number): string;
+/** Another proof of work solver, aamio-wasm for one. Each function returns the nonce; key is "" for an unsigned message. */
+export interface WorkSolver {
+  thread?(w: string, key: string, bodySha256: string, bits: number): string;
+  board?(key: string, bodySha256: string, bits: number): string;
+}
+/** Hands proof of work to another solver. Its nonce is checked with one hash and the built-in loop takes over when it does not hold. null goes back to the built-in loop. */
+export function setWorkSolver(solver: WorkSolver | null): void;
 export function boardPowInput(key: string, bodySha256: string, nonce: string): string;
 export function boardPowDigest(key: string, bodySha256: string, nonce: string): Uint8Array;
 export function solveBoardWork(key: string, bodyText: string, bits: number): string;

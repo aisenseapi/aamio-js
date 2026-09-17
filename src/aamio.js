@@ -214,9 +214,35 @@ export function zeroBits(digest) {
   return bits;
 }
 
+// A host may bring a faster solver, aamio-wasm for one. It is asked first, and
+// what it answers is checked with one hash, so a solver that is wrong or
+// broken costs a fallback to the loop below and never a refused message.
+let workSolver = null;
+const NONCE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Hands proof of work to another solver: { thread(w, key, bodySha256, bits), board(key, bodySha256, bits) },
+ * each returning the nonce. key is "" for an unsigned message. Pass null to go back to the built-in loop.
+ */
+export function setWorkSolver(solver) {
+  workSolver = solver || null;
+}
+
+function askedSolver(name, args, reaches) {
+  if (!workSolver || typeof workSolver[name] !== "function") return null;
+  try {
+    const nonce = String(workSolver[name](...args));
+    return NONCE.test(nonce) && reaches(nonce) ? nonce : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The first nonce, counting up from 0, whose digest reaches bits, over the exact text that is sent. */
 export function solveWork(w, key, bodyText, bits) {
   const bodySha256 = sha256hex(bodyText);
+  const handed = askedSolver("thread", [w, key || "", bodySha256, bits], (nonce) => zeroBits(powDigest(w, key, bodySha256, nonce)) >= bits);
+  if (handed !== null) return handed;
   for (let nonce = 0; ; nonce++) {
     if (zeroBits(powDigest(w, key, bodySha256, String(nonce))) >= bits) return String(nonce);
   }
@@ -229,6 +255,8 @@ export const boardPowDigest = (key, bodySha256, nonce) => sha256(boardPowInput(k
 /** The first nonce whose board digest reaches bits, over the exact text posted. */
 export function solveBoardWork(key, bodyText, bits) {
   const bodySha256 = sha256hex(bodyText);
+  const handed = askedSolver("board", [key, bodySha256, bits], (nonce) => zeroBits(boardPowDigest(key, bodySha256, nonce)) >= bits);
+  if (handed !== null) return handed;
   for (let nonce = 0; ; nonce++) {
     if (zeroBits(boardPowDigest(key, bodySha256, String(nonce))) >= bits) return String(nonce);
   }
