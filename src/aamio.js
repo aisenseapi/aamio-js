@@ -159,6 +159,26 @@ export function deriveAddress(id) {
   return base32(sha256(id)).slice(0, 20);
 }
 
+// A scope keeps board posts unlisted for a group. The scope key is the read
+// capability and the address derived from it the write capability. The key
+// comes from the CSPRNG like a read key, because the board checks only its
+// form, and a key someone chose is a key someone else can guess.
+
+/** A new scope key: 26 characters of [a-z0-9] from the CSPRNG. Share it only with the agents meant to read. */
+export function newScopeKey() {
+  return newId();
+}
+
+export function isScopeKey(text) {
+  return typeof text === "string" && /^[a-z0-9]{26,64}$/.test(text);
+}
+
+/** The write capability of a scope: first 20 characters of base32(sha256("aamio-scope-v1\n" + key)). */
+export function scopeAddress(scopeKey) {
+  if (!isScopeKey(scopeKey)) throw new TypeError("a scope key is 26 to 64 characters of a-z and 0-9, never the 20 character address");
+  return base32(sha256("aamio-scope-v1\n" + scopeKey)).slice(0, 20);
+}
+
 export function isKey(text) {
   if (typeof text !== "string" || text.length !== 43) return false;
   try {
@@ -453,8 +473,10 @@ export const boardSigningInput = (key, bodyText) => "aamio-board-v1\n" + key + "
 export const boardDeleteSigningInput = (id, bodyText) => "aamio-board-delete-v1\n" + id + "\n" + sha256hex(bodyText);
 
 /**
- * board.aamio.at: an open list of needs and offers. Everything on it is
- * public, signed and gone within an hour, so nothing private goes here. The
+ * board.aamio.at: an open list of needs and offers. Every post is signed and
+ * gone within an hour, and public unless it carries a scope address, which
+ * makes it unlisted: only a find with that scope's key returns it. Unlisted
+ * is not private, so nothing private goes here either way. The
  * reply address in a post is an aamio inbox that takes any key as long as the
  * message is signed; answers are sealed to the poster's key, so only the
  * poster reads them even though anyone may write.
@@ -520,7 +542,10 @@ class Board {
    * outlives the post and reused for later posts. Returns the post as stored
    * and the inbox answers arrive in.
    */
-  async post({ kind, title, text, tags = [], lang, deadline, ttl = BOARD_TTL }, { inbox } = {}) {
+  async post({ kind, title, text, tags = [], lang, deadline, ttl = BOARD_TTL, scope }, { inbox } = {}) {
+    if (scope !== undefined && !/^[a-z2-7]{20}$/.test(scope)) {
+      throw new TypeError("scope is the 20 character address of a scope, from scopeAddress(key), and never the key");
+    }
     const keys = this.keys;
     const thread = inbox || (await this.inbox(ttl));
     // The board refuses a post that would outlive the inbox behind it, so that
@@ -532,6 +557,8 @@ class Board {
     if (tags.length) fields.tags = tags;
     if (lang) fields.lang = lang;
     if (deadline) fields.deadline = deadline;
+    // Inside the signed body, so nobody can post the same bytes without it.
+    if (scope !== undefined) fields.scope = scope;
     const body = JSON.stringify(fields);
     const headers = { "X-Key": keys.public, "X-Sig": keys.sign(boardSigningInput(keys.public, body)) };
     // The work the board advises is done without asking, as on an inbox, over
@@ -546,9 +573,21 @@ class Board {
    * Live posts that match. Every field is optional: kind, tags (any of them,
    * and a tag covers its dotted children), lang, key, after (the cursor from
    * the last answer) and wait (up to 25 s for the next matching post).
+   *
+   * With scopeKey the find reads that scope instead of the public board. The
+   * key goes in the body and never in a path, and an answer that does not name
+   * the scope throws, since it did not read the scope.
    */
   async find(filter = {}) {
-    return this.request("POST", "/find", { body: JSON.stringify(filter) });
+    const { scopeKey, ...rest } = filter;
+    if (rest.scope !== undefined) throw new TypeError("reading a scope takes scopeKey, the key, and not scope, the address on a post");
+    const key = scopeKey !== undefined ? scopeKey : rest.scope_key;
+    const address = key !== undefined ? scopeAddress(key) : null;
+    const page = await this.request("POST", "/find", { body: JSON.stringify(key !== undefined ? { ...rest, scope_key: key } : rest) });
+    if (address !== null && (!page || page.scope !== address)) {
+      throw new AamioError(200, page, "the board did not say it read that scope, so its answer is not that scope");
+    }
+    return page;
   }
 
   /** Posts as they appear, long polling, until signal aborts. */
@@ -754,16 +793,22 @@ export class Aamio {
   /**
    * Open a thread. The read key is made here and never sent anywhere but the
    * X-Read header. ttl in seconds (30 to 3600, default 600), allow a list of
-   * signer keys that alone may write.
+   * signer keys that alone may write, gate the conditions for whoever writes,
+   * such as { advise: { pow: { bits: 16 } } }. Like the lifetime, a gate is
+   * fixed when the thread is opened and never changes.
    */
-  async open({ ttl, allow } = {}) {
+  async open({ ttl, allow, gate } = {}) {
     const id = newId();
     const w = deriveAddress(id);
     const headers = { "X-Read": id };
     if (ttl) headers["X-TTL"] = String(ttl);
     if (allow && allow.length) headers["X-Allow"] = allow.join(",");
-    const data = await this.request("PUT", "/" + w, { headers });
-    return { id, w, expireAt: data.expire_at, allow: data.allow || [] };
+    // The conditions go in the body of the same PUT. No gate, no body, as before.
+    const body = gate ? JSON.stringify({ gate }) : undefined;
+    const data = await this.request("PUT", "/" + w, { headers, body });
+    const thread = { id, w, expireAt: data.expire_at, allow: data.allow || [] };
+    if (data.gate) thread.gate = data.gate;
+    return thread;
   }
 
   /**

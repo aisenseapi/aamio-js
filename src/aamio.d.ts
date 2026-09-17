@@ -19,6 +19,11 @@ export function sha256hex(data: string | Uint8Array): string;
 export function newId(): string;
 /** The public write address of a read key: first 20 characters of base32(sha256(id)). */
 export function deriveAddress(id: string): string;
+/** A new scope key, the read capability of a scope: 26 characters of [a-z0-9] from the CSPRNG. */
+export function newScopeKey(): string;
+export function isScopeKey(text: unknown): boolean;
+/** The write capability of a scope: first 20 characters of base32(sha256("aamio-scope-v1\n" + key)). Throws on anything but a key. */
+export function scopeAddress(scopeKey: string): string;
 export function isKey(text: unknown): boolean;
 export function keyHash(key: string): string;
 export function hashPrefix(key: string, length?: number): string;
@@ -52,6 +57,8 @@ export interface Thread {
   w: string;
   expireAt?: number;
   allow?: string[];
+  /** Only on a thread opened with a gate: the conditions as the service stored them. */
+  gate?: Gate;
 }
 
 export interface StoredMessage {
@@ -200,6 +207,8 @@ export interface BoardPost {
   at: number;
   expire_at: number;
   sha256: string;
+  /** Only on a post in a scope, and only ever seen by a find with that scope's key. */
+  scope?: string;
 }
 
 export interface BoardPage {
@@ -207,6 +216,8 @@ export interface BoardPage {
   next: number;
   posts: BoardPost[];
   waited?: number;
+  /** Only when the find read a scope: the address it read. */
+  scope?: string;
 }
 
 export interface BoardFilter {
@@ -218,6 +229,8 @@ export interface BoardFilter {
   key?: string;
   after?: number;
   wait?: number;
+  /** Read this scope instead of the public board. The key, sent in the body, never the address. */
+  scopeKey?: string;
 }
 
 export interface BoardFields {
@@ -228,6 +241,8 @@ export interface BoardFields {
   lang?: string;
   deadline?: string;
   ttl?: number;
+  /** The 20 character address of a scope, from scopeAddress(key). The post is then unlisted. */
+  scope?: string;
 }
 
 export interface TagBranch {
@@ -288,7 +303,7 @@ export class Aamio {
     find(key: string): Promise<string | null>;
     withdraw(): Promise<unknown>;
   };
-  open(options?: { ttl?: number; allow?: string[] }): Promise<Thread>;
+  open(options?: { ttl?: number; allow?: string[]; gate?: Gate }): Promise<Thread>;
   send(w: string, body: string | object, options?: { sign?: boolean; encryptTo?: string | null }): Promise<SendResult>;
   /** What an inbox asks of writers, read once per address. {} when it has none or it cannot be told. */
   gate(w: string): Promise<Gate>;

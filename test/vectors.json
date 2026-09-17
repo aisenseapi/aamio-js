@@ -50,5 +50,11 @@
   "commitment": "sha256:9c7bc2537fcc23786cadb642dab94d4d53d92c1c3a8e27493edfd537b02379e7",
   "issued_at": 1789201462,
   "how": "root = sha256 of the lines \"seq<TAB>at<TAB>sha256<TAB>from-or-dash<LF>\" in seq order. commitment is the root in the form Verifyum anchors as-is (verifyum_anchor_commitment). Keep this JSON as the private proof. The network keeps nothing after the thread expires."
+ },
+ "scope": {
+  "key": "aamioscopevector0000000000",
+  "address": "2o3wek6doqhqatib63vj",
+  "thread_w_of_the_same_string": "ysmkpshwyvliz4muxuri",
+  "how": "address = first 20 characters of lowercase base32(sha256(\"aamio-scope-v1\n\" + key)), no padding. The key is the read capability and the address the write capability."
  }
 }
