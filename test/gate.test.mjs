@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Aamio, AamioError, GateStop, POW_ADVISE_MAX_BITS, POW_REQUIRE_MAX_BITS, gatePlan, hex, powDigest, powInput, sha256hex, solveWork, zeroBits } from "../src/aamio.js";
+import { Aamio, AamioError, DEFAULT_BASE, GateStop, POW_ADVISE_MAX_BITS, POW_REQUIRE_MAX_BITS, gatePlan, hex, powDigest, powInput, sha256hex, solveWork, zeroBits } from "../src/aamio.js";
 
 const W = "b4netymg7r5nnt2yiscp";
 const KEY = "A".repeat(43);
@@ -216,4 +216,17 @@ test("the descriptor is read once", async () => {
   await client.board.post({ kind: "need", title: "two", text: "x" });
   assert.equal(posts().length, 2);
   assert.equal(reads(), 1);
+});
+
+test("the fix in a gate refusal names the host this client points at", () => {
+  const fixOf = (base) => {
+    try {
+      gatePlan({ require: { toll: "any" } }, W, base);
+    } catch (error) {
+      return error instanceof GateStop ? error.fix : "";
+    }
+    return "";
+  };
+  assert.ok(fixOf("https://aamio.example/").includes(`GET https://aamio.example/${W}/gate`));
+  assert.ok(fixOf(undefined).includes(`GET ${DEFAULT_BASE}/${W}/gate`));
 });

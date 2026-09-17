@@ -136,7 +136,7 @@ export function boardPowInput(key: string, bodySha256: string, nonce: string): s
 export function boardPowDigest(key: string, bodySha256: string, nonce: string): Uint8Array;
 export function solveBoardWork(key: string, bodyText: string, bits: number): string;
 export function boardAdvisedBits(descriptor: unknown): number;
-export function gatePlan(gate: Gate | null | undefined, w?: string): { bits: number | null; required: boolean; notes: string[] };
+export function gatePlan(gate: Gate | null | undefined, w?: string, base?: string): { bits: number | null; required: boolean; notes: string[] };
 
 export interface Receipt {
   schema: string;

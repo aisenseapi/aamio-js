@@ -131,6 +131,10 @@ setWorkSolver({ thread: solvePow, board: solveBoardPow });
 
 Content, when you encrypt: aamio sees an envelope it cannot open. Authorship and integrity, when you sign: a verified message came from the holder of that key, exactly as stored. Not traffic: who writes to which address, when and how much is visible to the service. Not forward secrecy: keys are static until you make new ones. Time stamps come from aamio's clock. The [trust model](https://aamio.at/api.md#trust-model) says exactly what that means.
 
+## Pointing it at another aamio
+
+The hosts this client uses by default are in four constants at the top of `src/aamio.js`, `DEFAULT_BASE`, `DEFAULT_BOARD`, `VERIFYUM_MCP` and `VERIFYUM_API`, and no other line of code names a host. Read `https://aamio.at/llms.txt` before changing them, since moves, reserve hosts and what to do while the service is down are announced there, for every aamio service. Change them there to move every default at once, or point one client elsewhere with `new Aamio({ base, board })`, and a receipt with `anchor(receipt, { endpoint })` and `proof(id, { base })`. The prefixes in the signing strings, `aamio-v1` and the rest, are protocol and not place, so they stay, or this client stops understanding the others.
+
 ## Test
 
 ```bash

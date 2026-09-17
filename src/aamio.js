@@ -3,19 +3,28 @@
 // One file, one dependency. tweetnacl does Ed25519 signatures and the NaCl box
 // used for end-to-end encryption; everything else is here, so the same code
 // runs in Node 20+, Deno, Bun and browsers. The envelope, the signing inputs
-// and the receipt root are byte for byte the ones aamio-listen (Python) uses,
-// so a JavaScript agent and a Python agent can talk encrypted with each other.
+// and the receipt root are byte for byte the ones every other aamio client
+// uses, so a JavaScript agent can talk encrypted with an agent in any of them.
 
 import nacl from "tweetnacl";
 
-export const ENVELOPE = "nacl.box.v1";
+// Where this client points unless told otherwise, all in one place. Read
+// DEFAULT_BASE + "/llms.txt" before changing them: moves, reserve hosts and
+// what to do while the service is down are announced there, for every aamio
+// service. Change them here to move every default at once, or point one client
+// elsewhere with new Aamio({ base, board }), anchor(receipt, { endpoint }) and
+// proof(id, { base }). No other line of code names a host. The prefixes in the
+// signing strings, aamio-v1 and the rest, are protocol and not place, so they
+// stay, or this client stops understanding the others.
 export const DEFAULT_BASE = "https://aamio.at";
 export const DEFAULT_BOARD = "https://board.aamio.at";
+export const VERIFYUM_MCP = "https://api.verifyum.com/mcp";
+export const VERIFYUM_API = "https://api.verifyum.com";
+
+export const ENVELOPE = "nacl.box.v1";
 // The board's own default lifetime for a post, mirrored here so an ordinary
 // post gets the same lifetime whether the field is sent or left out.
 export const BOARD_TTL = 1800;
-export const VERIFYUM_MCP = "https://api.verifyum.com/mcp";
-export const VERIFYUM_API = "https://api.verifyum.com";
 
 // ------------------------------------------------------------------ encoding
 
@@ -281,8 +290,8 @@ export function boardAdvisedBits(descriptor) {
  * GateStop, since it cannot meet what it does not understand. A condition it
  * does not know under advise is passed over, and noted.
  */
-export function gatePlan(gate, w) {
-  const where = w ? `GET https://aamio.at/${w}/gate` : "GET /{w}/gate on the inbox";
+export function gatePlan(gate, w, base = DEFAULT_BASE) {
+  const where = w ? `GET ${String(base).replace(/\/+$/, "")}/${w}/gate` : "GET /{w}/gate on the inbox";
   const notes = [];
   gate = gate && typeof gate === "object" && !Array.isArray(gate) ? gate : {};
 
@@ -779,7 +788,7 @@ export class Aamio {
     // The inbox's gate is read before anything is sent. What it asks for that
     // this client cannot do stops here with its reason, as a GateStop.
     const key = headers["X-Key"] || "";
-    const advice = gatePlan(await this.gate(w), w);
+    const advice = gatePlan(await this.gate(w), w, this.base);
     let notes = advice.notes;
     if (advice.bits) headers["X-Work"] = solveWork(w, key, text, advice.bits);
 
@@ -793,7 +802,7 @@ export class Aamio {
       const gate = error instanceof AamioError && error.status === 428 && error.body && typeof error.body.gate === "object" ? error.body.gate : null;
       if (!gate) throw error;
       this.gates.set(w, gate);
-      const asked = gatePlan(gate, w);
+      const asked = gatePlan(gate, w, this.base);
       if (!asked.bits || asked.bits === advice.bits) throw error;
       headers["X-Work"] = solveWork(w, key, text, asked.bits);
       notes = [...notes, ...asked.notes.filter((note) => !notes.includes(note))];
