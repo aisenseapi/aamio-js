@@ -705,7 +705,12 @@ export class Aamio {
   constructor({ base = DEFAULT_BASE, board = DEFAULT_BOARD, keys = null, fetch = globalThis.fetch } = {}) {
     this.base = base.replace(/\/+$/, "");
     this.keys = keys;
-    this.fetch = fetch;
+    // Called as this.fetch(...), a fetch gets this client as its receiver, and
+    // the fetch of a browser or a Cloudflare Worker refuses any receiver but
+    // the global object with "Illegal invocation". Node does not check, which
+    // is how every call from a browser failed from 0.1.0 until 0.4.1 while
+    // every test here passed. The wrapper calls it with no receiver at all.
+    this.fetch = (input, init) => fetch(input, init);
     this.presence = new Presence(this);
     this.board = new Board(this, board);
     this.boardInbox = null;
