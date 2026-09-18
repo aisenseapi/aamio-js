@@ -49,7 +49,7 @@ test("solveWork gives the first nonce that reaches the bits", () => {
 });
 
 test("the ceilings are the service's", () => {
-  assert.deepEqual([POW_REQUIRE_MAX_BITS, POW_ADVISE_MAX_BITS], [20, 18]);
+  assert.deepEqual([POW_REQUIRE_MAX_BITS, POW_ADVISE_MAX_BITS], [32, 18]);
 });
 
 // --------------------------------------------------------------------- plan
@@ -61,11 +61,13 @@ test("no gate asks for nothing", () => {
 
 test("advised work at the ceiling is done without asking, and required work at its ceiling is done", () => {
   assert.deepEqual(gatePlan({ advise: { pow: { bits: 18, covers: 1 } } }), { bits: 18, required: false, notes: [] });
-  assert.deepEqual(gatePlan({ require: { pow: { bits: 20, covers: 1 } } }), { bits: 20, required: true, notes: [] });
+  const required = gatePlan({ require: { pow: { bits: 32, covers: 1 } } });
+  assert.deepEqual([required.bits, required.required, required.notes], [32, true, []]);
+  assert.ok(required.expectedSeconds > 0);
 });
 
 test("a requirement over the ceiling stops, and says why", () => {
-  assert.throws(() => gatePlan({ require: { pow: { bits: 21, covers: 1 } } }), (error) => error instanceof GateStop && error.reason.includes("21") && error.reason.includes("20") && Boolean(error.fix));
+  assert.throws(() => gatePlan({ require: { pow: { bits: 33, covers: 1 } } }), (error) => error instanceof GateStop && error.reason.includes("33") && error.reason.includes("32") && Boolean(error.fix));
 });
 
 test("advice over the ceiling is passed over and mentioned", () => {

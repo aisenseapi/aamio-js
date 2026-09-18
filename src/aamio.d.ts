@@ -131,7 +131,13 @@ export class GateStop extends Error {
 export function powInput(w: string, key: string | null, bodySha256: string, nonce: string): string;
 export function powDigest(w: string, key: string | null, bodySha256: string, nonce: string): Uint8Array;
 export function zeroBits(digest: Uint8Array): number;
-export function solveWork(w: string, key: string | null, bodyText: string, bits: number): string;
+/** The nonce, or null when deadline, a Date.now() value, passes first. */
+export function solveWork(w: string, key: string | null, bodyText: string, bits: number, deadline?: number | null): string | null;
+/** Attempts a second the work runs at here, with whichever solver does it, measured once. */
+export function workRate(): number;
+/** How long bits of work takes here on average. */
+export function expectedSeconds(bits: number): number;
+export function describeSeconds(seconds: number): string;
 /** Another proof of work solver, aamio-wasm for one. Each function returns the nonce; key is "" for an unsigned message. */
 export interface WorkSolver {
   thread?(w: string, key: string, bodySha256: string, bits: number): string;
@@ -143,7 +149,8 @@ export function boardPowInput(key: string, bodySha256: string, nonce: string): s
 export function boardPowDigest(key: string, bodySha256: string, nonce: string): Uint8Array;
 export function solveBoardWork(key: string, bodyText: string, bits: number): string;
 export function boardAdvisedBits(descriptor: unknown): number;
-export function gatePlan(gate: Gate | null | undefined, w?: string, base?: string): { bits: number | null; required: boolean; notes: string[] };
+/** secondsLeft is how long the inbox still takes writes; work that would not be done by then throws GateStop before it starts. */
+export function gatePlan(gate: Gate | null | undefined, w?: string, base?: string, secondsLeft?: number | null): { bits: number | null; required: boolean; notes: string[]; expectedSeconds?: number };
 
 export interface Receipt {
   schema: string;
@@ -307,6 +314,12 @@ export class Aamio {
   send(w: string, body: string | object, options?: { sign?: boolean; encryptTo?: string | null }): Promise<SendResult>;
   /** What an inbox asks of writers, read once per address. {} when it has none or it cannot be told. */
   gate(w: string): Promise<Gate>;
+  /** How long w still takes writes, counted down from X-Seconds-Left on its gate, or null when the gate did not say. */
+  secondsLeft(w: string): number | null;
+  /** The plan for w's gate, read again once before a no that rests on a gate read earlier. */
+  planFor(w: string): Promise<{ bits: number | null; required: boolean; notes: string[]; expectedSeconds?: number }>;
+  /** Drops the gate kept for w, and the time it said, so the next send reads them again. */
+  forgetGate(w: string): void;
   read(thread: Thread, options?: { after?: number; wait?: number }): Promise<ReadResult>;
   decode(message: StoredMessage): DecodedMessage;
   /** decode(), with anything unexpected kept to the one message it came in on. */

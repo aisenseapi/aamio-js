@@ -204,11 +204,16 @@ export const presenceDeleteSigningInput = (key, bodyText) => "aamio-presence-del
 // ----------------------------------------------------------------------- gate
 
 // From aamio 0.5.0 an inbox can set conditions for whoever writes to it. The
-// ceilings are the service's own, 20 required and 18 advised: an inbox run by a
+// ceilings are the service's own, 32 required and 18 advised: an inbox run by a
 // stranger can never make this client spend more CPU than aamio lets any inbox
 // ask for, and aamio can never advise something an up to date client skips.
-export const POW_REQUIRE_MAX_BITS = 20;
+// 32 bits is for an inbox that means to meet only writers with real compute,
+// and takes this client hours, so the plan weighs the work against the time
+// the inbox has left and says no before it starts.
+export const POW_REQUIRE_MAX_BITS = 32;
 export const POW_ADVISE_MAX_BITS = 18;
+// Below this the work is a second or so, and not worth timing first.
+const ESTIMATE_FROM_BITS = 17;
 
 // What this client knows how to read. per_key and write_until are limits the
 // service enforces; a writer meets them by not breaking them.
@@ -255,6 +260,41 @@ const NONCE = /^[A-Za-z0-9_-]{1,64}$/;
  */
 export function setWorkSolver(solver) {
   workSolver = solver || null;
+  measuredRate = null;
+}
+
+// Attempts a second on this machine, with the solver that will do the work,
+// measured once and kept. The estimate before long work is only as good as
+// this number, and a handed solver can be twenty times the built-in loop.
+let measuredRate = null;
+
+/** Attempts a second the work runs at here, with whichever solver does it. */
+export function workRate() {
+  if (measuredRate !== null) return measuredRate;
+  const bodySha256 = "0".repeat(64);
+  const start = performance.now();
+  let attempts = 0;
+  if (workSolver && typeof workSolver.thread === "function") {
+    // Sixteen searches at 12 bits: about 65 thousand attempts on average.
+    for (let run = 0; run < 16; run++) askedSolver("thread", ["c".repeat(20), "calibration" + run, bodySha256, 12], () => true);
+    attempts = 16 * 4096;
+  } else {
+    while (performance.now() - start < 250) {
+      for (let i = 0; i < 4096; i++, attempts++) zeroBits(powDigest("c".repeat(20), "calibration", bodySha256, String(attempts)));
+    }
+  }
+  measuredRate = attempts / Math.max(0.001, (performance.now() - start) / 1000);
+  return measuredRate;
+}
+
+/** How long bits of work takes here on average. A lottery: one in a hundred takes about 4.6 times as long. */
+export const expectedSeconds = (bits) => 2 ** bits / workRate();
+
+/** A time in seconds as a person would say it. */
+export function describeSeconds(seconds) {
+  if (seconds < 90) return `${Math.max(1, Math.round(seconds))} seconds`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} minutes`;
+  return `${(seconds / 3600).toFixed(1)} hours`;
 }
 
 function askedSolver(name, args, reaches) {
@@ -267,13 +307,20 @@ function askedSolver(name, args, reaches) {
   }
 }
 
-/** The first nonce, counting up from 0, whose digest reaches bits, over the exact text that is sent. */
-export function solveWork(w, key, bodyText, bits) {
+/**
+ * The first nonce, counting up from 0, whose digest reaches bits, over the
+ * exact text that is sent, or null when deadline, a Date.now() value, passes
+ * first. A handed solver is not stopped by the deadline, since it cannot be:
+ * the estimate before the work is what keeps it inside the time.
+ */
+export function solveWork(w, key, bodyText, bits, deadline = null) {
   const bodySha256 = sha256hex(bodyText);
   const handed = askedSolver("thread", [w, key || "", bodySha256, bits], (nonce) => zeroBits(powDigest(w, key, bodySha256, nonce)) >= bits);
   if (handed !== null) return handed;
   for (let nonce = 0; ; nonce++) {
     if (zeroBits(powDigest(w, key, bodySha256, String(nonce))) >= bits) return String(nonce);
+    // Every 65536 attempts, a third of a second or so here.
+    if (deadline !== null && (nonce & 0xffff) === 0xffff && Date.now() > deadline) return null;
   }
 }
 
@@ -303,14 +350,17 @@ export function boardAdvisedBits(descriptor) {
 }
 
 /**
- * What to do about a gate before sending: { bits, required, notes }.
+ * What to do about a gate before sending: { bits, required, notes, expectedSeconds }.
  *
- * Advised work up to 18 bits and required work up to 20 are done. A requirement
+ * Advised work up to 18 bits and required work up to 32 are done. A requirement
  * above that, or a condition this client does not know under require, throws
  * GateStop, since it cannot meet what it does not understand. A condition it
- * does not know under advise is passed over, and noted.
+ * does not know under advise is passed over, and noted. secondsLeft is how long
+ * the inbox still takes writes, from X-Seconds-Left on its gate: work that
+ * would not be done by then is not started, since finding that out from a 410
+ * an hour later is the worst way to learn it.
  */
-export function gatePlan(gate, w, base = DEFAULT_BASE) {
+export function gatePlan(gate, w, base = DEFAULT_BASE, secondsLeft = null) {
   const where = w ? `GET ${String(base).replace(/\/+$/, "")}/${w}/gate` : "GET /{w}/gate on the inbox";
   const notes = [];
   gate = gate && typeof gate === "object" && !Array.isArray(gate) ? gate : {};
@@ -346,7 +396,14 @@ export function gatePlan(gate, w, base = DEFAULT_BASE) {
         "The inbox asks for more than the service allows, so no client will meet it. Reach the owner another way.",
       );
     }
-    return { bits: bits > 0 ? bits : null, required: true, notes };
+    const expected = bits >= ESTIMATE_FROM_BITS ? expectedSeconds(bits) : 0;
+    if (secondsLeft !== null && secondsLeft !== undefined && expected > secondsLeft) {
+      throw new GateStop(
+        `This inbox requires proof of work of ${bits} bits, which takes about ${describeSeconds(expected)} on this machine, and it takes writes for ${describeSeconds(secondsLeft)} more. The work would not be done before it closes, so it was not started and nothing was sent.`,
+        "Ask the owner for a longer inbox or less work, or send from a machine with more compute: aamio-wasm handed to setWorkSolver is about eighteen times faster than this loop.",
+      );
+    }
+    return { bits: bits > 0 ? bits : null, required: true, notes, expectedSeconds: expected };
   }
 
   if (advised && typeof advised === "object") {
@@ -763,6 +820,7 @@ export class Aamio {
     this.board = new Board(this, board);
     this.boardInbox = null;
     this.gates = new Map();
+    this.gateLeft = new Map();
   }
 
   needKeys(what) {
@@ -833,9 +891,9 @@ export class Aamio {
     // The inbox's gate is read before anything is sent. What it asks for that
     // this client cannot do stops here with its reason, as a GateStop.
     const key = headers["X-Key"] || "";
-    const advice = gatePlan(await this.gate(w), w, this.base);
+    const advice = await this.planFor(w);
     let notes = advice.notes;
-    if (advice.bits) headers["X-Work"] = solveWork(w, key, text, advice.bits);
+    if (advice.bits) headers["X-Work"] = this.work(w, key, text, advice.bits);
 
     let result;
     try {
@@ -845,11 +903,15 @@ export class Aamio {
       // window. Work already done and refused anyway is not done again, since
       // the same bytes give the same nonce and the same refusal.
       const gate = error instanceof AamioError && error.status === 428 && error.body && typeof error.body.gate === "object" ? error.body.gate : null;
+      // An inbox that is not there, or has expired, takes its gate with it:
+      // the next send here reads the gate of whatever is there then.
+      if (error instanceof AamioError && (error.status === 404 || error.status === 410)) this.forgetGate(w);
       if (!gate) throw error;
       this.gates.set(w, gate);
-      const asked = gatePlan(gate, w, this.base);
+      if (Number.isInteger(error.body.seconds_left)) this.gateLeft.set(w, [error.body.seconds_left, Date.now()]);
+      const asked = gatePlan(gate, w, this.base, this.secondsLeft(w));
       if (!asked.bits || asked.bits === advice.bits) throw error;
-      headers["X-Work"] = solveWork(w, key, text, asked.bits);
+      headers["X-Work"] = this.work(w, key, text, asked.bits);
       notes = [...notes, ...asked.notes.filter((note) => !notes.includes(note))];
       result = await this.request("POST", "/" + w, { body: text, headers });
     }
@@ -864,9 +926,15 @@ export class Aamio {
   async gate(w) {
     if (this.gates.has(w)) return this.gates.get(w);
     try {
-      const gate = await this.request("GET", "/" + w + "/gate", { expect: [200] });
+      const response = await this.fetch(this.base + "/" + w + "/gate", { method: "GET", headers: { Accept: "application/json" } });
+      const text = await response.text();
+      const gate = response.status === 200 && text ? JSON.parse(text) : null;
       if (gate && typeof gate === "object" && !Array.isArray(gate)) {
         this.gates.set(w, gate);
+        // The time left rides in a header, since the body is the exact bytes
+        // the gate hash is taken over.
+        const left = response.headers && typeof response.headers.get === "function" ? response.headers.get("x-seconds-left") : null;
+        if (left !== null && /^\d+$/.test(left)) this.gateLeft.set(w, [Number(left), Date.now()]);
         return gate;
       }
     } catch {
@@ -874,6 +942,50 @@ export class Aamio {
       // at all: go ahead without work, and let a 428 say what was wanted.
     }
     return {};
+  }
+
+  /**
+   * The plan for w's gate, read again once before a no that rests on a gate
+   * read earlier. A gate never changes while its thread lives, which is why it
+   * is kept, but an address can have more than one life: the time a kept gate
+   * said counted down to nothing and stayed there, and a new inbox at the same
+   * address was refused on the old one's terms without the service being
+   * asked. One more read, only when the answer would be no, is the cost.
+   */
+  async planFor(w) {
+    const cached = this.gates.has(w);
+    try {
+      return gatePlan(await this.gate(w), w, this.base, this.secondsLeft(w));
+    } catch (error) {
+      if (!(error instanceof GateStop) || !cached) throw error;
+      this.forgetGate(w);
+      return gatePlan(await this.gate(w), w, this.base, this.secondsLeft(w));
+    }
+  }
+
+  /** The gate kept for w, and the time it said, belong to an inbox that may not be there now. */
+  forgetGate(w) {
+    this.gates.delete(w);
+    this.gateLeft.delete(w);
+  }
+
+  /** How long w still takes writes, counted down from what its gate said, or null. */
+  secondsLeft(w) {
+    const said = this.gateLeft.get(w);
+    return said ? Math.max(0, said[0] - (Date.now() - said[1]) / 1000) : null;
+  }
+
+  /** The work for a send, stopped when the inbox would close, less a few seconds for the post itself. */
+  work(w, key, text, bits) {
+    const left = this.secondsLeft(w);
+    const nonce = solveWork(w, key, text, bits, left === null ? null : Date.now() + Math.max(0, left - 5) * 1000);
+    if (nonce === null) {
+      throw new GateStop(
+        `The proof of work of ${bits} bits was not done before the inbox stops taking writes, so the work was stopped and nothing was sent.`,
+        "The estimate before it started said it would fit, and this time it took longer, which happens: the work is a lottery. Ask the owner for a longer inbox, or send from a machine with more compute.",
+      );
+    }
+    return nonce;
   }
 
   /** Read a thread you own. after: return messages with seq above it. wait: seconds, up to 25. */
