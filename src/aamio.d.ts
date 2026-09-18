@@ -228,7 +228,7 @@ export interface BoardPage {
 }
 
 export interface BoardFilter {
-  /** Keep only posts whose work_bits is at least this, 0 to 20. 1 means any work at all. */
+  /** Keep only posts whose work_bits is at least this, 0 to 16, since no post carries more than the board advises. 1 means any work at all. */
   min_work_bits?: number;
   kind?: "need" | "offer";
   tags?: string[];
