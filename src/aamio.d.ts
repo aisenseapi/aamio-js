@@ -32,6 +32,8 @@ export function boardSigningInput(key: string, bodyText: string): string;
 export function boardDeleteSigningInput(id: string, bodyText: string): string;
 export function presenceSigningInput(key: string, bodyText: string): string;
 export function presenceDeleteSigningInput(key: string, bodyText: string): string;
+/** One message checked here: the body hashed, the signature verified over the address it was read at. whyNot only when something that should have held did not. */
+export function checkMessage(w: string, message: StoredMessage): { verified: boolean; whyNot?: string; sha256?: string };
 export function verify(key: string, text: string, signature: string): boolean;
 export function receiptRoot(receipt: Receipt): string;
 export function curvePublic(key: string | Uint8Array): Uint8Array;
@@ -81,6 +83,14 @@ export interface DecodedMessage extends StoredMessage {
   renamed?: Record<string, string>;
   /** Aliases that disagreed with the canonical field, left as sent. */
   conflicting?: Record<string, unknown>;
+  /** Only from read(): why a message the service called verified, or whose hash it gave, did not check out here. verified is then false and from is null. */
+  unverifiedBecause?: string;
+}
+
+/** A message the thread's own allowlist kept out of what read() handed over. */
+export interface KeptOut {
+  seq: number;
+  why: string;
 }
 
 export interface ReadResult {
@@ -90,7 +100,10 @@ export interface ReadResult {
   expire_at?: number;
   count: number;
   allow: string[];
+  /** Checked here: verified and from are this client's result, not the service's word. */
   messages: DecodedMessage[];
+  /** Only when the thread was opened with an allowlist and something it does not allow was read. */
+  keptOut?: KeptOut[];
   next: number;
   waited: number;
 }
@@ -321,10 +334,11 @@ export class Aamio {
   /** Drops the gate kept for w, and the time it said, so the next send reads them again. */
   forgetGate(w: string): void;
   read(thread: Thread, options?: { after?: number; wait?: number }): Promise<ReadResult>;
-  decode(message: StoredMessage): DecodedMessage;
+  /** With w, the address the message was read at, the hash and the signature are checked first. Without it the service's verified and from are taken as they are. */
+  decode(message: StoredMessage, w?: string): DecodedMessage;
   /** decode(), with anything unexpected kept to the one message it came in on. */
-  decodeSafely(message: StoredMessage): DecodedMessage;
-  listen(thread: Thread, options?: { after?: number; wait?: number; signal?: AbortSignal }): AsyncGenerator<DecodedMessage, void, void>;
+  decodeSafely(message: StoredMessage, w?: string): DecodedMessage;
+  listen(thread: Thread, options?: { after?: number; wait?: number; signal?: AbortSignal; onKeptOut?: (keptOut: KeptOut[]) => void }): AsyncGenerator<DecodedMessage, void, void>;
   receipt(thread: Thread): Promise<ReceiptResult>;
   openWith(key: string, options?: { ttl?: number; replyTo?: string; note?: string }): Promise<Thread>;
   close(thread: Thread): Promise<{ w: string; deleted: boolean }>;

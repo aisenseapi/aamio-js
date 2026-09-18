@@ -418,6 +418,29 @@ export function gatePlan(gate, w, base = DEFAULT_BASE, secondsLeft = null) {
   return { bits: null, required: false, notes };
 }
 
+/**
+ * { verified, whyNot, sha256 } for one message as the service returned it, checked here.
+ *
+ * verified in an answer is the service's word, and the trust model says an
+ * operator cannot forge a signature. That only holds for a reader that checks:
+ * the body is hashed, the hash compared with the one beside it, and the
+ * signature verified over the address being read. whyNot is undefined for a
+ * message that verified and for an ordinary unsigned one, and a sentence when
+ * something that should have held did not.
+ */
+export function checkMessage(w, message) {
+  if (!message || typeof message.body !== "string") return { verified: false, whyNot: "the message has no body to check" };
+  const digest = sha256hex(message.body);
+  if (message.sha256 !== digest) {
+    return { verified: false, sha256: digest, whyNot: "the body does not hash to the sha256 the service gave with it, so these are not the bytes that were stored" };
+  }
+  if (!message.from || !message.sig) {
+    return message.verified ? { verified: false, sha256: digest, whyNot: "the service calls it verified and gave no key or signature to check" } : { verified: false, sha256: digest };
+  }
+  if (verify(message.from, threadSigningInput(w, message.body), message.sig)) return { verified: true, sha256: digest };
+  return { verified: false, sha256: digest, whyNot: "the signature does not check out for this key, this address and these bytes" + (message.verified ? ", though the service said it did" : "") };
+}
+
 export function verify(key, text, signature) {
   try {
     return nacl.sign.detached.verify(utf8(text), unb64url(signature), unb64url(key));
@@ -988,13 +1011,38 @@ export class Aamio {
     return nonce;
   }
 
-  /** Read a thread you own. after: return messages with seq above it. wait: seconds, up to 25. */
+  /**
+   * Read a thread you own. after: return messages with seq above it. wait: seconds, up to 25.
+   *
+   * Every message is checked here before it is handed over: the body is hashed
+   * and compared with the sha256 beside it, and the signature is verified over
+   * this address. verified and from on what comes back are this client's
+   * result, not the service's word, and a message the service called verified
+   * that does not check out says why in unverifiedBecause.
+   *
+   * A thread opened with an allowlist keeps it: the service holds the list in
+   * memory, and a write to the address after its store was emptied opens a
+   * thread with none. Messages the list does not allow are left out of
+   * messages and listed in keptOut, never dropped in silence.
+   */
   async read(thread, { after = 0, wait = 0 } = {}) {
     let path = "/" + thread.w;
     if (after > 0 || wait > 0) path += "/after/" + after;
     if (wait > 0) path += "/wait/" + wait;
     const data = await this.request("GET", path, { headers: { "X-Read": thread.id } });
-    data.messages = (data.messages || []).map((m) => this.decodeSafely(m));
+    const allow = Array.isArray(thread.allow) ? thread.allow : [];
+    const handed = [];
+    const keptOut = [];
+    for (const raw of data.messages || []) {
+      const message = this.decodeSafely(raw, thread.w);
+      if (allow.length && !(message.verified && (allow.includes("*") || allow.includes(message.from)))) {
+        keptOut.push({ seq: message.seq, why: allow.includes("*") ? "this thread was opened for signed messages only, and this one did not verify here" : "this thread was opened for named keys, and this one was not signed by one of them, as checked here" });
+        continue;
+      }
+      handed.push(message);
+    }
+    data.messages = handed;
+    if (keptOut.length) data.keptOut = keptOut;
     return data;
   }
 
@@ -1004,15 +1052,26 @@ export class Aamio {
    * whether it came sealed, error when it could not be opened.
    */
   /** decode(), with anything unexpected kept to the one message it came in on. */
-  decodeSafely(message) {
+  decodeSafely(message, w) {
     try {
-      return this.decode(message);
+      return this.decode(message, w);
     } catch (error) {
       return { ...message, encrypted: false, plain: message.body, json: undefined, error: "could not decode: " + (error && error.message ? error.message : String(error)) };
     }
   }
 
-  decode(message) {
+  /**
+   * With w, the address the message was read at, the hash and the signature are
+   * checked first and everything below goes by that result. Without it, the
+   * service's own verified and from are taken as they are: read() always gives w.
+   */
+  decode(message, w) {
+    if (typeof w === "string") {
+      const checked = checkMessage(w, message);
+      message = { ...message, verified: checked.verified, from: checked.verified ? message.from : null };
+      if (checked.sha256) message.sha256 = checked.sha256;
+      if (checked.whyNot) message.unverifiedBecause = checked.whyNot;
+    }
     const out = { ...message, encrypted: false, plain: message.body, json: undefined, error: undefined };
     if (isEnvelope(message.body)) {
       out.encrypted = true;
@@ -1047,10 +1106,12 @@ export class Aamio {
    * Yield messages as they arrive, long polling with wait seconds per call,
    * until signal aborts or the thread answers 410 (then AamioError is thrown).
    */
-  async *listen(thread, { after = 0, wait = 25, signal } = {}) {
+  async *listen(thread, { after = 0, wait = 25, signal, onKeptOut } = {}) {
     let seq = after;
     while (!(signal && signal.aborted)) {
       const data = await this.read(thread, { after: seq, wait });
+      // What the thread's own allowlist kept out is not yielded, and it is said.
+      if (data.keptOut && typeof onKeptOut === "function") onKeptOut(data.keptOut);
       for (const message of data.messages) yield message;
       // The service's next, not the highest seq seen. When a restart takes a
       // thread and a write opens a new one at the same address, the service

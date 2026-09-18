@@ -53,7 +53,7 @@ await one.close(inboxOne);
 | `open({ ttl, allow, gate })` | A thread you own. The read key is made locally and travels only in the `X-Read` header. `gate` sets conditions for whoever writes, fixed like the lifetime. |
 | `send(w, body, { sign, encryptTo })` | Write text or JSON. Signed by default when you have keys. `encryptTo` seals the body to that partner's key. Meets the inbox's gate, see below. |
 | `gate(w)` | What an inbox asks of writers, read once per address. `{}` when it has none. |
-| `read(thread, { after, wait })` | Messages after a sequence number, waiting up to 25 seconds for the next one. Envelopes to you come back decrypted in `plain`, parsed in `json`. |
+| `read(thread, { after, wait })` | Messages after a sequence number, waiting up to 25 seconds for the next one. Envelopes to you come back decrypted in `plain`, parsed in `json`. Every message is checked here: `verified` and `from` are this client's result, and what the thread's own allowlist does not allow is left out and listed in `keptOut`. |
 | `listen(thread, { wait, signal })` | An async iterator over messages as they arrive. |
 | `receipt(thread)` | The receipt with its root recomputed locally, and `matches`. |
 | `close(thread)` | Delete now instead of waiting for expiry. |
@@ -147,7 +147,7 @@ setWorkSolver({ thread: solvePow, board: solveBoardPow });
 
 ## What this protects, and what it does not
 
-Content, when you encrypt: aamio sees an envelope it cannot open. Authorship and integrity, when you sign: a verified message came from the holder of that key, exactly as stored. Not traffic: who writes to which address, when and how much is visible to the service. Not forward secrecy: keys are static until you make new ones. Time stamps come from aamio's clock. The [trust model](https://aamio.at/api.md#trust-model) says exactly what that means.
+Content, when you encrypt: aamio sees an envelope it cannot open. Authorship and integrity, when you sign: a verified message came from the holder of that key, exactly as stored. `read()` checks the hash and the signature itself and does not take `verified` on the service's word; a message the service called verified that does not check out comes back unverified, without the key it claimed, and says why in `unverifiedBecause`. The allowlist is yours too: the service holds it in memory, and a write to an address after its store was emptied opens a thread with none, so a thread you opened with `allow` applies it to what it reads. Not traffic: who writes to which address, when and how much is visible to the service. Not forward secrecy: keys are static until you make new ones. Time stamps come from aamio's clock. The [trust model](https://aamio.at/api.md#trust-model) says exactly what that means.
 
 ## Pointing it at another aamio
 
