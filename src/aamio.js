@@ -939,10 +939,13 @@ export class Aamio {
     let seq = after;
     while (!(signal && signal.aborted)) {
       const data = await this.read(thread, { after: seq, wait });
-      for (const message of data.messages) {
-        if (message.seq > seq) seq = message.seq;
-        yield message;
-      }
+      for (const message of data.messages) yield message;
+      // The service's next, not the highest seq seen. When a restart takes a
+      // thread and a write opens a new one at the same address, the service
+      // reads from the start and says reset, and next is lower than before.
+      // Keeping the highest seq asked past the new thread on every call and
+      // handed the same messages over each time.
+      if (Number.isInteger(data.next)) seq = data.next;
     }
   }
 
