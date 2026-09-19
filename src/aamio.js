@@ -156,6 +156,7 @@ export function newId() {
 
 /** The public write address of a read key: first 20 characters of base32(sha256(id)). */
 export function deriveAddress(id) {
+  if (typeof id !== "string" || !/^[a-z0-9]{20,64}(?![\s\S])/.test(id)) throw new TypeError("an id is 20 to 64 characters of a-z and 0-9");
   return base32(sha256(id)).slice(0, 20);
 }
 
@@ -170,7 +171,7 @@ export function newScopeKey() {
 }
 
 export function isScopeKey(text) {
-  return typeof text === "string" && /^[a-z0-9]{26,64}$/.test(text);
+  return typeof text === "string" && /^[a-z0-9]{26,64}(?![\s\S])/.test(text);
 }
 
 /** The write capability of a scope: first 20 characters of base32(sha256("aamio-scope-v1\n" + key)). */
@@ -252,7 +253,7 @@ export function zeroBits(digest) {
 // what it answers is checked with one hash, so a solver that is wrong or
 // broken costs a fallback to the loop below and never a refused message.
 let workSolver = null;
-const NONCE = /^[A-Za-z0-9_-]{1,64}$/;
+const NONCE = /^[A-Za-z0-9_-]{1,64}(?![\s\S])/;
 
 /**
  * Hands proof of work to another solver: { thread(w, key, bodySha256, bits), board(key, bodySha256, bits) },
@@ -623,7 +624,7 @@ class Board {
    * and the inbox answers arrive in.
    */
   async post({ kind, title, text, tags = [], lang, deadline, ttl = BOARD_TTL, scope }, { inbox } = {}) {
-    if (scope !== undefined && !/^[a-z2-7]{20}$/.test(scope)) {
+    if (scope !== undefined && !/^[a-z2-7]{20}(?![\s\S])/.test(scope)) {
       throw new TypeError("scope is the 20 character address of a scope, from scopeAddress(key), and never the key");
     }
     const keys = this.keys;
@@ -829,6 +830,13 @@ class Presence {
   }
 }
 
+function normalizeAllow(allow) {
+  if (allow == null) return [];
+  if (!Array.isArray(allow) || allow.some((key) => typeof key !== "string")) throw new TypeError("allow must contain strings only");
+  const keys = [...new Set(allow.flatMap((entry) => entry.split(",")).map((key) => key.trim()).filter(Boolean))];
+  return keys.includes("*") ? ["*"] : keys;
+}
+
 export class Aamio {
   constructor({ base = DEFAULT_BASE, board = DEFAULT_BOARD, keys = null, fetch = globalThis.fetch } = {}) {
     this.base = base.replace(/\/+$/, "");
@@ -879,6 +887,7 @@ export class Aamio {
    * fixed when the thread is opened and never changes.
    */
   async open({ ttl, allow, gate } = {}) {
+    allow = normalizeAllow(allow);
     const id = newId();
     const w = deriveAddress(id);
     const headers = { "X-Read": id };
@@ -887,7 +896,8 @@ export class Aamio {
     // The conditions go in the body of the same PUT. No gate, no body, as before.
     const body = gate ? JSON.stringify({ gate }) : undefined;
     const data = await this.request("PUT", "/" + w, { headers, body });
-    const thread = { id, w, expireAt: data.expire_at, allow: data.allow || [] };
+    const thread = { id, w, expireAt: data.expire_at, allow };
+    if (JSON.stringify(data.allow) !== JSON.stringify(allow)) thread.allowAnswered = data.allow ?? null;
     if (data.gate) thread.gate = data.gate;
     return thread;
   }
@@ -957,7 +967,7 @@ export class Aamio {
         // The time left rides in a header, since the body is the exact bytes
         // the gate hash is taken over.
         const left = response.headers && typeof response.headers.get === "function" ? response.headers.get("x-seconds-left") : null;
-        if (left !== null && /^\d+$/.test(left)) this.gateLeft.set(w, [Number(left), Date.now()]);
+        if (left !== null && /^\d+(?![\s\S])/.test(left)) this.gateLeft.set(w, [Number(left), Date.now()]);
         return gate;
       }
     } catch {
@@ -1030,13 +1040,15 @@ export class Aamio {
     if (after > 0 || wait > 0) path += "/after/" + after;
     if (wait > 0) path += "/wait/" + wait;
     const data = await this.request("GET", path, { headers: { "X-Read": thread.id } });
-    const allow = Array.isArray(thread.allow) ? thread.allow : [];
+    const allow = normalizeAllow(thread.allow);
     const handed = [];
     const keptOut = [];
     for (const raw of data.messages || []) {
       const message = this.decodeSafely(raw, thread.w);
       if (allow.length && !(message.verified && (allow.includes("*") || allow.includes(message.from)))) {
-        keptOut.push({ seq: message.seq, why: allow.includes("*") ? "this thread was opened for signed messages only, and this one did not verify here" : "this thread was opened for named keys, and this one was not signed by one of them, as checked here" });
+        const kept = { seq: message.seq, why: allow.includes("*") ? "this thread was opened for signed messages only, and this one did not verify here" : "this thread was opened for named keys, and this one was not signed by one of them, as checked here" };
+        if (message.unverifiedBecause) kept.unverifiedBecause = message.unverifiedBecause;
+        keptOut.push(kept);
         continue;
       }
       handed.push(message);
@@ -1056,14 +1068,17 @@ export class Aamio {
     try {
       return this.decode(message, w);
     } catch (error) {
-      return { ...message, encrypted: false, plain: message.body, json: undefined, error: "could not decode: " + (error && error.message ? error.message : String(error)) };
+      const why = "the message could not be checked here: " + (error?.name || "Error");
+      // A decoder failure must never restore an unchecked sender claim.
+      return { ...message, verified: false, from: null, checked: typeof w === "string", encrypted: false, plain: null, json: undefined, error: why, unverifiedBecause: why };
     }
   }
 
   /**
    * With w, the address the message was read at, the hash and the signature are
    * checked first and everything below goes by that result. Without it, the
-   * service's own verified and from are taken as they are: read() always gives w.
+   * service's own verified and from are taken as they are and checked is false:
+   * read() always gives w. Unchecked decoding is not evidence of authorship.
    */
   decode(message, w) {
     if (typeof w === "string") {
@@ -1072,7 +1087,7 @@ export class Aamio {
       if (checked.sha256) message.sha256 = checked.sha256;
       if (checked.whyNot) message.unverifiedBecause = checked.whyNot;
     }
-    const out = { ...message, encrypted: false, plain: message.body, json: undefined, error: undefined };
+    const out = { ...message, checked: typeof w === "string", encrypted: false, plain: message.body, json: undefined, error: undefined };
     if (isEnvelope(message.body)) {
       out.encrypted = true;
       out.plain = null;
@@ -1106,12 +1121,29 @@ export class Aamio {
    * Yield messages as they arrive, long polling with wait seconds per call,
    * until signal aborts or the thread answers 410 (then AamioError is thrown).
    */
-  async *listen(thread, { after = 0, wait = 25, signal, onKeptOut } = {}) {
+  async *listen(thread, { after = 0, wait = 25, signal, onKeptOut, onGone, onReset } = {}) {
     let seq = after;
     while (!(signal && signal.aborted)) {
       const data = await this.read(thread, { after: seq, wait });
       // What the thread's own allowlist kept out is not yielded, and it is said.
-      if (data.keptOut && typeof onKeptOut === "function") onKeptOut(data.keptOut);
+      if (data.keptOut?.length) {
+        if (typeof onKeptOut === "function") onKeptOut(data.keptOut);
+        else {
+          (thread.keptOut ??= []).push(...data.keptOut);
+          console.warn("aamio: messages kept out", data.keptOut);
+        }
+      }
+      if (data.exists === false) {
+        if (typeof onGone === "function") onGone(data);
+        else if (!thread.gone) console.warn("aamio: the thread is gone", data.note);
+        thread.gone = true;
+      } else if (data.exists === true) thread.gone = false;
+      if (data.reset) {
+        thread.reset = data.reset;
+        this.forgetGate(thread.w);
+        if (typeof onReset === "function") onReset(data.reset);
+        else console.warn("aamio: the thread cursor was reset", data.reset);
+      }
       for (const message of data.messages) yield message;
       // The service's next, not the highest seq seen. When a restart takes a
       // thread and a write opens a new one at the same address, the service

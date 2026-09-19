@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Aamio, Keys, checkMessage, sha256hex, threadSigningInput, verify } from "../src/aamio.js";
+import { Aamio, Keys, checkMessage, sha256hex, threadSigningInput, verify, deriveAddress, isScopeKey, isKey } from "../src/aamio.js";
 
 const vectors = JSON.parse(readFileSync(new URL("./vectors.json", import.meta.url), "utf8"));
 const W = "i".repeat(20);
@@ -132,4 +132,123 @@ test("decode without an address takes the service's fields as they are, as it al
 
   assert.equal(message.verified, true);
   assert.equal(message.from, "a-key");
+  assert.equal(message.checked, false);
+});
+
+test("open retains its own normalised policy when the service omits or replaces it", async () => {
+  for (const echo of [undefined, [], ["*"], [mallory.public]]) {
+    const requests = [];
+    const client = new Aamio({ fetch: async (url, init) => {
+      requests.push(init);
+      return { status: 201, text: async () => JSON.stringify({ expire_at: 123, allow: echo }) };
+    } });
+    const thread = await client.open({ allow: [" " + alice.public + ",", alice.public, " "] });
+    assert.deepEqual(thread.allow, [alice.public]);
+    assert.deepEqual(thread.allowAnswered, echo ?? null);
+    assert.equal(requests[0].headers["X-Allow"], alice.public);
+    const guarded = await reading([stored(thread.w, 1, "stranger", mallory), stored(thread.w, 2, "unsigned", null)]).read(thread);
+    assert.equal(guarded.messages.length, 0);
+    assert.equal(guarded.keptOut.length, 2);
+    assert.deepEqual((await client.openWith(alice.public)).allow, [alice.public]);
+    assert.deepEqual((await client.open({ allow: [alice.public + ", *", ""] })).allow, ["*"]);
+    assert.deepEqual((await client.open({ allow: [" ", ","] })).allow, []);
+    assert.equal(requests.at(-1).headers["X-Allow"], undefined);
+    const count = requests.length;
+    await assert.rejects(client.open({ allow: ["*", null] }), TypeError);
+    assert.equal(requests.length, count);
+  }
+});
+
+test("keptOut distinguishes forged, altered, stranger and unsigned messages", async () => {
+  const forged = { ...stored(W, 1, "forged", mallory), from: alice.public };
+  const altered = { ...stored(W, 2, "original"), body: "altered" };
+  const result = await reading([forged, altered, stored(W, 3, "stranger", mallory), stored(W, 4, "unsigned", null)]).read({ id: "read-key", w: W, allow: [alice.public] });
+  assert.equal(result.messages.length, 0);
+  assert.match(result.keptOut[0].unverifiedBecause, /signature/);
+  assert.match(result.keptOut[1].unverifiedBecause, /hash/);
+  assert.equal(result.keptOut[2].unverifiedBecause, undefined);
+  assert.equal(result.keptOut[3].unverifiedBecause, undefined);
+  assert.equal(result.next, 4);
+});
+
+test("decoder failure cannot restore an unverified sender or plaintext", async () => {
+  const client = reading([stored(W, 1, "claimed", mallory, { from: alice.public })]);
+  client.decode = () => { throw new RangeError("synthetic decoder failure"); };
+  const result = await client.read({ id: "read-key", w: W });
+  assert.equal(result.messages[0].verified, false);
+  assert.equal(result.messages[0].from, null);
+  assert.equal(result.messages[0].plain, null);
+  assert.equal(result.messages[0].json, undefined);
+  assert.equal(result.messages[0].unverifiedBecause, "the message could not be checked here: RangeError");
+  const guarded = await client.read({ id: "read-key", w: W, allow: [alice.public] });
+  assert.equal(guarded.messages.length, 0);
+  assert.match(guarded.keptOut[0].unverifiedBecause, /RangeError/);
+});
+
+test("one malformed record is a diagnostic and does not hide the next message", async () => {
+  const result = await reading([null, stored(W, 2, "valid")]).read({ id: "read-key", w: W });
+  assert.equal(result.messages.length, 2);
+  assert.equal(result.messages[0].verified, false);
+  assert.equal(result.messages[0].from, null);
+  assert.equal(result.messages[1].verified, true);
+  assert.equal(result.messages[1].checked, true);
+  assert.equal(result.next, 2);
+});
+
+test("listen reports and retains excluded messages when no callback is provided", async (t) => {
+  const warning = t.mock.method(console, "warn", () => {});
+  const client = reading([stored(W, 1, "allowed"), stored(W, 2, "stranger", mallory)]);
+  const thread = { id: "read-key", w: W, allow: [alice.public] };
+  for await (const message of client.listen(thread)) {
+    assert.equal(message.seq, 1);
+    break;
+  }
+  assert.deepEqual(thread.keptOut.map((entry) => entry.seq), [2]);
+  assert.equal(warning.mock.callCount(), 1);
+});
+
+test("listen exposes missing threads and resets to callbacks and its thread state", async () => {
+  const controller = new AbortController();
+  const reset = { after: 8, newest: 1, what: "new thread" };
+  const pages = [{ exists: false, messages: [], next: 0, note: "gone" }, { exists: true, messages: [stored(W, 1, "new")], next: 1, reset }];
+  const client = new Aamio({ fetch: async () => ({ status: 200, text: async () => JSON.stringify(pages.shift()) }) });
+  const thread = { id: "read-key", w: W };
+  const gone = [], resets = [];
+  for await (const message of client.listen(thread, { signal: controller.signal, onGone: (data) => gone.push(data.note), onReset: (value) => resets.push(value) })) {
+    assert.equal(message.seq, 1);
+    controller.abort();
+  }
+  assert.deepEqual(gone, ["gone"]);
+  assert.deepEqual(resets, [reset]);
+  assert.equal(thread.gone, false);
+  assert.deepEqual(thread.reset, reset);
+});
+
+test("legacy base64 spellings verify but an allowlist compares exact key strings", async () => {
+  assert.ok(verify(vectors.a.public, vectors.signInput, vectors.strayBits.signature));
+  assert.ok(verify(vectors.strayBits.key, vectors.signInput, vectors.signature));
+  const old = { seq: 1, at: 1, body: vectors.body, sha256: sha256hex(vectors.body), from: vectors.strayBits.key, sig: vectors.signature, verified: true };
+  const result = await reading([old]).read({ id: "read-key", w: vectors.w, allow: [vectors.a.public] });
+  assert.equal(result.messages.length, 0);
+  assert.equal(result.keptOut.length, 1);
+  assert.equal(result.keptOut[0].unverifiedBecause, undefined);
+});
+
+test("shape checks refuse trailing newlines before deriving or sending", async () => {
+  assert.throws(() => deriveAddress(vectors.id + "\n"), TypeError);
+  assert.equal(isScopeKey("a".repeat(26) + "\n"), false);
+  assert.equal(isKey(alice.public + "\n"), false);
+  let requests = 0;
+  const client = new Aamio({ keys: alice, fetch: async () => { requests++; throw new Error("must not send"); } });
+  await assert.rejects(client.board.post({ scope: "a".repeat(20) + "\n" }), TypeError);
+  assert.equal(requests, 0);
+});
+
+test("board reply inboxes retain signed-only policy even when the service drops its echo", async () => {
+  const client = new Aamio({ keys: alice, fetch: async (url, init) => ({ status: init.method === "PUT" ? 201 : 200, text: async () => JSON.stringify(init.method === "PUT" ? { expire_at: Math.floor(Date.now() / 1000) + 1800 } : { messages: [stored(url.split("/").at(-1), 1, JSON.stringify({ post: "p1", text: "unsigned answer" }), null)], next: 1 }) }) });
+  const inbox = await client.board.inbox();
+  const result = await client.read(inbox);
+  assert.deepEqual(inbox.allow, ["*"]);
+  assert.deepEqual(client.board.replies(result.messages, "p1"), []);
+  assert.equal(result.keptOut.length, 1);
 });

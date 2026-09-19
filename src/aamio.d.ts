@@ -59,6 +59,12 @@ export interface Thread {
   w: string;
   expireAt?: number;
   allow?: string[];
+  /** The service's echo when it differs from the requested, locally kept list. null when absent. */
+  allowAnswered?: unknown;
+  /** Accumulated by listen() unless an onKeptOut callback is supplied. */
+  keptOut?: KeptOut[];
+  gone?: boolean;
+  reset?: ReadResult["reset"];
   /** Only on a thread opened with a gate: the conditions as the service stored them. */
   gate?: Gate;
 }
@@ -75,6 +81,8 @@ export interface StoredMessage {
 }
 
 export interface DecodedMessage extends StoredMessage {
+  /** False for legacy decoding without a destination address. */
+  checked: boolean;
   encrypted: boolean;
   plain: string | null;
   json: unknown;
@@ -91,6 +99,7 @@ export interface DecodedMessage extends StoredMessage {
 export interface KeptOut {
   seq: number;
   why: string;
+  unverifiedBecause?: string;
 }
 
 export interface ReadResult {
@@ -106,6 +115,8 @@ export interface ReadResult {
   keptOut?: KeptOut[];
   next: number;
   waited: number;
+  reset?: { after: number; newest: number; what: string };
+  note?: string;
 }
 
 export interface SendResult {
@@ -334,11 +345,11 @@ export class Aamio {
   /** Drops the gate kept for w, and the time it said, so the next send reads them again. */
   forgetGate(w: string): void;
   read(thread: Thread, options?: { after?: number; wait?: number }): Promise<ReadResult>;
-  /** With w, the address the message was read at, the hash and the signature are checked first. Without it the service's verified and from are taken as they are. */
+  /** With w, hash and signature are checked first. Without it checked is false and verified/from are the service's claim. */
   decode(message: StoredMessage, w?: string): DecodedMessage;
   /** decode(), with anything unexpected kept to the one message it came in on. */
   decodeSafely(message: StoredMessage, w?: string): DecodedMessage;
-  listen(thread: Thread, options?: { after?: number; wait?: number; signal?: AbortSignal; onKeptOut?: (keptOut: KeptOut[]) => void }): AsyncGenerator<DecodedMessage, void, void>;
+  listen(thread: Thread, options?: { after?: number; wait?: number; signal?: AbortSignal; onKeptOut?: (keptOut: KeptOut[]) => void; onGone?: (data: ReadResult) => void; onReset?: (reset: NonNullable<ReadResult["reset"]>) => void }): AsyncGenerator<DecodedMessage, void, void>;
   receipt(thread: Thread): Promise<ReceiptResult>;
   openWith(key: string, options?: { ttl?: number; replyTo?: string; note?: string }): Promise<Thread>;
   close(thread: Thread): Promise<{ w: string; deleted: boolean }>;

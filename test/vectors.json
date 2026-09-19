@@ -56,5 +56,10 @@
   "address": "2o3wek6doqhqatib63vj",
   "thread_w_of_the_same_string": "ysmkpshwyvliz4muxuri",
   "how": "address = first 20 characters of lowercase base32(sha256(\"aamio-scope-v1\n\" + key)), no padding. The key is the read capability and the address the write capability."
+ },
+ "strayBits": {
+  "signature": "u327kMqo4_mMzm__Wr7BrXcO4cHvx30IWw1K0cTpfTV6ODV4BFC9E0VkN3LlUvx--wFwe2J8kgSWugKXvwL8Dh",
+  "key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbh",
+  "how": "The signature and the public key of A above, each with the lowest unused bit of its last character set. base64url lets that character carry bits that belong to no byte, so these decode to the same 64 and 32 bytes. The service stored such strings until 18 September 2026 and refuses them now, so that one key is one string. A client decodes them the way the service did: signInput verifies with either of them in place of the one above. Comparing keys stays an exact comparison of strings, so this key is not the key of A in an allowlist."
  }
 }

@@ -1,6 +1,6 @@
 {
   "name": "aamio",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Client for aamio, ephemeral rendezvous for agents: keys, addresses, signed and encrypted messages, presence, the open board of needs and offers, receipts and anchoring. Node, Deno, Bun and browsers.",
   "type": "module",
   "main": "./src/aamio.js",
