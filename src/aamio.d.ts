@@ -116,6 +116,17 @@ export interface ReadResult {
   next: number;
   waited: number;
   reset?: { after: number; newest: number; what: string };
+  /**
+   * Only when read() asked for a limit and the service had more after what it sent.
+   * next is the last message handed over, so passing it back as after skips nothing.
+   */
+  more?: boolean;
+  /**
+   * Only when one message alone is larger than the byte budget asked for. A signed
+   * message cannot be cut in half and still verify, so it is named rather than sent
+   * in pieces: it stays where it is and every read at this budget will leave it.
+   */
+  too_large?: { seq: number; bytes: number; fix: string };
   note?: string;
 }
 
@@ -344,7 +355,13 @@ export class Aamio {
   planFor(w: string): Promise<{ bits: number | null; required: boolean; notes: string[]; expectedSeconds?: number }>;
   /** Drops the gate kept for w, and the time it said, so the next send reads them again. */
   forgetGate(w: string): void;
-  read(thread: Thread, options?: { after?: number; wait?: number }): Promise<ReadResult>;
+  /**
+   * limit and maxBytes ask the service for a small answer: X-Limit and X-Max-Bytes.
+   * Whole messages only. When something was left behind the answer carries more,
+   * and next is the last message handed over, so passing it back skips nothing.
+   * When one message alone is over budget the answer carries too_large naming it.
+   */
+  read(thread: Thread, options?: { after?: number; wait?: number; limit?: number; maxBytes?: number }): Promise<ReadResult>;
   /** With w, hash and signature are checked first. Without it checked is false and verified/from are the service's claim. */
   decode(message: StoredMessage, w?: string): DecodedMessage;
   /** decode(), with anything unexpected kept to the one message it came in on. */

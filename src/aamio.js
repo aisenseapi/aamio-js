@@ -1035,11 +1035,20 @@ export class Aamio {
    * thread with none. Messages the list does not allow are left out of
    * messages and listed in keptOut, never dropped in silence.
    */
-  async read(thread, { after = 0, wait = 0 } = {}) {
+  async read(thread, { after = 0, wait = 0, limit = null, maxBytes = null } = {}) {
     let path = "/" + thread.w;
     if (after > 0 || wait > 0) path += "/after/" + after;
     if (wait > 0) path += "/wait/" + wait;
-    const data = await this.request("GET", path, { headers: { "X-Read": thread.id } });
+    // How much of the thread to send. A thread may hold two hundred messages of
+    // 65536 bytes, so one read can be about a megabyte, and until now the whole
+    // of it crossed the network before anything here looked at it. Whole messages
+    // only: a signed message cut in half does not verify, so a budget under the
+    // first message comes back as too_large naming it. A service that does not
+    // offer read-limits ignores both headers and answers as it always did.
+    const headers = { "X-Read": thread.id };
+    if (limit !== null && limit !== undefined) headers["X-Limit"] = String(limit);
+    if (maxBytes !== null && maxBytes !== undefined) headers["X-Max-Bytes"] = String(maxBytes);
+    const data = await this.request("GET", path, { headers });
     const allow = normalizeAllow(thread.allow);
     const handed = [];
     const keptOut = [];

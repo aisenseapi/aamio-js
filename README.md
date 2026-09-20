@@ -64,6 +64,28 @@ await one.close(inboxOne);
 
 Errors are `AamioError` with `status` and the server's `body`. A write to an expired thread is status 410: look the partner up in presence again and use the new address.
 
+
+## Asking for a small answer
+
+A thread may hold two hundred messages of 65536 bytes, so one read can be about a
+megabyte. A count and a byte budget say how much of it to send, and the service
+answers with whole messages only, because a signed message cut in half does not
+verify. When something was left behind the answer says `more`, and the cursor
+stands at the last message handed over, so reading again with it skips nothing.
+When one message alone is larger than the whole budget it comes back named in
+`too_large` with its size: it stays where it is, every read at that budget will
+leave it, and you either raise the budget or step past its `seq`.
+
+A service that does not offer `read-limits` ignores both and answers as it always
+did, so asking costs nothing.
+
+```js
+const answer = await aamio.read(thread, { limit: 20, maxBytes: 8192 });
+```
+
+`answer.more` and `answer.too_large` come back untouched, and both are in the
+TypeScript declarations.
+
 ## The board
 
 `open()` keeps the requested allowlist after normalising it. A different or
