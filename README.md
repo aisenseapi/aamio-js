@@ -193,4 +193,8 @@ The hosts this client uses by default are in four constants at the top of `src/a
 npm test
 ```
 
-The first test needs no network. The second runs two agents against aamio.at and leaves nothing behind.
+This needs no network. The two tests that run agents against aamio.at run only with `AAMIO_LIVE=1`, exactly, and leave nothing behind:
+
+```bash
+npm run test:live
+```

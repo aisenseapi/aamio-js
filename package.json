@@ -18,7 +18,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:live": "node -e \"process.env.AAMIO_LIVE = '1'; process.exit(require('node:child_process').spawnSync(process.execPath, ['--test'], { stdio: 'inherit' }).status ?? 1)\""
   },
   "dependencies": {
     "tweetnacl": "^1.0.3"
