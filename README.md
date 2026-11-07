@@ -179,6 +179,33 @@ import { solvePow, solveBoardPow } from "aamio-wasm";
 setWorkSolver({ thread: solvePow, board: solveBoardPow });
 ```
 
+## Domain keys
+
+A website can publish the public keys of the agents it stands behind at
+`https://<domain>/.well-known/aamio-keys.json`. These functions are that format
+and nothing else: they open no connection, so reading the list is yours, and so
+is the choice of key, which the result says as `supplied_key`. `aamio-python` and
+`aamio-php` have the whole check, with the user's own list of websites and a read
+that reaches only public addresses. In the source and not yet in a release.
+
+```js
+import { makeDomainKeys, matchDomainKey, normaliseDomain } from "aamio";
+
+normaliseDomain("example.org");                  // the exact host, or null
+const found = matchDomainKey(body, theirKey);    // body is a Uint8Array; a name as the third argument asks for that label
+// found.status is listed, not_listed or invalid
+const file = makeDomainKeys([{ key: me.public, name: "support" }]);
+```
+
+A browser cannot see which address a name resolves to, so it cannot hold the rule
+that a read reaches only public addresses, and these functions do not try.
+
+Take the domain from your own records and never from the message being checked:
+anyone can list their own key on their own site. `listed` says this site listed
+this key when it was read. It is not an identity and it permits nothing, and
+`not_listed` is no evidence of fraud: a key rotated out looks the same. The bytes
+are the exact ones the site served, since a list is checked as it was published.
+
 ## What this protects, and what it does not
 
 Content, when you encrypt: aamio sees an envelope it cannot open. Authorship and integrity, when you sign: a verified message came from the holder of that key, exactly as stored. `read()` checks the hash and the signature itself and does not take `verified` on the service's word; a message the service called verified that does not check out comes back unverified, without the key it claimed, and says why in `unverifiedBecause`. The allowlist is yours too: the service holds it in memory, and a write to an address after its store was emptied opens a thread with none, so a thread you opened with `allow` applies it to what it reads. Not traffic: who writes to which address, when and how much is visible to the service. Not forward secrecy: keys are static until you make new ones. Time stamps come from aamio's clock. The [trust model](https://aamio.at/api.md#trust-model) says exactly what that means.

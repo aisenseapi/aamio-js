@@ -27,6 +27,45 @@ export function scopeAddress(scopeKey: string): string;
 export function isKey(text: unknown): boolean;
 export function keyHash(key: string): string;
 export function hashPrefix(key: string, length?: number): string;
+
+/** Domain keys: the format of a website's list of public aamio keys. It opens no connection. */
+export const DOMAIN_KEYS_VERSION: 1;
+export const DOMAIN_KEYS_PATH: "/.well-known/aamio-keys.json";
+export const DOMAIN_KEYS_MAX_BYTES: 16384;
+export const DOMAIN_KEYS_MAX_KEYS: 64;
+/** A list that is not version 1. reason says why, without echoing the content. */
+export class InvalidDomainKeys extends Error {
+  readonly reason: string;
+  constructor(reason: string);
+}
+export interface DomainKey {
+  key: string;
+  /** A label. It authorises nothing. */
+  name?: string;
+}
+export interface DomainMatch {
+  /** not_listed is no evidence of fraud: a key rotated out, the wrong name or the wrong domain look the same. */
+  status: "listed" | "not_listed" | "invalid";
+  reason: string;
+  detail?: string;
+  matched_name?: string | null;
+  /** Of the exact bytes compared, for fault finding. The domain did not sign it. */
+  document_sha256?: string;
+  /** The key was the caller's to choose and to answer for. */
+  subject_source: "supplied_key";
+}
+/** A public key as aamio writes it: 32 bytes, 43 characters, one spelling only. */
+export function canonicalKey(value: unknown): boolean;
+export function validDomainKeyName(value: unknown): boolean;
+/** The exact host a list is read from, in lowercase, or null. */
+export function normaliseDomain(value: unknown): string | null;
+export function domainKeysUrl(domain: unknown): string | null;
+/** The entries of a version 1 list, from the exact bytes. Throws InvalidDomainKeys. */
+export function parseDomainKeys(raw: Uint8Array): DomainKey[];
+/** Take the domain from your own records and never from the message being checked. A listed key permits nothing. */
+export function matchDomainKey(raw: Uint8Array, key: string, name?: string | null): DomainMatch;
+/** The file for a site to publish, in the bytes every generator writes. Throws InvalidDomainKeys. */
+export function makeDomainKeys(entries: readonly DomainKey[]): Uint8Array;
 export function threadSigningInput(w: string, bodyText: string): string;
 export function boardSigningInput(key: string, bodyText: string): string;
 export function boardDeleteSigningInput(id: string, bodyText: string): string;
