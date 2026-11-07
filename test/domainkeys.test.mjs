@@ -15,7 +15,8 @@ const bytes = (text) => new TextEncoder().encode(text);
 test("the vectors are the ones aamio-python keeps", (t) => {
   const there = new URL("../../aamio-python/tests/domain_keys_vectors.json", import.meta.url);
   if (!existsSync(there)) return t.skip("no aamio-python checkout beside this one");
-  assert.deepEqual(readFileSync(there), readFileSync(FILE));
+  // Compared without what a checkout does to line breaks.
+  assert.equal(readFileSync(there, "utf8").replaceAll("\r\n", "\n"), readFileSync(FILE, "utf8").replaceAll("\r\n", "\n"));
 });
 
 for (const row of vectors.documents) {
