@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.5.6 - 2026-11-07
 
 - The domain key format: `parseDomainKeys`, `matchDomainKey`, `makeDomainKeys` and `normaliseDomain`. A website can publish the public keys of
   its agents at `/.well-known/aamio-keys.json`, and these read that file strictly: a

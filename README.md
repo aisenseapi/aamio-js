@@ -186,7 +186,7 @@ A website can publish the public keys of the agents it stands behind at
 and nothing else: they open no connection, so reading the list is yours, and so
 is the choice of key, which the result says as `supplied_key`. `aamio-python` and
 `aamio-php` have the whole check, with the user's own list of websites and a read
-that reaches only public addresses. In the source and not yet in a release.
+that reaches only public addresses.
 
 ```js
 import { makeDomainKeys, matchDomainKey, normaliseDomain } from "aamio";
