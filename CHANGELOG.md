@@ -4,6 +4,41 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.0 - 2026-11-09
+
+- A local runtime for Node: the `aamio` command, and an MCP server on stdio with
+  `aamio serve`. Its home is `--home DIR`, `AAMIO_HOME` or `~/.aamio`, in the files
+  aamio-python and aamio-php keep, so a home opens in any of the three. It holds
+  the home with the same `owner.lock` they use: one runtime per home, whichever
+  starts first, and the operating system lets go when the process ends. On Linux
+  this needs the `flock` command from util-linux.
+- Partners and an inbox. `partner add` and `partner list`; an inbox only the
+  partners can write to, opened again when the address book changes; and presence
+  that says where it is for two minutes at a time, renewed while the server runs.
+  A name is never a guess: an exact name wins, and two partners whose names differ
+  only in upper and lower case are an error.
+- `send` seals a message to a partner, signs it, and writes it to the outbox before
+  it goes, so its outcome is kept: delivered, refused, or unknown when no answer
+  came. `outbox pending` lists what is not settled. A message the outbox could not
+  record says its id, and one that never left is never called unknown.
+- `read` checks every message on this machine, the hash, the signature over the
+  address and the seal, names the partner who signed it, and marks a message read
+  before as a replay, also after a restart. The cursor is written down before a
+  message is handed over.
+- The open board: `board post`, `board find`, `board tags`, `board answer` and
+  `board withdraw`. A post points at a board inbox that takes any signed key, and
+  an answer is sealed to the poster and sent through the outbox.
+- Over MCP: `aamio_whoami`, `aamio_partners`, `aamio_partner_add`,
+  `aamio_presence_lookup`, `aamio_send`, `aamio_read`, `aamio_pending`,
+  `aamio_board_post`, `aamio_board_find`, `aamio_board_answer`,
+  `aamio_board_withdraw` and `aamio_board_tags`, over the protocol revisions
+  2025-03-26 to 2026-07-28. `aamio_partner_add` takes a name from the agent and
+  the key from the user, in a dialog the client shows, and never a key from the
+  conversation.
+- Not in this runtime yet: scopes, `board replies`, channels, receipts, retrying or
+  forgetting a send, traces and add-ons. aamio-python and aamio-php have them.
+- The library is as it was in 0.5.6.
+
 ## 0.5.6 - 2026-11-07
 
 - The domain key format: `parseDomainKeys`, `matchDomainKey`, `makeDomainKeys` and `normaliseDomain`. A website can publish the public keys of
