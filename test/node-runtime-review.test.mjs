@@ -111,7 +111,7 @@ test("finding 3: a read that cannot be written down hands nothing over, and the 
   await b.send("a", { text: "one" });
   failSaving(a, "state.json");
   assert.deepEqual(await a.read(), [], "not handed over while it could not be written down");
-  assert.ok(a.attentionTaken().some((note) => note.state === "not_saved"), "and said");
+  assert.ok((await a.attentionTaken()).some((note) => note.state === "not_saved"), "and said");
   assert.equal(a.channel("inbox").after, 0, "the cursor in memory is the one on disk");
   const [again] = await a.read();
   assert.equal(again.body.text, "one");
@@ -186,14 +186,14 @@ test("deviation 2: an outbox left by a process that stopped is settled as aamio-
   try {
     assert.deepEqual(Object.values(a.outbox).map((e) => e.status), ["unknown", "stopped", "unknown"]);
     assert.deepEqual(a.outboxPending().map((p) => p.message_id), ["m-0000000000000001", "m-0000000000000003"]);
-    const said = a.attentionTaken().map((note) => note.state);
+    const said = (await a.attentionTaken()).map((note) => note.state);
     assert.deepEqual(said.sort(), ["stopped", "unknown", "unknown"], "each is said once");
   } finally {
     await a.close();
   }
   const again = await NodeRuntime.open({ home: homeA, host: HOST, fetch: fake.fetch });
   try {
-    assert.deepEqual(again.attentionTaken(), [], "and not again after the next start");
+    assert.deepEqual(await again.attentionTaken(), [], "and not again after the next start");
   } finally {
     await again.close();
   }

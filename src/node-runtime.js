@@ -78,6 +78,10 @@ export class NodeRuntime {
     this.presenceRetryAt = 0;
     this.closed = false;
     this.queue = Promise.resolve();
+    // Outbox entries a stopped process left whose note is not handed to anyone yet.
+    this.untold = new Set();
+    // Files whose folder could not be synced after the rename, said once until it can.
+    this.unsynced = new Set();
   }
 
   /**
@@ -151,6 +155,15 @@ export class NodeRuntime {
     let changed = false;
     for (const entry of Object.values(this.outbox)) {
       if (!isObject(entry)) continue;
+      // Written to the outbox and never handed to deliver, which counts the
+      // attempt and writes the entry again before the post: nothing left this
+      // machine. Called unknown, it was a message that may have arrived when it
+      // never went (a review of 9 November 2026).
+      if (entry.status === "sending" && !(Number(entry.attempts) > 0) && entry.posting !== true) {
+        entry.status = "stopped";
+        entry.note = "the process stopped after the message was written to the outbox and before it was sent, so nothing left this machine";
+        changed = true;
+      }
       if (["sending", "unknown", "refused", "delivered"].includes(entry.status) && entry.posting !== true) {
         entry.posting = true;
         changed = true;
@@ -174,8 +187,9 @@ export class NodeRuntime {
         this.note(`send ${entry.id}`, entry.status, entry.status === "stopped"
           ? `the message to ${entry.w} was not sent: ${entry.note}. Send it again if it still matters.`
           : `the message to ${entry.w} may have arrived: ${entry.note}. Its outcome is open: do not compose a replacement.`);
-        entry.told = true;
-        changed = true;
+        // Told when it is handed to someone, in attentionTaken: marked here, a
+        // command that shows no notes lost it for good.
+        this.untold.add(entry.id);
       }
     }
     if (!changed) return;
@@ -204,13 +218,30 @@ export class NodeRuntime {
       await unlink(temporary).catch(() => {});
       throw error;
     }
-    if (process.platform !== "win32") {
-      const folder = await open(this.home, constants.O_RDONLY);
-      try {
-        await folder.sync();
-      } finally {
-        await folder.close();
+    try {
+      await this.syncFolder();
+      this.unsynced.delete(name);
+    } catch (error) {
+      // The rename is done: every reader sees the new file, and this runtime
+      // goes on with what it holds. Only that it outlives a power cut is not
+      // known. Taken as a write that failed, a read handed nothing over while
+      // the cursor on disk stood past the message, and after a restart the
+      // message was never handed over at all (a review of 9 November 2026).
+      if (!this.unsynced.has(name)) {
+        this.unsynced.add(name);
+        this.note("files", "not_synced", `${name} was replaced, but the folder ${this.home} could not be synced (${error.code || error.message}). This runtime goes on with what it wrote. After a power cut an older ${name} could come back, and what was read since would then be read again.`);
       }
+    }
+  }
+
+  /** After a rename the new name is on disk only when the folder is. Windows has no such call for a folder, and journals the rename. */
+  async syncFolder() {
+    if (process.platform === "win32") return;
+    const folder = await open(this.home, constants.O_RDONLY);
+    try {
+      await folder.sync();
+    } finally {
+      await folder.close();
     }
   }
 
@@ -302,10 +333,20 @@ export class NodeRuntime {
     this.attention.push({ channel: where, w, state, what, at: Math.floor(this.now()) });
   }
 
-  /** What the reads since the last call could not do, once, and then cleared. */
-  attentionTaken() {
+  /**
+   * What the reads since the last call could not do, once, and then cleared.
+   * What a stopped process left in the outbox counts as said here, when it is
+   * handed to someone, and is written down as told. A save that fails says it
+   * again after the next start, which is the safe side.
+   */
+  async attentionTaken() {
     const taken = this.attention;
     this.attention = [];
+    if (this.untold.size) {
+      for (const id of this.untold) if (isObject(this.outbox[id])) this.outbox[id].told = true;
+      this.untold.clear();
+      await this.saveOutbox().catch(() => {});
+    }
     return taken;
   }
 
@@ -323,6 +364,12 @@ export class NodeRuntime {
       this.note("inbox", "rotation_failed", what, old?.w ?? null);
       return { rotated: false, inbox: old?.w ?? null, error: what };
     }
+    // The new inbox, and what it changes in the older ones, count only once
+    // state.json holds them. Kept when the save failed, the next read published
+    // an address whose read key this home did not have after a restart, and a
+    // partner wrote where nobody could read (a review of 9 November 2026).
+    const before = this.state.channels.map((channel) => (isObject(channel) ? [channel, channel.label, channel.muted] : null));
+    const noted = this.attention.length;
     if (old) {
       const base = `inbox-${old.expire_at}`;
       let label = base;
@@ -332,7 +379,18 @@ export class NodeRuntime {
     const inbox = { label: "inbox", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: wanted ?? [], after: 0, created_at: null, gone: false, muted: false, seen: [] };
     this.state.channels.push(inbox);
     const muted = this.muteGenerations(reason);
-    await this.saveState();
+    try {
+      await this.saveState();
+    } catch (error) {
+      this.state.channels = this.state.channels.filter((channel) => channel !== inbox);
+      for (const kept of before) {
+        if (kept) [kept[0].label, kept[0].muted] = [kept[1], kept[2]];
+      }
+      this.attention.length = noted;
+      const what = `the inbox opened again after ${reason} could not be written down (${error.code || error.message}), so it is not used: a partner would write where this home cannot read after a restart. ${old ? "The old inbox stays in use with its old list." : "There is no inbox until state.json can be written."}`;
+      this.note("inbox", "rotation_failed", what, old?.w ?? null);
+      return { rotated: false, inbox: old?.w ?? null, error: what };
+    }
     const outcome = { rotated: true, inbox: inbox.w, allow: inbox.allow.map((key) => this.nameForKey(key) ?? key), expire_at: inbox.expire_at };
     if (old) outcome.old_inbox = { w: old.w, muted: old.muted, until: old.expire_at };
     if (muted.length) outcome.muted = muted;
@@ -395,10 +453,26 @@ export class NodeRuntime {
 
   // ------------------------------------------------------------ lookup --
 
-  /** Which partners are reachable now, and where. Each address found is bound to its key, so a send can be sealed to it. */
+  /**
+   * Which partners are reachable now, and where. Each address found is bound to
+   * its key, so a send can be sealed to it. A name is chosen as a send chooses
+   * it: exactly, or apart from case when only one partner is so named. Matched
+   * without regard to case, ADA brought Ada back as well, first, and a caller
+   * that took the first address answered the wrong partner (a review of 9
+   * November 2026). A name that is nobody's is said in unknown.
+   */
   async lookup(names = null, wait = 0) {
-    const partners = names?.length ? this.partners.filter((p) => names.some((n) => String(n).toLowerCase() === p.name.toLowerCase())) : this.partners;
-    return this.lookupPartners(partners, wait);
+    if (!names?.length) return this.lookupPartners(this.partners, wait);
+    const partners = [];
+    const unknown = [];
+    for (const name of names) {
+      const partner = this.partnerByName(name);
+      if (partner === null) unknown.push(String(name));
+      else if (!partners.some((p) => p.key === partner.key)) partners.push(partner);
+    }
+    const result = partners.length ? await this.lookupPartners(partners, wait) : { online: [], offline: [], error: "no partners to look up" };
+    if (unknown.length) result.unknown = unknown;
+    return result;
   }
 
   async lookupPartners(partners, wait = 0) {
@@ -410,9 +484,11 @@ export class NodeRuntime {
       return { online: [], offline: partners.map((p) => p.name), error: `lookup failed: ${error.status ?? 0} ${JSON.stringify(error.body ?? error.message)}` };
     }
     const online = [];
+    // Only the partners asked for: a record of another partner whose hash shares the prefix is not an answer.
+    const asked = new Set(partners.map((p) => p.key));
     for (const match of matches) {
       const partner = this.partnerByKey(match.key);
-      if (!partner || typeof match.w !== "string" || !ADDRESS.test(match.w)) continue;
+      if (!partner || !asked.has(partner.key) || typeof match.w !== "string" || !ADDRESS.test(match.w)) continue;
       this.state.peers[match.w] = partner.key;
       online.push({ name: partner.name, key: partner.key, w: match.w, tags: match.tags ?? [], expires_at: match.expire_at ?? null });
     }
@@ -480,14 +556,23 @@ export class NodeRuntime {
     if (answer.status !== 201) {
       throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError });
     }
-    const sent = { to: this.nameForKey(entry.to_key) ?? entry.to_key, w: entry.w, message_id: entry.id, seq: answer.result.seq, at: answer.result.at, sha256: answer.result.sha256, expire_at: answer.result.expire_at };
+    // A 201 is a delivery even when the answer carries no receipt: read field
+    // by field, a missing one threw after the message was stored, and the
+    // caller was told nothing of it (a review of 9 November 2026).
+    const receipt = isObject(answer.result) ? answer.result : {};
+    const sent = { to: this.nameForKey(entry.to_key) ?? entry.to_key, w: entry.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, expire_at: receipt.expire_at ?? null };
     if (answer.notes?.length) sent.notes = answer.notes;
+    const said = [];
+    if (!Number.isInteger(receipt.seq) || typeof receipt.sha256 !== "string") {
+      said.push("Delivered: aamio answered 201, stored. Its answer did not say where or under which hash, so seq and sha256 are not known here.");
+    }
     if (answer.outboxError) {
       // Delivered: the service said 201. Only the record of it on this machine
       // failed, and the answer has to say both, or a caller sends it again.
       sent.outbox_error = answer.outboxError;
-      sent.note = "Delivered: aamio stored it. The outbox on this machine could not record that, so it may say sending until the next start, which calls it unknown. Do not send this message again.";
+      said.push("Delivered: aamio stored it. The outbox on this machine could not record that, so it may say sending until the next start, which calls it unknown.");
     }
+    if (said.length) sent.note = said.join(" ") + " Do not send this message again.";
     return sent;
   }
 
@@ -508,10 +593,11 @@ export class NodeRuntime {
       await this.saveOutbox();
     } catch (error) {
       // Not written, so not sent: the entry goes again, or a restart would
-      // find a send in flight that never left.
+      // find a send in flight that never left. Said with its id, as every
+      // other way a send can end.
       if (earlier === undefined) delete this.outbox[entry.id];
       else this.outbox[entry.id] = earlier;
-      throw error;
+      throw runtimeError("not_sent", `the outbox could not be written (${error.code || error.message}), so message ${entry.id} was neither recorded nor sent. Free the disk, then send it again.`, { message_id: entry.id, outcome: earlier?.status ?? "stopped" });
     }
     return entry;
   }
@@ -818,7 +904,16 @@ export class NodeRuntime {
       messages.push(...(await this.poll(channel, 0, limit - messages.length)));
     }
     const inbox = this.channel("inbox");
-    if (!messages.length && wait > 0 && inbox && !inbox.muted) messages.push(...(await this.poll(inbox, wait, limit)));
+    if (!messages.length && wait > 0 && inbox && !inbox.muted) {
+      messages.push(...(await this.poll(inbox, wait, limit)));
+      // What reached the other channels during the wait comes with this
+      // answer, as in aamio-python: only the inbox can end the wait early. It
+      // used to wait for the next read (a review of 9 November 2026).
+      for (const channel of channels) {
+        if (channel === inbox || messages.length >= limit) continue;
+        messages.push(...(await this.poll(channel, 0, limit - messages.length)));
+      }
+    }
     return messages;
   }
 }

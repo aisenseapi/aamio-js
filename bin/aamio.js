@@ -113,7 +113,7 @@ async function run(runtime, command, positional, options) {
     }
     case "read": {
       const messages = await runtime.read({ wait: whole(options.wait, "--wait", 0, 25) ?? 0, limit: whole(options.limit, "--limit", 1, 200) ?? 50 });
-      return { messages, count: messages.length, attention: runtime.attentionTaken() };
+      return { messages, count: messages.length, attention: await runtime.attentionTaken() };
     }
     case "outbox pending":
       return { pending: runtime.outboxPending() };

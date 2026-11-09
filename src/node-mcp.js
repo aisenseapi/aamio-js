@@ -344,7 +344,7 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
         case "aamio_send": return runtime.send(args.to, { text: args.text ?? null, data: args.data ?? null, re: args.re ?? null });
         case "aamio_read": {
           const messages = await runtime.read({ wait: args.wait ?? 0, limit: args.limit ?? 50 });
-          return { messages, count: messages.length, attention: runtime.attentionTaken() };
+          return { messages, count: messages.length, attention: await runtime.attentionTaken() };
         }
         case "aamio_pending": return { pending: runtime.outboxPending() };
         default: throw new Error("not reached");

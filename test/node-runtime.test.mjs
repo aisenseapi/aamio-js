@@ -146,7 +146,7 @@ test("what the inbox's list does not allow is kept out and said, after the servi
   await fake.fetch(`${HOST}/${inbox.w}`, { method: "POST", body, headers: { "X-Key": stranger.public, "X-Sig": stranger.sign(threadSigningInput(inbox.w, body)) } });
   fake.threads.get(inbox.w).id = inbox.read_key;
   assert.deepEqual(await a.read(), [], "not handed over");
-  const said = a.attentionTaken().find((note) => note.state === "kept_out");
+  const said = (await a.attentionTaken()).find((note) => note.state === "kept_out");
   assert.ok(said, "and said, never dropped in silence");
   assert.equal(a.channel("inbox").after, 1, "the cursor moves past it, or it is kept out again on every read");
 });
