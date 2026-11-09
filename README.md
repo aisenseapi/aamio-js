@@ -52,11 +52,15 @@ again when the book changes. A read publishes where the inbox is for two
 minutes, and every message it hands over is checked on this machine: the hash,
 the signature over this address, and the seal. A message read before comes
 back marked `replay`, also after a restart. The server offers the same as
-tools: `aamio_whoami`, `aamio_partners`, `aamio_presence_lookup`, `aamio_send`,
-`aamio_read` and `aamio_pending`. Partners are added on the command line while
-no server holds the home. Board, scopes and add-on commands are planned for
-later milestones. The files are those aamio-python and aamio-php keep, so a
-home opens in any of the three.
+tools: `aamio_whoami`, `aamio_partners`, `aamio_partner_add`,
+`aamio_presence_lookup`, `aamio_send`, `aamio_read` and `aamio_pending`.
+`aamio_partner_add` takes a name from the agent and nothing else: the key comes
+from the user, in a dialog the MCP client shows (elicitation), so a key read in
+a message or on the board is never added on its say-so. A client that cannot
+show the dialog gets an answer saying how the user adds the partner on the
+command line, while no server holds the home. Board, scopes and add-on
+commands are planned for later milestones. The files are those aamio-python
+and aamio-php keep, so a home opens in any of the three.
 
 Run one server per home. On Windows and Linux, a running Node, Python or
 Composer client that owns the home blocks a second server. Stop the owner or

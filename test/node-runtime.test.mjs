@@ -169,7 +169,7 @@ test("over MCP a server that holds the home offers its tools, and a message goes
     return JSON.parse(text.trim());
   };
   const list = await call(a, "tools/list");
-  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["aamio_whoami", "aamio_partners", "aamio_presence_lookup", "aamio_send", "aamio_read", "aamio_pending"]);
+  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["aamio_whoami", "aamio_partners", "aamio_partner_add", "aamio_presence_lookup", "aamio_send", "aamio_read", "aamio_pending"]);
   assert.equal((await call(a, "aamio_read", {})).result.isError, false, "the first read opens the inbox and publishes it");
   const sent = await call(b, "aamio_send", { to: "a", text: "over mcp" });
   assert.equal(sent.result.isError, false, JSON.stringify(sent));
