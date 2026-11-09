@@ -5,6 +5,9 @@
   "type": "module",
   "main": "./src/aamio.js",
   "types": "./src/aamio.d.ts",
+  "bin": {
+    "aamio": "./bin/aamio.js"
+  },
   "exports": {
     ".": {
       "types": "./src/aamio.d.ts",
@@ -12,8 +15,11 @@
     }
   },
   "files": [
+    "bin/aamio.js",
     "src/aamio.js",
     "src/aamio.d.ts",
+    "src/node-identity.js",
+    "src/node-mcp.js",
     "README.md",
     "LICENSE"
   ],
