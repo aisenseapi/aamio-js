@@ -180,7 +180,11 @@ async function callRuntimeTool(id, params, runtime, complete) {
     const said = failure instanceof GateStop
       ? { error: failure.reason ?? failure.message, error_code: "gate", fix: failure.fix ?? null }
       : { error: failure?.code ? failure.message : "the local Node runtime could not complete this call", error_code: failure?.code ?? "internal" };
-    if (failure?.code === "send_failed") Object.assign(said, { outcome: failure.outcome, message_id: failure.message_id, status: failure.status });
+    if (failure?.code === "send_failed" || failure?.code === "not_sent") {
+      Object.assign(said, { outcome: failure.outcome, message_id: failure.message_id });
+      if (failure.status !== undefined) said.status = failure.status;
+      if (failure.outbox_error) said.outbox_error = failure.outbox_error;
+    }
     return complete(toolResult(said, true));
   }
 }

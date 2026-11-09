@@ -9,7 +9,14 @@ export class FakeAamio {
     this.threads = new Map();
     this.presence = new Map();
     this.failures = [];
-    this.fetch = (url, init = {}) => this.answer(new URL(url), init);
+    this.requests = [];
+    // Presence answers its matches in this order, or the other way round.
+    this.reverseLookup = false;
+    this.fetch = (url, init = {}) => {
+      const where = new URL(url);
+      this.requests.push(`${init.method || "GET"} ${where.pathname}`);
+      return this.answer(where, init);
+    };
   }
 
   /** The next write answers with this status, or with no answer at all for "network". */
@@ -94,7 +101,7 @@ export class FakeAamio {
     if (method === "POST" && (parts[1] === "lookup" || parts[1] === "watch")) {
       const { prefixes } = JSON.parse(body);
       const matches = [...this.presence.values()].filter((r) => r.expire_at > this.time && prefixes.some((p) => r.hash.startsWith(p)));
-      return this.reply(200, { matches });
+      return this.reply(200, { matches: this.reverseLookup ? matches.reverse() : matches });
     }
     return this.reply(404, { error: "not in the fake", fix: "none" });
   }

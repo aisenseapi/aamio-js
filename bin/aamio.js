@@ -178,17 +178,17 @@ try {
   if (error?.code === "usage") {
     process.stderr.write(error.message + "\n");
     process.exitCode = 2;
-  } else if (error?.code === "send_failed" || error instanceof GateStop) {
+  } else if (error?.code === "send_failed" || error?.code === "not_sent" || error instanceof GateStop) {
     // A script that sends needs the message_id and the outcome on standard
     // output, where it reads answers, to know what not to send again.
     const said = error instanceof GateStop
       ? { error: error.reason ?? error.message, error_code: "gate", fix: error.fix ?? null }
-      : { error: error.message, error_code: "send_failed", outcome: error.outcome, message_id: error.message_id, status: error.status };
+      : { error: error.message, error_code: error.code, outcome: error.outcome, message_id: error.message_id, ...(error.status !== undefined ? { status: error.status } : {}), ...(error.outbox_error ? { outbox_error: error.outbox_error } : {}) };
     process.stdout.write(JSON.stringify(said) + "\n");
     process.exitCode = 1;
   } else {
     const known = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
-      "invalid_key", "invalid_re", "unknown_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed"];
+      "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed"];
     process.stderr.write((known.includes(error?.code) ? error.message : "The local Node runtime could not complete this command.") + "\n");
     process.exitCode = 1;
   }

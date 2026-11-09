@@ -98,12 +98,20 @@ export class NodeRuntime {
   // ------------------------------------------------------------- files --
 
   async loadJson(name, fallback, valid) {
-    let text;
+    let bytes;
     try {
-      text = await readFile(join(this.home, name), "utf8");
+      bytes = await readFile(join(this.home, name));
     } catch (error) {
       if (error.code === "ENOENT") return fallback;
       throw runtimeError("state_unreadable", `${name} in ${this.home} is there and cannot be read (${error.code || error.message}), so nothing is saved over it. Restore it from a copy, or move it aside.`);
+    }
+    let text;
+    try {
+      // Fatal: a byte that is not UTF-8 makes the file unreadable. Read with
+      // replacement characters, a name in it would be saved back changed.
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw runtimeError("state_unreadable", `${name} in ${this.home} is not UTF-8, so nothing is saved over it. Restore it from a copy, or move it aside.`);
     }
     if (text.trim() === "") return fallback;
     let value;
@@ -128,6 +136,53 @@ export class NodeRuntime {
       channel.seen = Array.isArray(channel.seen) ? channel.seen.filter((value) => typeof value === "string" && HASH.test(value)) : [];
       channel.allow = Array.isArray(channel.allow) ? channel.allow : [];
       if (!Number.isInteger(channel.after)) channel.after = 0;
+    }
+    await this.settleInterrupted();
+  }
+
+  /**
+   * What a process that stopped left in the outbox, settled by the rules
+   * aamio-python uses, so a shared home says the same in both. A send in
+   * flight may have landed: unknown. Work for a gate comes before the post, so
+   * work that never finished was never sent: stopped, unless an earlier
+   * attempt had already left. Each is said once, on this process's first read.
+   */
+  async settleInterrupted() {
+    let changed = false;
+    for (const entry of Object.values(this.outbox)) {
+      if (!isObject(entry)) continue;
+      if (["sending", "unknown", "refused", "delivered"].includes(entry.status) && entry.posting !== true) {
+        entry.posting = true;
+        changed = true;
+      }
+      if (entry.status === "sending") {
+        entry.status = "unknown";
+        entry.note = "the process stopped while this was in flight";
+        changed = true;
+      } else if (entry.status === "working") {
+        entry.status = entry.posting ? "unknown" : "stopped";
+        entry.note = entry.posting
+          ? "the process stopped while a retry was doing its proof of work. An earlier attempt had already left this machine and its answer never came, so the outcome is still unknown"
+          : "the process stopped before its proof of work was done, so nothing was sent";
+        changed = true;
+      }
+      if (["attempted", "unknown"].includes(entry.status) && entry.ever_open !== true) {
+        entry.ever_open = true;
+        changed = true;
+      }
+      if (entry.note && !entry.told && ["unknown", "stopped"].includes(entry.status)) {
+        this.note(`send ${entry.id}`, entry.status, entry.status === "stopped"
+          ? `the message to ${entry.w} was not sent: ${entry.note}. Send it again if it still matters.`
+          : `the message to ${entry.w} may have arrived: ${entry.note}. Its outcome is open: do not compose a replacement.`);
+        entry.told = true;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    try {
+      await this.saveOutbox();
+    } catch (error) {
+      this.note("outbox", "not_saved", `the outbox could not be saved after settling what the last process left (${error.code || error.message}); it is settled again next time`);
     }
   }
 
@@ -179,8 +234,20 @@ export class NodeRuntime {
     return this.partnersFile.filter((p) => isObject(p) && typeof p.name === "string" && typeof p.key === "string");
   }
 
+  /**
+   * The partner with this name: the one so named exactly, or the only one so
+   * named apart from upper and lower case. Two of those, and no exact one, is
+   * an error, never a guess: a guess seals the message to the wrong key.
+   */
   partnerByName(name) {
-    return this.partners.find((p) => p.name.toLowerCase() === String(name).toLowerCase()) ?? null;
+    const partners = this.partners;
+    const exact = partners.find((p) => p.name === String(name));
+    if (exact) return exact;
+    const folded = partners.filter((p) => p.name.toLowerCase() === String(name).toLowerCase());
+    if (folded.length > 1) {
+      throw runtimeError("ambiguous_partner", `${folded.length} partners are called ${name} apart from upper and lower case (${folded.map((p) => p.name).join(", ")}). Give the name exactly as it is in the address book, or the key.`);
+    }
+    return folded[0] ?? null;
   }
 
   partnerByKey(key) {
@@ -199,6 +266,8 @@ export class NodeRuntime {
   async partnerAdd(name, key) {
     if (typeof name !== "string" || !NAME.test(name)) throw runtimeError("invalid_name", "A partner's name is 1 to 64 characters, with no control characters.");
     if (!isKey(key)) throw runtimeError("invalid_key", "not a base64url Ed25519 public key of 32 bytes");
+    const near = this.partners.find((p) => p.name !== name && p.name.toLowerCase() === name.toLowerCase() && p.key !== key);
+    if (near) throw runtimeError("ambiguous_partner", `${near.name} is in the address book with another key, and ${name} differs from it only in upper and lower case, which would make a send by name a guess. Choose another name.`);
     this.partnersFile = this.partnersFile.filter((p) => !(isObject(p) && (p.name === name || p.key === key)));
     this.partnersFile.push({ name, key });
     await this.saveJson("partners.json", this.partnersFile);
@@ -329,6 +398,10 @@ export class NodeRuntime {
   /** Which partners are reachable now, and where. Each address found is bound to its key, so a send can be sealed to it. */
   async lookup(names = null, wait = 0) {
     const partners = names?.length ? this.partners.filter((p) => names.some((n) => String(n).toLowerCase() === p.name.toLowerCase())) : this.partners;
+    return this.lookupPartners(partners, wait);
+  }
+
+  async lookupPartners(partners, wait = 0) {
     if (!partners.length) return { online: [], offline: [], error: "no partners to look up" };
     let matches;
     try {
@@ -341,29 +414,28 @@ export class NodeRuntime {
       const partner = this.partnerByKey(match.key);
       if (!partner || typeof match.w !== "string" || !ADDRESS.test(match.w)) continue;
       this.state.peers[match.w] = partner.key;
-      online.push({ name: partner.name, w: match.w, tags: match.tags ?? [], expires_at: match.expire_at ?? null });
+      online.push({ name: partner.name, key: partner.key, w: match.w, tags: match.tags ?? [], expires_at: match.expire_at ?? null });
     }
     await this.saveState();
     const found = new Set(online.map((o) => o.name));
     return { online, offline: partners.filter((p) => !found.has(p.name)).map((p) => p.name) };
   }
 
-  async addressFor(name) {
-    const partner = this.partnerByName(name);
-    if (!partner) throw runtimeError("unknown_partner", `unknown partner: ${name}`);
-    const result = await this.lookup([partner.name]);
-    const entry = result.online[0];
+  /** The address one partner is at now, from presence: only a record of that partner's own key counts. */
+  async addressFor(partner) {
+    const result = await this.lookupPartners([partner]);
+    const entry = result.online.find((o) => o.key === partner.key);
     if (!entry) throw runtimeError("partner_offline", `${partner.name} is not online right now${result.error ? ": " + result.error : ""}`);
-    return { w: entry.w, key: partner.key };
+    return entry.w;
   }
 
-  /** Where a message for to goes, the key it is sealed to, and the partner's name when it is one. */
+  /**
+   * Where a message for to goes and the key it is sealed to. to is a partner's
+   * key or name, reached where presence says, or a write address whose key
+   * this runtime knows. The partner chosen stays chosen: a key given is never
+   * turned into a name and back.
+   */
   async recipient(to) {
-    if (isKey(String(to))) {
-      const partner = this.partnerByKey(to);
-      if (!partner) throw runtimeError("unknown_partner", "key is not in partners");
-      to = partner.name;
-    }
     if (typeof to === "string" && ADDRESS.test(to)) {
       const key = this.state.peers[to];
       if (!key) {
@@ -371,8 +443,9 @@ export class NodeRuntime {
       }
       return { w: to, key, partner: null };
     }
-    const { w, key } = await this.addressFor(to);
-    return { w, key, partner: to };
+    const partner = isKey(String(to)) ? this.partnerByKey(to) : this.partnerByName(to);
+    if (!partner) throw runtimeError("unknown_partner", isKey(String(to)) ? "key is not in partners" : `unknown partner: ${to}`);
+    return { w: await this.addressFor(partner), key: partner.key, partner };
   }
 
   // -------------------------------------------------------------- send --
@@ -385,6 +458,9 @@ export class NodeRuntime {
     // requirement this client cannot meet stops here, as a GateStop.
     let advice = await this.client.planFor(w);
     const inbox = await this.ensureInbox();
+    // The answer comes to reply_to, and the partner finds the sender there
+    // through presence, which lives two minutes: a send refreshes it.
+    await this.publishPresence();
     const body = { from: this.keys.hash.slice(0, 8), reply_to: inbox.w };
     if (text !== null && text !== undefined) body.text = String(text);
     if (data !== null && data !== undefined) body.data = data;
@@ -394,17 +470,24 @@ export class NodeRuntime {
     let answer = await this.deliver(entry, advice);
     if ((answer.status === 404 || answer.status === 410) && partner !== null) {
       // The partner may have renewed its inbox. Presence is asked again, once,
-      // and the new address means new bytes, so a new outbox entry.
-      const again = await this.addressFor(partner);
-      advice = await this.client.planFor(again.w);
-      entry = await this.outboxAdd(again.w, again.key, this.keys.seal(again.key, plaintext), body, entry.id);
+      // for the same partner, and the new address means new bytes, so a new
+      // outbox entry.
+      const w2 = await this.addressFor(partner);
+      advice = await this.client.planFor(w2);
+      entry = await this.outboxAdd(w2, partner.key, this.keys.seal(partner.key, plaintext), body, entry.id);
       answer = await this.deliver(entry, advice);
     }
     if (answer.status !== 201) {
-      throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status });
+      throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError });
     }
     const sent = { to: this.nameForKey(entry.to_key) ?? entry.to_key, w: entry.w, message_id: entry.id, seq: answer.result.seq, at: answer.result.at, sha256: answer.result.sha256, expire_at: answer.result.expire_at };
     if (answer.notes?.length) sent.notes = answer.notes;
+    if (answer.outboxError) {
+      // Delivered: the service said 201. Only the record of it on this machine
+      // failed, and the answer has to say both, or a caller sends it again.
+      sent.outbox_error = answer.outboxError;
+      sent.note = "Delivered: aamio stored it. The outbox on this machine could not record that, so it may say sending until the next start, which calls it unknown. Do not send this message again.";
+    }
     return sent;
   }
 
@@ -447,7 +530,13 @@ export class NodeRuntime {
   async deliver(entry, advice) {
     entry.attempts = (entry.attempts || 0) + 1;
     entry.status = "sending";
-    await this.saveOutbox();
+    try {
+      await this.saveOutbox();
+    } catch (error) {
+      // Nothing has left this machine, and nothing will.
+      entry.status = entry.ever_open ? "unknown" : "stopped";
+      throw runtimeError("not_sent", `the outbox could not be written (${error.code || error.message}), so message ${entry.id} was not sent. Free the disk, then send it again.`, { message_id: entry.id, outcome: entry.status });
+    }
     const headers = { "Content-Type": "application/json", "X-Key": this.keys.public, "X-Sig": this.keys.sign(threadSigningInput(entry.w, entry.envelope)) };
     let notes = [...(advice.notes || [])];
     let answer;
@@ -479,8 +568,13 @@ export class NodeRuntime {
     }
     if (notes.length) entry.gate_notes = notes;
     this.recordAnswer(entry, answer.status, answer.result);
-    await this.saveOutbox();
-    return { ...answer, notes };
+    let outboxError = null;
+    try {
+      await this.saveOutbox();
+    } catch (error) {
+      outboxError = `${error.code || error.name}: ${error.message}`;
+    }
+    return { ...answer, notes, outboxError };
   }
 
   /** What one answer changes about a message. Certainty only narrows: a delivery settles it, a refusal settles it only when nothing before was left open. */
@@ -568,6 +662,31 @@ export class NodeRuntime {
     }
   }
 
+  /**
+   * A scope in an incoming message, taken out before anyone reads it. Node
+   * keeps no scopes yet, so a share is never kept here, and the key is never
+   * handed on: aamio_scope is replaced, wherever it sits and whatever it holds,
+   * by what aamio-python shows in its place, with why it was not kept.
+   */
+  takeScopeShare(entry) {
+    const body = entry.body;
+    if (!isObject(body)) return;
+    if ("aamio_scope" in body) body.aamio_scope = { kept: false, note: "not kept: a scope is shared in data.aamio_scope" };
+    const data = body.data;
+    if (!isObject(data) || !("aamio_scope" in data)) return;
+    const share = data.aamio_scope;
+    if (!isObject(share)) {
+      data.aamio_scope = { kept: false, note: "not kept: data.aamio_scope is an object with name, and key or address" };
+      return;
+    }
+    data.aamio_scope = {
+      shared_as: typeof share.name === "string" ? share.name : null,
+      can_read: share.key !== undefined && share.key !== null,
+      kept: false,
+      note: "not kept: this Node runtime keeps no scopes yet. Ask the partner to share it again to a home run by aamio-python or aamio-php, which keep it.",
+    };
+  }
+
   /** A verified message that names an address binds its signer's key to it, once. A different key later is a conflict, and the binding stays. */
   bindClaimedAddress(channel, entry, field, address, senderKey) {
     if (typeof address !== "string" || !ADDRESS.test(address)) return;
@@ -586,8 +705,32 @@ export class NodeRuntime {
    * before the caller sees a message: a crash after that redelivers nothing, and
    * one before it redelivers what the stored hashes then mark as replays.
    */
-  async poll(channel, wait = 0, limit = null, again = true) {
+  async poll(channel, wait = 0, limit = null) {
     if (channel.muted) return [];
+    const before = { after: channel.after, created_at: channel.created_at, gone: channel.gone, seen: [...channel.seen], peers: { ...this.state.peers } };
+    try {
+      return await this.pollOnce(channel, wait, limit, true);
+    } catch (error) {
+      if (!error?.notSaved) throw error;
+      // What this read changed is undone in memory too: the cursor, the hashes
+      // and the bindings stay as the file has them, and the messages wait at
+      // the service for the next read, which hands them over.
+      Object.assign(channel, { after: before.after, created_at: before.created_at, gone: before.gone, seen: before.seen });
+      this.state.peers = before.peers;
+      this.note(channel.label, "not_saved", `what this read found here could not be written down (${error.cause?.code || error.cause?.message}), so nothing from this channel was handed over. It is still there for the next read, and nothing was skipped.`, channel.w);
+      return [];
+    }
+  }
+
+  async saveRead() {
+    try {
+      await this.saveState();
+    } catch (cause) {
+      throw Object.assign(new Error("the read could not be saved"), { notSaved: true, cause });
+    }
+  }
+
+  async pollOnce(channel, wait, limit, again) {
     let path = "/" + channel.w;
     if (channel.after > 0 || wait > 0) path += "/after/" + channel.after;
     if (wait > 0) path += "/wait/" + Math.min(25, wait);
@@ -614,7 +757,7 @@ export class NodeRuntime {
       // The cursor belonged to that thread. The hashes are the reader's and stay.
       channel.after = 0;
       channel.created_at = null;
-      await this.saveState();
+      await this.saveRead();
       return [];
     }
     channel.gone = false;
@@ -623,7 +766,7 @@ export class NodeRuntime {
       this.note(channel.label, "restarted", `the thread at this address is a new one, opened at ${created} where this channel knew one opened at ${channel.created_at}, so it is read again from the start`, channel.w);
       channel.after = 0;
       channel.created_at = null;
-      return this.poll(channel, 0, limit, false);
+      return this.pollOnce(channel, 0, limit, false);
     }
     if (data.reset) this.note(channel.label, "restarted", (isObject(data.reset) && data.reset.what) || "the service read this thread from the start", channel.w);
     channel.created_at = created;
@@ -642,6 +785,7 @@ export class NodeRuntime {
         continue;
       }
       if (entry.sha256 !== null && !channel.seen.includes(entry.sha256)) channel.seen.push(entry.sha256);
+      this.takeScopeShare(entry);
       if (isObject(entry.body) && entry.verified && entry.from_key) {
         for (const field of ["reply_to", "channel"]) this.bindClaimedAddress(channel, entry, field, entry.body[field], entry.from_key);
       }
@@ -655,7 +799,7 @@ export class NodeRuntime {
     if (stoppedEarly && lastSeq !== null) channel.after = lastSeq;
     else if (Number.isInteger(data.next)) channel.after = data.next;
     else if (lastSeq !== null) channel.after = Math.max(channel.after, lastSeq);
-    await this.saveState();
+    await this.saveRead();
     return entries;
   }
 
@@ -667,10 +811,14 @@ export class NodeRuntime {
     const channels = this.state.channels.filter((c) => isObject(c) && !c.muted && Number(c.expire_at) > now)
       .sort((a, b) => (a.label === "inbox" ? -1 : b.label === "inbox" ? 1 : 0));
     const messages = [];
+    // Every channel without waiting first: a message on an older inbox that
+    // is still read is handed over at once, not after a wait on the new one.
     for (const channel of channels) {
       if (messages.length >= limit) break;
-      messages.push(...(await this.poll(channel, channel.label === "inbox" ? wait : 0, limit - messages.length)));
+      messages.push(...(await this.poll(channel, 0, limit - messages.length)));
     }
+    const inbox = this.channel("inbox");
+    if (!messages.length && wait > 0 && inbox && !inbox.muted) messages.push(...(await this.poll(inbox, wait, limit)));
     return messages;
   }
 }
