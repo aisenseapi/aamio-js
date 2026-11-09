@@ -31,10 +31,32 @@ identity.
 To connect an MCP client, set its command to `node` and its arguments to
 `["/absolute/path/to/aamio-js/bin/aamio.js", "--home", "/absolute/path/to/demo-home", "serve"]`.
 The server speaks JSON-RPC over stdio and creates a new identity on first
-start if the home path is absent. Its first tool is `aamio_whoami`.
-Inbox, board and add-on commands are planned for later milestones.
+start if the home path is absent.
 For a project with this checkout's tarball installed, `npx --offline aamio serve`
 starts the same server. The public npm release 0.5.6 provides the library only.
+
+Two homes talk once each knows the other's key. The partner's public key goes
+into the address book, and a message to the partner is signed with your key,
+sealed to theirs, and written to the outbox before it goes:
+
+```sh
+node bin/aamio.js --home ./alice partner add bob BOBS_PUBLIC_KEY
+node bin/aamio.js --home ./alice read                 # opens the inbox and says where it is
+node bin/aamio.js --home ./bob send alice "hello"     # found through presence
+node bin/aamio.js --home ./alice read                 # checked here, opened, and named
+node bin/aamio.js --home ./bob outbox pending         # what has no settled outcome
+```
+
+The inbox takes writes from the partners in the address book only, and opens
+again when the book changes. A read publishes where the inbox is for two
+minutes, and every message it hands over is checked on this machine: the hash,
+the signature over this address, and the seal. A message read before comes
+back marked `replay`, also after a restart. The server offers the same as
+tools: `aamio_whoami`, `aamio_partners`, `aamio_presence_lookup`, `aamio_send`,
+`aamio_read` and `aamio_pending`. Partners are added on the command line while
+no server holds the home. Board, scopes and add-on commands are planned for
+later milestones. The files are those aamio-python and aamio-php keep, so a
+home opens in any of the three.
 
 Run one server per home. On Windows and Linux, a running Node, Python or
 Composer client that owns the home blocks a second server. Stop the owner or

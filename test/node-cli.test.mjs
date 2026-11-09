@@ -46,8 +46,12 @@ test("serve creates an identity in the chosen home and emits only protocol messa
   const answers = served.stdout.trim().split("\n").map(line => JSON.parse(line));
   assert.deepEqual(answers.map(answer => answer.id), [1, 2]);
   assert.equal(answers[0].result.protocolVersion, "2025-11-25");
-  const identity = JSON.parse(answers[1].result.content[0].text);
-  assert.deepEqual(Object.keys(identity).sort(), ["hash", "hash_prefix", "key"]);
+  const whoami = JSON.parse(answers[1].result.content[0].text);
+  // The server holds the home, so its whoami adds the inbox, the host and the
+  // tags: no inbox yet, since nothing has been read or sent.
+  assert.deepEqual(Object.keys(whoami).sort(), ["hash", "hash_prefix", "host", "inbox", "inbox_expires_at", "key", "tags"]);
+  assert.equal(whoami.inbox, null);
+  const identity = { key: whoami.key, hash: whoami.hash, hash_prefix: whoami.hash_prefix };
   assert.equal(identity.hash_prefix, identity.hash.slice(0, 8));
   for (const command of ["whoami", "init"]) {
     const result = cli(home, [command]);

@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { GateStop } from "../src/aamio.js";
 import { initIdentity, readIdentity } from "../src/node-identity.js";
-import { takeHome } from "../src/node-lock.js";
 import { serveMcp } from "../src/node-mcp.js";
 import { NodeRuntime } from "../src/node-runtime.js";
 
@@ -136,13 +135,25 @@ async function main() {
   else if (command === "version") process.stdout.write(version + "\n");
   else if (command === "serve") {
     await initIdentity(home);
-    // One live runtime per home, Node, Python or PHP: serve holds owner.lock
-    // for as long as it runs, as the other clients' servers do.
-    const owner = await takeHome(home);
+    // One live runtime per home, Node, Python or PHP: serve holds the home,
+    // owner.lock and all, for as long as it runs, as the other servers do.
+    const runtime = await NodeRuntime.open({ home });
+    // Presence lives two minutes. Once a read or a send has opened the inbox,
+    // it is published again every minute and the inbox renewed before it runs
+    // out, so partners keep finding this server. Nothing goes out before that.
+    const keepalive = setInterval(() => {
+      runtime.serial(async () => {
+        if (runtime.closed || !runtime.channel("inbox")) return;
+        await runtime.ensureInbox();
+        await runtime.publishPresence();
+      }).catch(() => {});
+    }, 30_000);
+    keepalive.unref();
     try {
-      await serveMcp({ home, version });
+      await serveMcp({ home, version, runtime });
     } finally {
-      await owner.release();
+      clearInterval(keepalive);
+      await runtime.serial(() => runtime.close());
     }
   } else if (command === "init" || command === "whoami") {
     const identity = command === "init" ? await initIdentity(home) : await readIdentity(home);

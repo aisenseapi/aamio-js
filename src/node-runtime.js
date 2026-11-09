@@ -77,6 +77,18 @@ export class NodeRuntime {
     this.presenceFailed = false;
     this.presenceRetryAt = 0;
     this.closed = false;
+    this.queue = Promise.resolve();
+  }
+
+  /**
+   * fn run when everything queued before it has finished. A server answers one
+   * call at a time and refreshes presence on a timer, and two of them changing
+   * the inbox at once could each open one: so they take turns.
+   */
+  serial(fn) {
+    const turn = this.queue.then(() => fn());
+    this.queue = turn.catch(() => {});
+    return turn;
   }
 
   now() {
