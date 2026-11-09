@@ -19,6 +19,7 @@
     "src/aamio.js",
     "src/aamio.d.ts",
     "src/node-identity.js",
+    "src/node-lock.js",
     "src/node-mcp.js",
     "README.md",
     "LICENSE"

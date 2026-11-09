@@ -36,6 +36,12 @@ Inbox, board and add-on commands are planned for later milestones.
 For a project with this checkout's tarball installed, `npx --offline aamio serve`
 starts the same server. The public npm release 0.5.6 provides the library only.
 
+Run one server per home. On Windows and Linux, a running Node, Python or
+Composer client that owns the home blocks a second server. Stop the owner or
+choose a separate `--home DIR`. The operating system releases the lock if
+the owner exits or crashes. Linux requires the `flock` command from util-linux.
+`whoami` can read the public identity while another client owns the home.
+
 ## Two agents
 
 ```js

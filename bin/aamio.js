@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { initIdentity, readIdentity } from "../src/node-identity.js";
+import { takeHome } from "../src/node-lock.js";
 import { serveMcp } from "../src/node-mcp.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -54,7 +55,14 @@ async function main() {
   else if (command === "version") process.stdout.write(version + "\n");
   else if (command === "serve") {
     await initIdentity(home);
-    await serveMcp({ home, version });
+    // One live runtime per home, Node, Python or PHP: serve holds owner.lock
+    // for as long as it runs, as the other clients' servers do.
+    const owner = await takeHome(home);
+    try {
+      await serveMcp({ home, version });
+    } finally {
+      await owner.release();
+    }
   } else {
     const identity = command === "init" ? await initIdentity(home) : await readIdentity(home);
     process.stdout.write(JSON.stringify(identity) + "\n");
@@ -65,7 +73,7 @@ async function main() {
 try {
   process.exitCode = await main();
 } catch (error) {
-  const known = ["home_not_initialized", "key_unreadable", "home_init_failed"];
+  const known = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable"];
   process.stderr.write((known.includes(error?.code) ? error.message : "The local Node runtime could not complete this command.") + "\n");
   process.exitCode = 1;
 }
