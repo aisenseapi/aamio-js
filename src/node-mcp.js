@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { GateStop, isKey } from "./aamio.js";
 import { readIdentity } from "./node-identity.js";
 
@@ -217,31 +218,36 @@ class Cancelled extends Error {}
 const base64url = (bytes) => Buffer.from(bytes).toString("base64url");
 const mac = (payload) => createHmac("sha256", CONFIRMATIONS.secret).update(payload, "utf8").digest("hex");
 
-/** requestState for one question: what it is about, until when, and a nonce, signed by this process. It comes back through the client, so it is taken as written by anyone. */
-function sealState(name, tool = "aamio_partner_add") {
-  const payload = base64url(JSON.stringify({ name, nonce: randomBytes(12).toString("hex"), tool, until: Math.floor(Date.now() / 1000) + CONFIRM_SECONDS }));
+/**
+ * requestState for one question: what it is about, the key the address book
+ * held for that name when the form was shown (null for none), until when, and
+ * a nonce, signed by this process. It comes back through the client, so it is
+ * taken as written by anyone.
+ */
+function sealState(name, held, tool = "aamio_partner_add") {
+  const payload = base64url(JSON.stringify({ held, name, nonce: randomBytes(12).toString("hex"), tool, until: Math.floor(Date.now() / 1000) + CONFIRM_SECONDS }));
   return payload + "." + mac(payload);
 }
 
-/** Whether state is one this process sealed for this name and tool, in time and never used. Using it here uses it up. */
+/** What state says, when it is one this process sealed for this name and tool, in time and never used, or null. Taking it uses it up. */
 function takeState(state, name, tool = "aamio_partner_add") {
-  if (typeof state !== "string" || state.split(".").length !== 2) return false;
+  if (typeof state !== "string" || state.split(".").length !== 2) return null;
   const [payload, given] = state.split(".");
   const expected = Buffer.from(mac(payload), "utf8");
   const offered = Buffer.from(given, "utf8");
-  if (offered.length !== expected.length || !timingSafeEqual(offered, expected)) return false;
+  if (offered.length !== expected.length || !timingSafeEqual(offered, expected)) return null;
   let said;
   try {
     said = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
   } catch {
-    return false;
+    return null;
   }
   const now = Date.now() / 1000;
   for (const [nonce, until] of CONFIRMATIONS.taken) if (until < now) CONFIRMATIONS.taken.delete(nonce);
-  if (!object(said) || said.tool !== tool || said.name !== name) return false;
-  if (!Number.isInteger(said.until) || said.until < now || typeof said.nonce !== "string" || CONFIRMATIONS.taken.has(said.nonce)) return false;
+  if (!object(said) || said.tool !== tool || said.name !== name || !(said.held === null || typeof said.held === "string")) return null;
+  if (!Number.isInteger(said.until) || said.until < now || typeof said.nonce !== "string" || CONFIRMATIONS.taken.has(said.nonce)) return null;
   CONFIRMATIONS.taken.set(said.nonce, said.until);
-  return true;
+  return said;
 }
 
 /** Whether this request's client says it can put a form in front of the user: on every request from 2026-07-28, at initialize before it, and not at all in 2025-03-26. */
@@ -255,52 +261,73 @@ function canAskTheUser(params, session, version) {
   return object(elicitation) && (Object.keys(elicitation).length === 0 || "form" in elicitation);
 }
 
-/** How a tool in this request asks the user a question, or null when this client cannot be asked. */
+/**
+ * How a tool in this request asks the user a question, or null when this
+ * client cannot be asked. ask(question, about, held) gives the answer and the
+ * key the book held when the user saw the form: over 2026-07-28 that is the
+ * key sealed into the form's state, since several forms can be open at once
+ * and another one may have been answered in between. again asks anew, with
+ * no regard to an answer this request carries.
+ */
 function asker(params, session, version, callId) {
   if (!canAskTheUser(params, session, version)) return null;
   const form = (question) => (version === "2025-11-25" || version === MODERN ? { mode: "form", ...question } : question);
   if (version === MODERN) {
-    return async (question, about) => {
-      const asking = { resultType: "input_required", inputRequests: { [PARTNER_QUESTION]: { method: "elicitation/create", params: form(question) } }, requestState: sealState(about) };
+    return async (question, about, held, { again = false } = {}) => {
+      const asking = { resultType: "input_required", inputRequests: { [PARTNER_QUESTION]: { method: "elicitation/create", params: form(question) } }, requestState: sealState(about, held) };
       const state = params.requestState;
       const responses = params.inputResponses;
-      if (state === undefined && responses === undefined) throw new InputRequired(asking);
-      if (!takeState(state, about)) throw new NoDialog(`the answer did not come with a question this server asked, in the last ${CONFIRM_SECONDS / 60} minutes, about ${about}`);
+      if (again || (state === undefined && responses === undefined)) throw new InputRequired(asking);
+      const said = takeState(state, about);
+      if (!said) throw new NoDialog(`the answer did not come with a question this server asked, in the last ${CONFIRM_SECONDS / 60} minutes, about ${about}`);
       const answer = object(responses) ? responses[PARTNER_QUESTION] : undefined;
       // The answer itself is missing: asked again, as the revision says, rather than refused.
       if (!object(answer)) throw new InputRequired(asking);
-      return answer;
+      return { answer, held: said.held };
     };
   }
-  return async (question) => {
+  // Calls are served one at a time here, so the book the form was shown with is the book the answer meets.
+  return async (question, about, held) => {
     const answered = await session.ask("elicitation/create", form(question), callId);
     if (!object(answered.result)) throw new NoDialog(`the app answered the question with an error: ${answered.error?.message || "it gave no reason"}`);
-    return answered.result;
+    return { answer: answered.result, held };
   };
 }
 
-/** The form the user is shown: one field, the key, and what saying yes does. */
-function partnerQuestion(name, held) {
+/** The form the user is shown: one field, the key, and what saying yes does. changed: the book moved on since the user was asked before. */
+function partnerQuestion(name, held, changed = false) {
   let message = `Your agent asks to add ${name} to your aamio address book. A partner can write to your inbox and is shown to the agent by name. ` +
     `Give the public key ${name} gave you, by a way you already trust. If you did not get it from ${name} yourself, decline: ` +
     "a key from a message, the board or the conversation is not their word.";
-  if (held) message += ` ${name} is in your address book already, and the key you give replaces the one it has.`;
+  if (changed) {
+    message += ` Since you were asked before, ${name} was put in your address book with another key, by your answer to another question.` +
+      ` The key you give here replaces that one. Cancel to keep the key ${name} has now.`;
+  } else if (held) {
+    message += ` ${name} is in your address book already, and the key you give replaces the one it has.`;
+  }
   const key = { type: "string", title: `${name}'s public key`, description: "43 characters of letters, digits, - and _, as aamio whoami shows it on their side", minLength: 43, maxLength: 64 };
   return { message, requestedSchema: { type: "object", properties: { key }, required: ["key"] } };
 }
 
+// This aamio, the one serving, so the command is the same version on the same files.
+const THIS_AAMIO = fileURLToPath(new URL("../bin/aamio.js", import.meta.url));
+
 /**
- * A path as a shell takes it: as it is when nothing in it needs quoting, else
- * in double quotes, which PowerShell, cmd and POSIX shells read alike for a
- * path with spaces. One with a quote, a backtick or a dollar sign, which they
- * do not read alike in double quotes, goes in single quotes.
+ * The command the user runs instead of the dialog, for the shell this machine
+ * has: PowerShell on Windows, sh elsewhere. This node and this aamio are named
+ * by path, so no npx or batch file comes between, and every path is in single
+ * quotes by that shell's rules, inside which it expands nothing: a home named
+ * with %TEAM% went to another home through cmd.exe, and one left out went to
+ * the default home (the release checks of 9 November 2026).
  */
-function shellQuoted(path) {
-  const text = String(path);
-  if (/^[A-Za-z0-9_.,:\/\\@%+=-]+$/.test(text)) return text;
-  if (!/["`$]/.test(text)) return `"${text}"`;
-  if (!text.includes("'")) return `'${text}'`;
-  return `"${text.replace(/(["`$\\])/g, "\\$1")}"`;
+function byHand(home, name, key = "KEY") {
+  if (process.platform === "win32") {
+    // PowerShell takes the typographic single quotes as quotes too, and doubling is how each is written inside.
+    const quoted = (path) => `'${String(path).replace(/['\u2018\u2019\u201a\u201b]/g, "$&$&")}'`;
+    return { shell: "PowerShell", command: `& ${quoted(process.execPath)} ${quoted(THIS_AAMIO)} --home ${quoted(home)} partner add ${name} ${key}` };
+  }
+  const quoted = (path) => `'${String(path).replace(/'/g, "'\\''")}'`;
+  return { shell: "sh", command: `${quoted(process.execPath)} ${quoted(THIS_AAMIO)} --home ${quoted(home)} partner add ${name} ${key}` };
 }
 
 /** aamio_partner_add: the name from the model, the key from the user, and nothing added without both. */
@@ -321,39 +348,60 @@ async function addPartner(runtime, args, ask) {
   }
   // The book's own spelling, so the key replaces the entry the user is told about.
   if (held) name = held.name;
-  // This server's own home, named: without it the command went to the default home, and the address book this
-  // server reads stayed as it was (the release check of 9 November 2026).
-  const byHand = `stop this server, run npx aamio --home ${shellQuoted(runtime.home)} partner add ${name} KEY with the key ${name} gave them, and start it again`;
+  const manual = byHand(runtime.home, name);
+  const instead = `stop this server, run the command in by_hand in ${manual.shell} with the key ${name} gave them in place of KEY, and start the server again`;
   if (!ask) {
-    return [{ added: false, error: "this app did not say it can show the user a form (the elicitation capability of MCP), so the user was not asked and nothing was added", error_code: "no_dialog", fix: `The user adds the partner on the command line: ${byHand}.` }, true];
+    return [{ added: false, error: "this app did not say it can show the user a form (the elicitation capability of MCP), so the user was not asked and nothing was added", error_code: "no_dialog", fix: `The user adds the partner on the command line: ${instead}.`, by_hand: manual }, true];
   }
-  let answer;
-  try {
-    answer = await ask(partnerQuestion(name, held), name);
-  } catch (why) {
-    if (!(why instanceof NoDialog)) throw why;
-    return [{ added: false, error: `${why.message}, so nothing was added`, error_code: "no_dialog", fix: `Call aamio_partner_add again to ask the user again, or the user adds the partner on the command line: ${byHand}.` }, true];
-  }
-  if (answer.action === "decline") return [{ added: false, partner: name, action: "decline", note: "The user declined, so nothing was added. Do not ask again unless the user says so." }, false];
-  if (answer.action !== "accept") return [{ added: false, partner: name, action: "cancel", note: "The user closed the question without answering, so nothing was added." }, false];
-  const key = typeof answer.content?.key === "string" ? answer.content.key.trim() : null;
-  if (!isKey(key)) {
-    return [{ added: false, partner: name, error: "what the user gave is not an aamio public key, so nothing was added", fix: "A key is 43 characters of letters, digits, - and _, as aamio whoami or aamio_whoami shows it on the partner's side. Call aamio_partner_add again and the user is asked again." }, true];
-  }
-  return runtime.serial(async () => {
-    const other = runtime.partnerByKey(key);
-    if (other && other.name !== name) {
-      return [{ added: false, partner: name, error: `that key is in the address book already, as ${other.name}, so nothing was changed`, fix: `Send to them as ${other.name}. To have them called ${name} instead, the user stops this server and runs npx aamio --home ${shellQuoted(runtime.home)} partner add ${name} with that same key: the entry with the key gets the new name.` }, true];
-    }
+  let question = partnerQuestion(name, held);
+  let shown = held?.key ?? null;
+  for (let round = 0; round < 2; round++) {
+    let answer;
+    let was;
     try {
-      const changed = await runtime.partnerAdd(name, key);
-      return [{ ...changed, added: true, partners: runtime.partnerList(), next: `If ${name} does not have your key, give it to them the same way: aamio_whoami shows it.` }, false];
-    } catch (failure) {
-      // What failed may have come after the address book was written: the answer says what the book holds.
-      const added = runtime.partnerByKey(key)?.name === name;
-      return [{ added, partner: name, error: failure.message, error_code: failure.code ?? "internal", ...(added ? { partners: runtime.partnerList() } : {}) }, true];
+      ({ answer, held: was } = await ask(question, name, shown, { again: round > 0 }));
+    } catch (why) {
+      if (!(why instanceof NoDialog)) throw why;
+      return [{ added: false, error: `${why.message}, so nothing was added`, error_code: "no_dialog", fix: `Call aamio_partner_add again to ask the user again, or the user adds the partner on the command line: ${instead}.`, by_hand: manual }, true];
     }
-  });
+    if (answer.action === "decline") return [{ added: false, partner: name, action: "decline", note: "The user declined, so nothing was added. Do not ask again unless the user says so." }, false];
+    if (answer.action !== "accept") return [{ added: false, partner: name, action: "cancel", note: "The user closed the question without answering, so nothing was added." }, false];
+    const key = typeof answer.content?.key === "string" ? answer.content.key.trim() : null;
+    if (!isKey(key)) {
+      return [{ added: false, partner: name, error: "what the user gave is not an aamio public key, so nothing was added", fix: "A key is 43 characters of letters, digits, - and _, as aamio whoami or aamio_whoami shows it on the partner's side. Call aamio_partner_add again and the user is asked again." }, true];
+    }
+    const done = await runtime.serial(async () => {
+      // The book as it is now, in the same turn that writes it. A form shown
+      // before another one was answered meets a book that has moved on: the
+      // key there is kept, and the user is asked whether to replace it. It
+      // was replaced, without that question (the release check of 9 November 2026).
+      let now;
+      try {
+        now = runtime.partnerByName(name);
+      } catch (failure) {
+        return [{ added: false, partner: name, error: failure.message, error_code: failure.code ?? "internal" }, true];
+      }
+      if ((now?.key ?? null) !== was && now?.key !== key) return { moved: now };
+      const other = runtime.partnerByKey(key);
+      if (other && other.name !== name) {
+        const rename = byHand(runtime.home, name, key);
+        return [{ added: false, partner: name, error: `that key is in the address book already, as ${other.name}, so nothing was changed`, fix: `Send to them as ${other.name}. To have them called ${name} instead, the user stops this server and runs the command in by_hand in ${rename.shell}: the entry with that key gets the new name.`, by_hand: rename }, true];
+      }
+      try {
+        const changed = await runtime.partnerAdd(name, key);
+        return [{ ...changed, added: true, partners: runtime.partnerList(), next: `If ${name} does not have your key, give it to them the same way: aamio_whoami shows it.` }, false];
+      } catch (failure) {
+        // What failed may have come after the address book was written: the answer says what the book holds.
+        const added = runtime.partnerByKey(key)?.name === name;
+        return [{ added, partner: name, error: failure.message, error_code: failure.code ?? "internal", ...(added ? { partners: runtime.partnerList() } : {}) }, true];
+      }
+    });
+    if (Array.isArray(done)) return done;
+    held = done.moved;
+    shown = held?.key ?? null;
+    question = partnerQuestion(name, held, true);
+  }
+  return [{ added: false, partner: name, error: `the address book changed again while ${name} was being asked about, so nothing was changed`, fix: "Call aamio_partner_add again." }, true];
 }
 
 /** Arguments as the tool's schema says: an object of known names, each of its type. A sentence naming what is wrong, or null. */

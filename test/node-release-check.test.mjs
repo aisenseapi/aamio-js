@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -136,10 +136,18 @@ test("P1: a partner written down is added, also when the inbox could not be open
   assert.deepEqual([...a.channel("inbox").allow].sort(), [bob.public, carol.public].sort(), "and the next read opens the inbox for both");
 });
 
-test("the way by hand names this server's home, quoted, and following it changes that home and no other", async (t) => {
+/** The command by_hand gives, run as written in the shell it names, with KEY put in, AAMIO_HOME elsewhere and TEAM set. */
+function runByHand(byHand, key, env) {
+  const command = byHand.command.replace(/ KEY$/, ` ${key}`);
+  const shell = byHand.shell === "PowerShell" ? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]] : ["sh", ["-c", command]];
+  return spawnSync(shell[0], shell[1], { encoding: "utf8", timeout: 60_000, env: { ...process.env, ...env } });
+}
+
+test("the way by hand is run as written in the shell it names, and changes this server's home and no other", async (t) => {
   const fake = new FakeAamio();
   const { root, open } = await fixture(t, fake);
-  const served = join(root, "a home with spaces", "aamio");
+  // Spaces, %TEAM% for cmd.exe, $TEAM for sh and PowerShell, and a quote: a name no shell may take apart.
+  const served = join(root, "Aamio-%TEAM% $TEAM it's", "home");
   const other = join(root, "the default home");
   await mkdir(join(served, ".."), { recursive: true });
   await initIdentity(served);
@@ -156,21 +164,20 @@ test("the way by hand names this server's home, quoted, and following it changes
   input.write(JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } } }) + "\n");
   input.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "aamio_partner_add", arguments: { name: "bob" } } }) + "\n");
   await done;
-  const fix = text.trim().split("\n").map((line) => JSON.parse(line)).find((m) => m.id === 1).result.structuredContent.fix;
-  assert.match(fix, /npx aamio --home "[^"]+" partner add bob KEY/);
-  const named = fix.match(/--home "([^"]+)"/)[1];
-  assert.equal(named, a.home, "the home this server holds, in double quotes since the path has spaces");
+  const said = text.trim().split("\n").map((line) => JSON.parse(line)).find((m) => m.id === 1).result.structuredContent;
+  assert.equal(said.by_hand.shell, process.platform === "win32" ? "PowerShell" : "sh");
+  assert.match(said.fix, new RegExp(`in ${said.by_hand.shell} with the key bob gave them in place of KEY`));
   await a.close();
 
-  // Followed as written, with AAMIO_HOME pointing elsewhere: the change lands in the named home only.
   const bob = Keys.generate();
-  const ran = spawnSync(process.execPath, [bin, "--home", named, "partner", "add", "bob", bob.public], { encoding: "utf8", timeout: 30_000, env: { ...process.env, AAMIO_HOME: other, AAMIO_HOST: "http://127.0.0.1:9" } });
-  assert.equal(ran.status, 0, ran.stderr);
-  assert.deepEqual((await book(served)).map((p) => p.name), ["carol", "bob"]);
-  assert.equal(existsSync(join(other, "partners.json")), false, "and nothing in the other home");
+  const ran = runByHand(said.by_hand, bob.public, { TEAM: "blue", AAMIO_HOME: other, AAMIO_HOST: "http://127.0.0.1:9" });
+  assert.equal(ran.status, 0, ran.stderr + ran.stdout);
+  assert.deepEqual((await book(served)).map((p) => p.name), ["carol", "bob"], "the partner is in the home this server holds");
+  assert.equal(existsSync(join(other, "partners.json")), false, "and not in the default home");
+  assert.deepEqual((await readdir(root)).sort(), ["Aamio-%TEAM% $TEAM it's", "the default home"].sort(), "and no home was made under a name a shell expanded");
 });
 
-test("a key held under another name: the way to rename is partner add with that same key, in this server's home", async (t) => {
+test("a key held under another name: by_hand renames with partner add and that same key, in this server's home", async (t) => {
   const fake = new FakeAamio();
   const { a: homeA, open } = await fixture(t, fake, "a");
   const a = await open(homeA);
@@ -178,11 +185,74 @@ test("a key held under another name: the way to rename is partner add with that 
   await a.partnerAdd("carol", carol.public);
   const { added } = await addOverMcp(a, "caroline", carol.public);
   assert.equal(added.structuredContent.added, false);
-  assert.ok(added.structuredContent.fix.includes(`npx aamio --home ${a.home} partner add caroline with that same key`), added.structuredContent.fix);
+  assert.match(added.structuredContent.by_hand.command, new RegExp(` partner add caroline ${carol.public.replace(/[-]/g, "\\-")}$`));
   assert.doesNotMatch(added.structuredContent.fix, /removes/, "no command the CLI does not have");
-  // What it says works: the entry with the key gets the new name.
-  await a.partnerAdd("caroline", carol.public);
-  assert.deepEqual(a.partnerList().map((p) => [p.name, p.key]), [["caroline", carol.public]]);
+  await a.close();
+  const ran = runByHand(added.structuredContent.by_hand, "", { AAMIO_HOST: "http://127.0.0.1:9" });
+  assert.equal(ran.status, 0, ran.stderr + ran.stdout);
+  assert.deepEqual((await book(homeA)).map((p) => [p.name, p.key]), [["caroline", carol.public]], "the entry with the key has the new name");
+});
+
+/** One call over 2026-07-28: the tool's result, with the client's capabilities and any state and answer it carries. */
+async function modernCall(runtime, args, extra = {}) {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let text = "";
+  output.on("data", (chunk) => { text += chunk; });
+  const done = serveMcp({ home: runtime.home, version: "test", runtime, input, output });
+  const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { elicitation: {} } };
+  input.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "aamio_partner_add", arguments: args, _meta: meta, ...extra } }) + "\n");
+  await done;
+  return JSON.parse(text.trim()).result;
+}
+
+const answering = (state, content, action = "accept") => ({ requestState: state, inputResponses: { aamio_partner_key: { action, ...(content ? { content } : {}) } } });
+
+test("two forms open for one new contact: the older answer does not replace the newer without a question of its own", async (t) => {
+  const fake = new FakeAamio();
+  const { a: homeA, open } = await fixture(t, fake, "a");
+  let a = await open(homeA);
+  const first = Keys.generate();
+  const second = Keys.generate();
+  const older = await modernCall(a, { name: "bob" });
+  const newer = await modernCall(a, { name: "bob" });
+  assert.equal(older.resultType, "input_required");
+  assert.equal(newer.resultType, "input_required");
+
+  const approved = await modernCall(a, { name: "bob" }, answering(newer.requestState, { key: first.public }));
+  assert.equal(approved.structuredContent.added, true);
+  const late = await modernCall(a, { name: "bob" }, answering(older.requestState, { key: second.public }));
+  assert.equal(late.resultType, "input_required", "the older answer is not applied: the user is asked again");
+  const again = late.inputRequests.aamio_partner_key.params;
+  assert.match(again.message, /was put in your address book with another key/);
+  assert.match(again.message, /replaces that one/);
+  assert.deepEqual(a.partnerList().map((p) => p.key), [first.public], "and the key there is kept meanwhile");
+
+  const cancelled = await modernCall(a, { name: "bob" }, answering(late.requestState, null, "cancel"));
+  assert.equal(cancelled.structuredContent.added, false);
+  await a.close();
+  a = await open(homeA);
+  assert.deepEqual(a.partnerList().map((p) => p.key), [first.public], "after a restart the first key is still there");
+
+  const asked = await modernCall(a, { name: "bob" });
+  assert.match(asked.inputRequests.aamio_partner_key.params.message, /is in your address book already, and the key you give replaces/);
+  const replaced = await modernCall(a, { name: "bob" }, answering(asked.requestState, { key: second.public }));
+  assert.equal(replaced.structuredContent.added, true, "a replacement the user approved as one is made");
+  assert.deepEqual(a.partnerList().map((p) => p.key), [second.public]);
+});
+
+test("an older form answered with the key the newer one put there changes nothing and asks nothing", async (t) => {
+  const fake = new FakeAamio();
+  const { a: homeA, open } = await fixture(t, fake, "a");
+  const a = await open(homeA);
+  const key = Keys.generate();
+  const older = await modernCall(a, { name: "bob" });
+  const newer = await modernCall(a, { name: "bob" });
+  await modernCall(a, { name: "bob" }, answering(newer.requestState, { key: key.public }));
+  const same = await modernCall(a, { name: "bob" }, answering(older.requestState, { key: key.public }));
+  assert.equal(same.resultType, "complete");
+  assert.equal(same.structuredContent.added, true);
+  assert.deepEqual(a.partnerList().map((p) => p.key), [key.public]);
 });
 
 test("the first inbox is open before there are partners, said as such when the first partner is added, and read until it expires", async (t) => {
@@ -196,8 +266,11 @@ test("the first inbox is open before there are partners, said as such when the f
   const bob = Keys.generate();
   const changed = await a.partnerAdd("bob", bob.public);
   assert.equal(changed.rotated, true);
-  const note = (await a.attentionTaken()).find((n) => n.state === "open");
-  assert.match(note.what, new RegExp(`inbox ${first.w} was open to anyone and is still read until ${first.expire_at}`));
+  // In the answer of the call that changed the book, which partner add on the command line prints before it ends.
+  assert.equal(changed.old_inbox.open, true);
+  assert.match(changed.old_inbox.note, new RegExp(`inbox ${first.w} was open to anyone, signed or not, and is still read until ${first.expire_at}`));
+  assert.match(changed.old_inbox.note, /takes writes from the 1 key\(s\) in the address book only/);
+  assert.equal((await a.attentionTaken()).some((n) => n.state === "open"), false, "said once, there");
   await stranger.client.send(first.w, { text: "to the open address" }, { encryptTo: a.keys.public });
   const got = await a.read();
   assert.deepEqual(got.map((m) => [m.body.text, m.sender]), [["to the open address", "unknown key"]], "the open one is still read, as the note says");

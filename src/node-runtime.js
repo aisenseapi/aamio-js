@@ -360,7 +360,7 @@ export class NodeRuntime {
     const inbox = this.channel("inbox");
     if (inbox === null) return { ...outcome, inbox: null, rotated: false };
     if (this.inboxMatches(inbox, this.wantedAllow())) return { ...outcome, inbox: inbox.w, rotated: false, expire_at: inbox.expire_at };
-    return { ...outcome, ...(await this.rotateInbox(reason)) };
+    return { ...outcome, ...(await this.rotateInbox(reason, { caller: true })) };
   }
 
   note(where, state, what, w = null) {
@@ -385,7 +385,7 @@ export class NodeRuntime {
   }
 
   /** A new inbox with the address book as it is now. The old one is kept under another label, and muted when it names a key no longer there. */
-  async rotateInbox(reason) {
+  async rotateInbox(reason, { caller = false } = {}) {
     const old = this.channel("inbox");
     let wanted = this.wantedAllow();
     // The last partner is gone: signed only, rather than open to anyone at an address the partners had.
@@ -422,8 +422,16 @@ export class NodeRuntime {
     }
     const outcome = { rotated: true, inbox: inbox.w, allow: inbox.allow.map((key) => this.nameForKey(key) ?? key), expire_at: inbox.expire_at };
     if (old) outcome.old_inbox = { w: old.w, muted: old.muted, until: old.expire_at };
-    if (old && !old.muted && !(old.allow || []).length) {
-      this.note(old.label, "open", `inbox ${old.w} was open to anyone and is still read until ${old.expire_at}; after ${reason} the new inbox ${inbox.w} names ${inbox.allow.length} key(s)`, old.w);
+    if (old && !old.muted && !(old.allow || []).length && inbox.allow.length) {
+      // Said where it is seen: in the answer of the call that changed the book,
+      // since partner add on the command line is a process of its own, and its
+      // notes were gone before the next read (the release check of 9 November
+      // 2026); in the notes of the read that renewed it otherwise.
+      const who = inbox.allow.includes("*") ? "any signed key" : `the ${inbox.allow.length} key(s) in the address book`;
+      const what = `inbox ${old.w} was open to anyone, signed or not, and is still read until ${old.expire_at}: whoever has that address can write there until then. After ${reason} the new inbox ${inbox.w} takes writes from ${who} only.`;
+      outcome.old_inbox.open = true;
+      if (caller) outcome.old_inbox.note = what;
+      else this.note(old.label, "open", what, old.w);
     }
     if (muted.length) outcome.muted = muted;
     outcome.presence = await this.publishPresence(true);

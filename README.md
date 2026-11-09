@@ -53,7 +53,7 @@ only, and opens again when the book changes. Before the first one, a read opens
 an inbox anyone who has its address can write to, signed or not, since a first
 contact has nobody to name. When the first partner is added, a new inbox opens
 for the partners, and the open one is still read until it expires, within the
-hour; read says so. The board inbox takes any signed key, since whoever answers
+hour, as partner add says in its answer. The board inbox takes any signed key, since whoever answers
 a post has not been met. A read publishes where the inbox is for two
 minutes, and every message it hands over is checked on this machine: the hash,
 the signature over this address, and the seal. A message read before comes
