@@ -269,7 +269,8 @@ test("an app that cannot show a form is told how the user adds the partner inste
     const said = (await mcp.next(reply(1))).result;
     assert.equal(said.isError, true);
     assert.equal(said.structuredContent.error_code, "no_dialog", version);
-    assert.match(said.structuredContent.fix, /aamio partner add bob KEY/);
+    assert.match(said.structuredContent.fix, /npx aamio --home ("[^"]+"|\S+) partner add bob KEY/);
+    assert.ok(said.structuredContent.fix.includes(runtime.home), "in this server's home");
     assert.equal(mcp.said.some(asking), false);
     mcp.end();
     await mcp.served;

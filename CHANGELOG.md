@@ -15,6 +15,10 @@ not what moved in the source.
 - Partners and an inbox. `partner add` and `partner list`; an inbox only the
   partners can write to, opened again when the address book changes; and presence
   that says where it is for two minutes at a time, renewed while the server runs.
+  Before the first partner the inbox is open to whoever has its address, as a first
+  contact has nobody to name, and it is still read until it expires after the
+  first partner is added. A change to the address book counts only once it is
+  written down.
   A name is never a guess: an exact name wins, and two partners whose names differ
   only in upper and lower case are an error.
 - `send` seals a message to a partner, signs it, and writes it to the outbox before
@@ -34,7 +38,10 @@ not what moved in the source.
   `aamio_board_withdraw` and `aamio_board_tags`, over the protocol revisions
   2025-03-26 to 2026-07-28. `aamio_partner_add` takes a name from the agent and
   the key from the user, in a dialog the client shows, and never a key from the
-  conversation.
+  conversation. A client without the dialog is told the command for this server's
+  home.
+- Arguments the command line can check alone, a partner's name and key, `--re`,
+  `--data` and the board's numbers, are checked before a home is opened or made.
 - Not in this runtime yet: scopes, `board replies`, channels, receipts, retrying or
   forgetting a send, traces and add-ons. aamio-python and aamio-php have them.
 - The library is as it was in 0.5.6.

@@ -289,6 +289,20 @@ function partnerQuestion(name, held) {
   return { message, requestedSchema: { type: "object", properties: { key }, required: ["key"] } };
 }
 
+/**
+ * A path as a shell takes it: as it is when nothing in it needs quoting, else
+ * in double quotes, which PowerShell, cmd and POSIX shells read alike for a
+ * path with spaces. One with a quote, a backtick or a dollar sign, which they
+ * do not read alike in double quotes, goes in single quotes.
+ */
+function shellQuoted(path) {
+  const text = String(path);
+  if (/^[A-Za-z0-9_.,:\/\\@%+=-]+$/.test(text)) return text;
+  if (!/["`$]/.test(text)) return `"${text}"`;
+  if (!text.includes("'")) return `'${text}'`;
+  return `"${text.replace(/(["`$\\])/g, "\\$1")}"`;
+}
+
 /** aamio_partner_add: the name from the model, the key from the user, and nothing added without both. */
 async function addPartner(runtime, args, ask) {
   const extra = Object.keys(args).filter((field) => field !== "name").sort();
@@ -307,7 +321,9 @@ async function addPartner(runtime, args, ask) {
   }
   // The book's own spelling, so the key replaces the entry the user is told about.
   if (held) name = held.name;
-  const byHand = `stop this server, run aamio partner add ${name} KEY with the key ${name} gave them, and start it again`;
+  // This server's own home, named: without it the command went to the default home, and the address book this
+  // server reads stayed as it was (the release check of 9 November 2026).
+  const byHand = `stop this server, run npx aamio --home ${shellQuoted(runtime.home)} partner add ${name} KEY with the key ${name} gave them, and start it again`;
   if (!ask) {
     return [{ added: false, error: "this app did not say it can show the user a form (the elicitation capability of MCP), so the user was not asked and nothing was added", error_code: "no_dialog", fix: `The user adds the partner on the command line: ${byHand}.` }, true];
   }
@@ -327,7 +343,7 @@ async function addPartner(runtime, args, ask) {
   return runtime.serial(async () => {
     const other = runtime.partnerByKey(key);
     if (other && other.name !== name) {
-      return [{ added: false, partner: name, error: `that key is in the address book already, as ${other.name}, so nothing was changed`, fix: `Send to them as ${other.name}. To have them called ${name} instead, the user removes ${other.name} on the command line first.` }, true];
+      return [{ added: false, partner: name, error: `that key is in the address book already, as ${other.name}, so nothing was changed`, fix: `Send to them as ${other.name}. To have them called ${name} instead, the user stops this server and runs npx aamio --home ${shellQuoted(runtime.home)} partner add ${name} with that same key: the entry with the key gets the new name.` }, true];
     }
     try {
       const changed = await runtime.partnerAdd(name, key);

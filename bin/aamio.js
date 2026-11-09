@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { GateStop } from "../src/aamio.js";
 import { initIdentity, readIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
-import { NodeRuntime } from "../src/node-runtime.js";
+import { NodeRuntime, checkPartner, checkRe } from "../src/node-runtime.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const help = `Usage: aamio [--home DIR] <command>
@@ -129,6 +129,7 @@ function plan(command, positional, options) {
   const [first, second, third] = positional;
   switch (command) {
     case "partner add":
+      checkPartner(first, second);
       return (runtime) => runtime.partnerAdd(first, second);
     case "partner list":
       return (runtime) => runtime.partnerList();
@@ -137,6 +138,7 @@ function plan(command, positional, options) {
       return (runtime) => runtime.lookup(positional.length ? positional : null, wait);
     }
     case "send": {
+      checkRe(options.re);
       const data = jsonData(options.data);
       return (runtime) => runtime.send(first, { text: second, data, re: options.re ?? null });
     }

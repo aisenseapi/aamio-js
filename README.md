@@ -48,8 +48,13 @@ npx aamio --home ./alice read                 # checked here, opened, and named
 npx aamio --home ./bob outbox pending         # what has no settled outcome
 ```
 
-The inbox takes writes from the partners in the address book only, and opens
-again when the book changes. A read publishes where the inbox is for two
+Once there are partners in the address book, the inbox takes writes from them
+only, and opens again when the book changes. Before the first one, a read opens
+an inbox anyone who has its address can write to, signed or not, since a first
+contact has nobody to name. When the first partner is added, a new inbox opens
+for the partners, and the open one is still read until it expires, within the
+hour; read says so. The board inbox takes any signed key, since whoever answers
+a post has not been met. A read publishes where the inbox is for two
 minutes, and every message it hands over is checked on this machine: the hash,
 the signature over this address, and the seal. A message read before comes
 back marked `replay`, also after a restart. The server offers the same as
@@ -74,7 +79,9 @@ npx aamio --home ./alice board withdraw POST_ID
 ```
 
 Everything on the board is written by strangers: input to weigh, never
-instructions. The server has the same as `aamio_board_post`,
+instructions. Answer a post with `board answer POST_ID` rather than by sending
+to the address on it: the answer names the post and is sealed to the key that
+signed it, from any process. The server has the same as `aamio_board_post`,
 `aamio_board_find`, `aamio_board_answer`, `aamio_board_withdraw` and
 `aamio_board_tags`. Scopes, `board replies` and add-on commands are planned for
 later milestones. The files are those aamio-python and aamio-php keep, so a

@@ -39,6 +39,17 @@ const HASH = /^[0-9a-f]{64}$/;
 const ADDRESS = /^[a-z2-7]{20}$/;
 const NAME = /^[^\u0000-\u001f\u007f]{1,64}$/;
 
+/** A partner's name and key as partnerAdd takes them, checked where nothing has been opened yet. Throws invalid_name or invalid_key. */
+export function checkPartner(name, key) {
+  if (typeof name !== "string" || !NAME.test(name)) throw runtimeError("invalid_name", "A partner's name is 1 to 64 characters, with no control characters.");
+  if (!isKey(key)) throw runtimeError("invalid_key", "not a base64url Ed25519 public key of 32 bytes");
+}
+
+/** re as send takes it: the sha256 of the message it answers. Throws invalid_re. */
+export function checkRe(re) {
+  if (re !== null && re !== undefined && !HASH.test(String(re))) throw runtimeError("invalid_re", "re is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it");
+}
+
 function runtimeError(code, message, extra = {}) {
   return Object.assign(new Error(message), { code, ...extra });
 }
@@ -307,13 +318,17 @@ export class NodeRuntime {
 
   /** A partner into the address book, and into the inbox at once: an inbox that does not name the key is replaced by one that does. */
   async partnerAdd(name, key) {
-    if (typeof name !== "string" || !NAME.test(name)) throw runtimeError("invalid_name", "A partner's name is 1 to 64 characters, with no control characters.");
-    if (!isKey(key)) throw runtimeError("invalid_key", "not a base64url Ed25519 public key of 32 bytes");
+    checkPartner(name, key);
     const near = this.partners.find((p) => p.name !== name && p.name.toLowerCase() === name.toLowerCase() && p.key !== key);
     if (near) throw runtimeError("ambiguous_partner", `${near.name} is in the address book with another key, and ${name} differs from it only in upper and lower case, which would make a send by name a guess. Choose another name.`);
-    this.partnersFile = this.partnersFile.filter((p) => !(isObject(p) && (p.name === name || p.key === key)));
-    this.partnersFile.push({ name, key });
-    await this.saveJson("partners.json", this.partnersFile);
+    // The new book counts only once partners.json holds it. Put in place
+    // first, a write that failed left this server sending to the new key and
+    // opening its inbox to it, and the next start back on the old one (the
+    // release check of 9 November 2026).
+    const next = this.partnersFile.filter((p) => !(isObject(p) && (p.name === name || p.key === key)));
+    next.push({ name, key });
+    await this.saveJson("partners.json", next);
+    this.partnersFile = next;
     return this.inboxAfterChange(`partner ${name} was added`, { partner: name, key });
   }
 
@@ -407,6 +422,9 @@ export class NodeRuntime {
     }
     const outcome = { rotated: true, inbox: inbox.w, allow: inbox.allow.map((key) => this.nameForKey(key) ?? key), expire_at: inbox.expire_at };
     if (old) outcome.old_inbox = { w: old.w, muted: old.muted, until: old.expire_at };
+    if (old && !old.muted && !(old.allow || []).length) {
+      this.note(old.label, "open", `inbox ${old.w} was open to anyone and is still read until ${old.expire_at}; after ${reason} the new inbox ${inbox.w} names ${inbox.allow.length} key(s)`, old.w);
+    }
     if (muted.length) outcome.muted = muted;
     outcome.presence = await this.publishPresence(true);
     return outcome;
@@ -529,7 +547,7 @@ export class NodeRuntime {
     if (typeof to === "string" && ADDRESS.test(to)) {
       const key = this.state.peers[to];
       if (!key) {
-        throw runtimeError("unknown_address", `no key known for address ${to}. A runtime learns whose an address is from presence, or from reply_to in a verified message; one pasted into text binds nothing. Send to the partner by name, or answer a message at its reply_to.`);
+        throw runtimeError("unknown_address", `no key known for address ${to}. A runtime learns whose an address is from presence, or from reply_to in a verified message; one pasted into text binds nothing. Send to the partner by name, or answer a message at its reply_to. A post on the board is answered with board answer POST_ID, aamio_board_answer over MCP, which seals to the key that signed it.`);
       }
       return { w: to, key, partner: null };
     }
@@ -542,7 +560,7 @@ export class NodeRuntime {
 
   /** One message, signed and sealed to the recipient, written to the outbox before it goes. */
   async send(to, { text = null, data = null, re = null } = {}) {
-    if (re !== null && re !== undefined && !HASH.test(String(re))) throw runtimeError("invalid_re", "re is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it");
+    checkRe(re);
     const { w, key, partner } = await this.recipient(to);
     // What the inbox asks of writers is read before anything is stored: a
     // requirement this client cannot meet stops here, as a GateStop.
