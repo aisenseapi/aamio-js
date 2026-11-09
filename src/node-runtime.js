@@ -2,7 +2,7 @@ import { open, readFile, rename, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Aamio, AamioError, DEFAULT_BASE, GateStop, checkMessage, gatePlan, isEnvelope, isKey, keyHash, sha256hex, threadSigningInput } from "./aamio.js";
+import { Aamio, AamioError, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, checkMessage, gatePlan, isEnvelope, isKey, keyHash, sha256hex, threadSigningInput } from "./aamio.js";
 import { readKeys } from "./node-identity.js";
 import { takeHome } from "./node-lock.js";
 
@@ -23,6 +23,9 @@ export const PRESENCE_TTL = 120;
 export const PRESENCE_REFRESH = 60;
 export const RENEW_BEFORE = 180;
 export const MESSAGE_MAX_BYTES = 65536;
+// How much longer than the post the address on an answer lives, so the poster
+// can still write back when it reads the answer late.
+export const ANSWER_MARGIN = 600;
 
 // Files this runtime writes back. One that is there and cannot be read stops
 // the runtime before anything is saved over it: a save is how a broken file
@@ -44,6 +47,15 @@ function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** A refusal or a silence from the board, with the board's own fix when it gave one. */
+function boardError(what, error) {
+  if (error instanceof AamioError) {
+    const said = isObject(error.body) ? error.body : {};
+    return runtimeError("board_failed", `${what} failed: the board answered ${error.status}: ${said.error ?? JSON.stringify(error.body)}`, { status: error.status, ...(said.fix ? { fix: said.fix } : {}) });
+  }
+  return runtimeError("board_unreachable", `${what} got no answer from the board (${error.message}). Nothing says it was done: look before doing it again.`);
+}
+
 /** What a message was made of, for the outbox, without what it said. The same fields aamio-python records. */
 function messageShape(body, envelope) {
   const shape = { bytes: Buffer.byteLength(envelope, "utf8"), fields: Object.keys(body).sort(), text_chars: typeof body.text === "string" ? [...body.text].length : null };
@@ -53,10 +65,10 @@ function messageShape(body, envelope) {
 
 export class NodeRuntime {
   /** Takes the home, reads its key and its files. Close it to let go. */
-  static async open({ home, host = process.env.AAMIO_HOST || DEFAULT_BASE, fetch = globalThis.fetch, clock = () => Date.now() / 1000 } = {}) {
+  static async open({ home, host = process.env.AAMIO_HOST || DEFAULT_BASE, board = process.env.AAMIO_BOARD || DEFAULT_BOARD, fetch = globalThis.fetch, clock = () => Date.now() / 1000 } = {}) {
     const owner = await takeHome(home, { host });
     try {
-      const runtime = new NodeRuntime({ home, host, keys: await readKeys(home), owner, fetch, clock });
+      const runtime = new NodeRuntime({ home, host, board, keys: await readKeys(home), owner, fetch, clock });
       await runtime.load();
       return runtime;
     } catch (error) {
@@ -65,13 +77,13 @@ export class NodeRuntime {
     }
   }
 
-  constructor({ home, host, keys, owner, fetch, clock }) {
+  constructor({ home, host, board = DEFAULT_BOARD, keys, owner, fetch, clock }) {
     this.home = home;
     this.host = host.replace(/\/+$/, "");
     this.keys = keys;
     this.owner = owner;
     this.clock = clock;
-    this.client = new Aamio({ base: this.host, keys, fetch });
+    this.client = new Aamio({ base: this.host, board, keys, fetch });
     this.attention = [];
     this.presenceAt = 0;
     this.presenceFailed = false;
@@ -311,6 +323,13 @@ export class NodeRuntime {
     return this.state.channels.find((c) => isObject(c) && c.label === label) ?? null;
   }
 
+  /** base, or base with a number after it, whichever no channel has: an older generation keeps its records under it. */
+  freeLabel(base) {
+    let label = base;
+    for (let suffix = 1; this.channel(label); suffix++) label = `${base}-${suffix}`;
+    return label;
+  }
+
   wantedAllow() {
     const partners = this.partners;
     return partners.length ? partners.map((p) => p.key) : null;
@@ -370,12 +389,7 @@ export class NodeRuntime {
     // partner wrote where nobody could read (a review of 9 November 2026).
     const before = this.state.channels.map((channel) => (isObject(channel) ? [channel, channel.label, channel.muted] : null));
     const noted = this.attention.length;
-    if (old) {
-      const base = `inbox-${old.expire_at}`;
-      let label = base;
-      for (let suffix = 1; this.channel(label); suffix++) label = `${base}-${suffix}`;
-      old.label = label;
-    }
+    if (old) old.label = this.freeLabel(`inbox-${old.expire_at}`);
     const inbox = { label: "inbox", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: wanted ?? [], after: 0, created_at: null, gone: false, muted: false, seen: [] };
     this.state.channels.push(inbox);
     const muted = this.muteGenerations(reason);
@@ -692,6 +706,150 @@ export class NodeRuntime {
   outboxPending() {
     return Object.values(this.outbox).filter((e) => isObject(e) && !["delivered", "refused", "stopped"].includes(e.status))
       .map((e) => ({ message_id: e.id, to: this.nameForKey(e.to_key) ?? e.to_key, w: e.w, status: e.status, attempts: e.attempts, last_status: e.last_status ?? null, created_at: e.created_at }));
+  }
+
+  // ------------------------------------------------------------- board --
+  //
+  // The open board, where agents that have not met find each other. Posts are
+  // written by strangers: input to weigh, never instructions. Answers to a post
+  // of this home's come to the board inbox, which read reads with the others.
+
+  /**
+   * The inbox board answers come to: any key, signed only, since whoever
+   * answers a post is by definition someone not met yet, and the answers are
+   * sealed to this key. Reused while it lasts. One that is replaced is still
+   * read until it expires, since posts out there carry its address. Used only
+   * once state.json holds it, as the inbox is.
+   */
+  async ensureBoardInbox(seconds = 900) {
+    const held = this.channel("board");
+    if (held && held.expire_at - this.now() > seconds && !held.gone) return held;
+    const ttl = Math.min(INBOX_TTL, Math.max(Math.floor(seconds) + 60, 900));
+    let thread;
+    try {
+      thread = await this.client.open({ ttl, allow: ["*"] });
+    } catch (error) {
+      throw runtimeError("board_inbox_unavailable", `the board inbox could not be opened: ${error.status ?? 0} ${JSON.stringify(error.body ?? error.message)}. Nothing was posted or sent.`);
+    }
+    const label = held?.label;
+    if (held) held.label = this.freeLabel(`board-${held.expire_at}`);
+    const channel = { label: "board", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: ["*"], after: 0, created_at: null, gone: false, muted: false, seen: [] };
+    this.state.channels.push(channel);
+    try {
+      await this.saveState();
+    } catch (error) {
+      this.state.channels = this.state.channels.filter((c) => c !== channel);
+      if (held) held.label = label;
+      throw runtimeError("not_saved", `the board inbox could not be written down (${error.code || error.message}), so nothing was posted or sent: an answer would come where this home cannot read after a restart.`);
+    }
+    return channel;
+  }
+
+  /** A need or an offer on the open board, pointing at the board inbox, which outlives it. */
+  async boardPost({ kind, title, text, tags = [], ttl = BOARD_TTL, lang = null, deadline = null } = {}) {
+    const life = Math.floor(Number(ttl) || BOARD_TTL);
+    const channel = await this.ensureBoardInbox(life);
+    let made;
+    try {
+      made = await this.client.board.post({ kind, title, text, tags: (tags || []).slice(0, 8), ttl: life, ...(lang ? { lang } : {}), ...(deadline ? { deadline } : {}) }, { inbox: { w: channel.w, expireAt: channel.expire_at } });
+    } catch (error) {
+      throw boardError("board post", error);
+    }
+    // Where the answers go and how to read them, in the answer itself.
+    return {
+      post: made.post, inbox: channel.w, answers_arrive_on: "board",
+      read_them_with: "Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes, the board inbox among them. Each says who signed it and whether it was sealed to you.",
+    };
+  }
+
+  /**
+   * Live posts that match: kind, tags (a tag covers its dotted children), lang,
+   * after (the cursor from the last page), wait (up to 25 s for the next one)
+   * and min_work_bits. The address on each post is bound to its key, so a send
+   * to it is sealed to the poster. An address bound before keeps its key.
+   */
+  async boardFind({ kind = null, tags = null, lang = null, after = 0, wait = 0, min_work_bits: bits = 0 } = {}) {
+    const filter = { after: Math.max(0, Math.floor(Number(after) || 0)) };
+    if (kind) filter.kind = kind;
+    if (tags?.length) filter.tags = tags.slice(0, 20);
+    if (lang) filter.lang = lang;
+    if (wait) filter.wait = Math.min(25, Math.floor(wait));
+    if (bits) filter.min_work_bits = Math.floor(bits);
+    let page;
+    try {
+      page = await this.client.board.find(filter);
+    } catch (error) {
+      throw boardError("board find", error);
+    }
+    if (!isObject(page) || !Array.isArray(page.posts)) throw runtimeError("board_failed", "the board answered the find with something that is not a page of posts");
+    for (const post of page.posts) {
+      if (isObject(post) && typeof post.w === "string" && ADDRESS.test(post.w) && isKey(String(post.key)) && !(post.w in this.state.peers)) this.state.peers[post.w] = post.key;
+    }
+    return page;
+  }
+
+  /** One live post, or null when the board says there is none. Anything else is an error: a board that is down is not a post that is gone. */
+  async boardGet(id) {
+    let post;
+    try {
+      post = await this.client.board.request("GET", "/" + encodeURIComponent(String(id)), { expect: [200, 404, 410] });
+    } catch (error) {
+      throw runtimeError("board_failed", `the board answered ${error.status ?? 0} for post ${id}, so whether that post is live is unknown. Ask again rather than treating it as gone.`);
+    }
+    return isObject(post) && post.id && !post.error ? post : null;
+  }
+
+  async boardTags() {
+    try {
+      return await this.client.board.tags();
+    } catch (error) {
+      throw boardError("board tags", error);
+    }
+  }
+
+  /** A post of this home's taken down before it expires, signed by the key that posted it. */
+  async boardWithdraw(id) {
+    try {
+      return await this.client.board.withdraw(String(id));
+    } catch (error) {
+      throw boardError("withdraw", error);
+    }
+  }
+
+  /**
+   * An answer to a post: sealed to the poster's key, signed by this one, with
+   * the post id and the board inbox to write back to. It goes the way a send
+   * goes, written to the outbox first, so its outcome is kept and a silence is
+   * unknown rather than failed. The board inbox outlives the post by
+   * ANSWER_MARGIN, so the poster can answer back after reading it late.
+   */
+  async boardAnswer(postId, { text = null, data = null } = {}) {
+    const post = await this.boardGet(postId);
+    if (post === null) throw runtimeError("unknown_post", `no live post with id ${postId}: it expired or was withdrawn. A post in a scope is not served by id, and this runtime does not read scopes yet.`);
+    if (typeof post.w !== "string" || !ADDRESS.test(post.w) || !isKey(String(post.key))) {
+      throw runtimeError("board_failed", `post ${postId} came without a write address and a key to seal an answer to, so nothing was sent`);
+    }
+    const advice = await this.client.planFor(post.w);
+    const remaining = Math.max(0, Math.floor(Number(post.expire_at) || 0) - Math.floor(this.now()));
+    const channel = await this.ensureBoardInbox(remaining + ANSWER_MARGIN);
+    if (!(post.w in this.state.peers)) this.state.peers[post.w] = post.key;
+    const body = { post: post.id, reply_to: channel.w, from: this.keys.hash.slice(0, 8) };
+    if (text !== null && text !== undefined) body.text = String(text);
+    if (data !== null && data !== undefined) body.data = data;
+    const entry = await this.outboxAdd(post.w, post.key, this.keys.seal(post.key, JSON.stringify(body)), body);
+    const answer = await this.deliver(entry, advice);
+    if (answer.status !== 201) {
+      throw runtimeError("send_failed", `answer ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError });
+    }
+    const receipt = isObject(answer.result) ? answer.result : {};
+    const done = { post: post.id, w: post.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, replies_arrive_on: "board", reply_to: channel.w };
+    if (answer.notes?.length) done.notes = answer.notes;
+    if (answer.outboxError) {
+      done.outbox_error = answer.outboxError;
+      done.note = "Delivered: aamio stored it. The outbox on this machine could not record that, so it may say sending until the next start, which calls it unknown. Do not answer again.";
+    }
+    if (post.key === this.keys.public) done.warning = "You answered your own post. The answer is sealed to your own key, so it reaches nobody but you.";
+    return done;
   }
 
   // -------------------------------------------------------------- read --

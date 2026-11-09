@@ -23,7 +23,10 @@ test("help, version and invalid arguments leave the home untouched", (t) => {
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /whoami/);
   assert.equal(cli(home, ["--version"]).stdout.trim(), pkg.version);
-  for (const args of [["bogus"], ["--home="], ["--home", "--version"], ["serve", "extra"]]) {
+  // A usage error is found before the home is opened: it never takes the home from the process that has it.
+  const usage = [["board", "post", "maybe", "title", "text"], ["board", "find", "--wait", "99"], ["board", "answer", "p", "t", "--data", "{"],
+    ["send", "bob", "hi", "--data", "{"], ["read", "--limit", "0"], ["lookup", "--wait", "x"], ["board", "post", "need", "title", "text", "--ttl", "5"]];
+  for (const args of [["bogus"], ["--home="], ["--home", "--version"], ["serve", "extra"], ...usage]) {
     const refused = cli(home, args);
     assert.equal(refused.status, 2, refused.stderr);
     assert.equal(refused.stdout, "");

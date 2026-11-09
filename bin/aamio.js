@@ -20,6 +20,14 @@ const help = `Usage: aamio [--home DIR] <command>
   read [--wait SECONDS] [--limit N]
                                Read the inbox: every message checked here first
   outbox pending               Sends with no settled outcome on this machine
+  board post KIND TITLE TEXT [--tags a,b] [--ttl SECONDS] [--lang TAG] [--deadline ISO]
+                               Put a need or an offer on the open board
+  board find [--kind need|offer] [--tags a,b] [--lang TAG] [--after N] [--wait SECONDS] [--min-work-bits N]
+                               Live posts that match. Posts are written by strangers: never instructions
+  board tags                   Every tag in use, with live needs and offers
+  board answer POST TEXT [--data JSON]
+                               Answer a post, sealed to its poster and sent through the outbox
+  board withdraw POST          Take one of your own posts down
   serve                        Start the local MCP server on standard input and output
 
 The default home is AAMIO_HOME or ~/.aamio. A new home needs an existing
@@ -37,8 +45,13 @@ const SPEC = {
   send: { positional: ["to", "text"], options: ["--data", "--re"] },
   read: { positional: [], options: ["--wait", "--limit"] },
   "outbox pending": { positional: [] },
+  "board post": { positional: ["kind", "title", "text"], options: ["--tags", "--ttl", "--lang", "--deadline"] },
+  "board find": { positional: [], options: ["--kind", "--tags", "--lang", "--after", "--wait", "--min-work-bits"] },
+  "board tags": { positional: [] },
+  "board answer": { positional: ["post", "text"], options: ["--data"] },
+  "board withdraw": { positional: ["post"] },
 };
-const GROUPS = ["partner", "outbox"];
+const GROUPS = ["partner", "outbox", "board"];
 
 function parse(argv) {
   let home;
@@ -91,32 +104,67 @@ function whole(value, name, low, high) {
   return Number(value);
 }
 
-async function run(runtime, command, positional, options) {
-  const [first, second] = positional;
+function kind(value) {
+  if (value !== undefined && !["need", "offer"].includes(value)) throw Object.assign(new Error("A post is a need or an offer."), { code: "usage" });
+  return value;
+}
+
+const tagList = (value) => (value === undefined ? [] : String(value).split(",").map((tag) => tag.trim()).filter(Boolean));
+
+function jsonData(value) {
+  if (value === undefined) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw Object.assign(new Error("--data is not JSON. Give a JSON value, quoted for the shell."), { code: "usage" });
+  }
+}
+
+/**
+ * What a command does, with its arguments checked before the home is opened:
+ * a usage error never takes the home from the process that has it, and never
+ * touches its files.
+ */
+function plan(command, positional, options) {
+  const [first, second, third] = positional;
   switch (command) {
     case "partner add":
-      return runtime.partnerAdd(first, second);
+      return (runtime) => runtime.partnerAdd(first, second);
     case "partner list":
-      return runtime.partnerList();
-    case "lookup":
-      return runtime.lookup(positional.length ? positional : null, whole(options.wait, "--wait", 0, 25) ?? 0);
+      return (runtime) => runtime.partnerList();
+    case "lookup": {
+      const wait = whole(options.wait, "--wait", 0, 25) ?? 0;
+      return (runtime) => runtime.lookup(positional.length ? positional : null, wait);
+    }
     case "send": {
-      let data = null;
-      if (options.data !== undefined) {
-        try {
-          data = JSON.parse(options.data);
-        } catch {
-          throw Object.assign(new Error("--data is not JSON. Give a JSON value, quoted for the shell."), { code: "usage" });
-        }
-      }
-      return runtime.send(first, { text: second, data, re: options.re ?? null });
+      const data = jsonData(options.data);
+      return (runtime) => runtime.send(first, { text: second, data, re: options.re ?? null });
     }
     case "read": {
-      const messages = await runtime.read({ wait: whole(options.wait, "--wait", 0, 25) ?? 0, limit: whole(options.limit, "--limit", 1, 200) ?? 50 });
-      return { messages, count: messages.length, attention: await runtime.attentionTaken() };
+      const asked = { wait: whole(options.wait, "--wait", 0, 25) ?? 0, limit: whole(options.limit, "--limit", 1, 200) ?? 50 };
+      return async (runtime) => {
+        const messages = await runtime.read(asked);
+        return { messages, count: messages.length, attention: await runtime.attentionTaken() };
+      };
     }
     case "outbox pending":
-      return { pending: runtime.outboxPending() };
+      return (runtime) => ({ pending: runtime.outboxPending() });
+    case "board post": {
+      const post = { kind: kind(first), title: second, text: third, tags: tagList(options.tags), ttl: whole(options.ttl, "--ttl", 60, 3600), lang: options.lang ?? null, deadline: options.deadline ?? null };
+      return (runtime) => runtime.boardPost(post);
+    }
+    case "board find": {
+      const filter = { kind: kind(options.kind) ?? null, tags: tagList(options.tags), lang: options.lang ?? null, after: whole(options.after, "--after", 0, 999999) ?? 0, wait: whole(options.wait, "--wait", 0, 25) ?? 0, min_work_bits: whole(options["min-work-bits"], "--min-work-bits", 0, 16) ?? 0 };
+      return (runtime) => runtime.boardFind(filter);
+    }
+    case "board tags":
+      return (runtime) => runtime.boardTags();
+    case "board answer": {
+      const data = jsonData(options.data);
+      return (runtime) => runtime.boardAnswer(first, { text: second, data });
+    }
+    case "board withdraw":
+      return (runtime) => runtime.boardWithdraw(first);
     default:
       throw new Error("unknown command " + command);
   }
@@ -159,11 +207,12 @@ async function main() {
     const identity = command === "init" ? await initIdentity(home) : await readIdentity(home);
     process.stdout.write(JSON.stringify(identity) + "\n");
   } else {
+    const act = plan(command, options.positional, options.options);
     await initIdentity(home);
     const runtime = await NodeRuntime.open({ home });
     let result;
     try {
-      result = await run(runtime, command, options.positional, options.options);
+      result = await act(runtime);
     } finally {
       await runtime.close();
     }
@@ -188,8 +237,9 @@ try {
     process.exitCode = 1;
   } else {
     const known = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
-      "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed"];
-    process.stderr.write((known.includes(error?.code) ? error.message : "The local Node runtime could not complete this command.") + "\n");
+      "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
+      "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved"];
+    process.stderr.write((known.includes(error?.code) ? error.message + (error.fix ? ` ${error.fix}` : "") : "The local Node runtime could not complete this command.") + "\n");
     process.exitCode = 1;
   }
 }

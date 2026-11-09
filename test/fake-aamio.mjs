@@ -1,7 +1,9 @@
 // aamio as the runtime sees it, in memory, through a fetch of its own: threads with read keys, allowlists and
-// signatures, and presence. Enough of the wire contract (https://aamio.at/api.md) for the runtime's tests, and
-// no more: the real service is what code/php/tools/check-node-exchange.py runs against.
-import { deriveAddress, isEnvelope, keyHash, presenceSigningInput, sha256hex, threadSigningInput, verify } from "../src/aamio.js";
+// signatures, presence, and the board at BOARD. Enough of the wire contract (https://aamio.at/api.md) for the
+// runtime's tests, and no more: the real service is what code/php/tools/check-node-exchange.py runs against.
+import { boardDeleteSigningInput, boardSigningInput, deriveAddress, isEnvelope, keyHash, presenceSigningInput, sha256hex, threadSigningInput, verify } from "../src/aamio.js";
+
+export const BOARD = "https://fake.board";
 
 export class FakeAamio {
   constructor({ now = 1_800_000_000 } = {}) {
@@ -10,12 +12,16 @@ export class FakeAamio {
     this.presence = new Map();
     this.failures = [];
     this.requests = [];
+    this.posts = new Map();
+    this.boardSeq = 0;
+    // What the board's descriptor advises posts to carry.
+    this.boardBits = 0;
     // Presence answers its matches in this order, or the other way round.
     this.reverseLookup = false;
     this.fetch = (url, init = {}) => {
       const where = new URL(url);
-      this.requests.push(`${init.method || "GET"} ${where.pathname}`);
-      return this.answer(where, init);
+      this.requests.push(`${init.method || "GET"} ${where.host === new URL(BOARD).host ? "board" : ""}${where.pathname}`);
+      return where.host === new URL(BOARD).host ? this.boardAnswer(where, init) : this.answer(where, init);
     };
   }
 
@@ -104,5 +110,54 @@ export class FakeAamio {
       return this.reply(200, { matches: this.reverseLookup ? matches.reverse() : matches });
     }
     return this.reply(404, { error: "not in the fake", fix: "none" });
+  }
+
+  /** The board: posts signed by their key, pointing at a live inbox open to any signed key, found by kind, tag and cursor. */
+  boardAnswer(url, init) {
+    const method = init.method || "GET";
+    const body = typeof init.body === "string" ? init.body : "";
+    const path = url.pathname;
+    const live = [...this.posts.values()].filter((post) => post.expire_at > this.time);
+    if (method === "GET" && path === "/.well-known/aamio-board.json") return this.reply(200, { work: { advise_bits: this.boardBits } });
+    if (method === "POST" && path === "/") {
+      const key = this.header(init, "X-Key");
+      if (!key || !verify(key, boardSigningInput(key, body), this.header(init, "X-Sig") || "")) return this.reply(400, { error: "X-Sig does not verify", fix: "Sign aamio-board-v1, the key and the sha256 of the body." });
+      const fields = JSON.parse(body);
+      if (!["need", "offer"].includes(fields.kind)) return this.reply(400, { error: "kind is need or offer", fix: "Say need or offer." });
+      const thread = this.threads.get(fields.w);
+      if (!thread || thread.expire_at < this.time + fields.ttl || !(thread.allow.length === 0 || thread.allow.includes("*"))) {
+        return this.reply(409, { error: "a post whose address is dead reaches nobody", field: "w", fix: "Open the inbox with X-Allow: * for longer than the post." });
+      }
+      const id = sha256hex(key + body).slice(0, 20);
+      const post = { id, key, kind: fields.kind, title: fields.title, text: fields.text, w: fields.w, tags: fields.tags ?? [], lang: fields.lang ?? null, seq: ++this.boardSeq, created_at: this.time, expire_at: this.time + fields.ttl, work_bits: this.header(init, "X-Work") ? this.boardBits : 0 };
+      this.posts.set(id, post);
+      return this.reply(201, { ...post });
+    }
+    if (method === "POST" && path === "/find") {
+      const filter = body ? JSON.parse(body) : {};
+      const covers = (tag) => (filter.tags ?? []).some((wanted) => tag === wanted || tag.startsWith(wanted + "."));
+      const matching = live.filter((post) => (!filter.kind || post.kind === filter.kind) && (!filter.tags?.length || post.tags.some(covers))
+        && (!filter.lang || post.lang === filter.lang) && post.work_bits >= (filter.min_work_bits ?? 0));
+      const posts = matching.filter((post) => post.seq > (filter.after ?? 0)).reverse();
+      return this.reply(200, { count: posts.length, live: matching.length, next: posts.length ? posts[0].seq : filter.after ?? 0, more: false, posts });
+    }
+    if (method === "GET" && path === "/tags") {
+      const tags = {};
+      for (const post of live) for (const tag of post.tags) {
+        tags[tag] ??= { tag, needs: 0, offers: 0 };
+        tags[tag][post.kind === "need" ? "needs" : "offers"]++;
+      }
+      return this.reply(200, { tags: Object.values(tags) });
+    }
+    const id = decodeURIComponent(path.slice(1));
+    const post = live.find((p) => p.id === id);
+    if (method === "GET") return post ? this.reply(200, { ...post }) : this.reply(404, { error: "no live post with that id", id });
+    if (method === "DELETE") {
+      if (!post) return this.reply(404, { error: "no live post with that id", id });
+      if (!verify(post.key, boardDeleteSigningInput(id, body), this.header(init, "X-Sig") || "")) return this.reply(403, { error: "only the key that posted can withdraw", fix: "Sign with that key." });
+      this.posts.delete(id);
+      return this.reply(200, { withdrawn: true, id });
+    }
+    return this.reply(404, { error: "not on the fake board", fix: "none" });
   }
 }
