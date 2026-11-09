@@ -19,6 +19,11 @@ function publicIdentity(keys) {
 
 /** Read only the public identity of a local Aamio home. No runtime or owner lock is opened. */
 export async function readIdentity(home) {
+  return publicIdentity(await readKeys(home));
+}
+
+/** The keys of a local Aamio home, for a runtime that holds the home. The seed stays in memory. */
+export async function readKeys(home) {
   if (typeof home !== "string" || !home) throw missingHome();
   try {
     await lstat(home);
@@ -45,7 +50,7 @@ export async function readIdentity(home) {
     if (used !== stat.size) throw badKey();
     const match = /^[ \t\v\r\n]*([0-9a-f]{64})[ \t\v\r\n]*$/.exec(bytes.toString("utf8", 0, used));
     if (!match) throw badKey();
-    return publicIdentity(Keys.fromSeedHex(match[1]));
+    return Keys.fromSeedHex(match[1]);
   } catch {
     throw badKey();
   } finally {

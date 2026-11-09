@@ -21,6 +21,7 @@
     "src/node-identity.js",
     "src/node-lock.js",
     "src/node-mcp.js",
+    "src/node-runtime.js",
     "README.md",
     "LICENSE"
   ],
