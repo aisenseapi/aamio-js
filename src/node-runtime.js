@@ -138,8 +138,6 @@ export class NodeRuntime {
     // lines a receipt is compared with. In memory only, as in aamio-python, so
     // a process that did not read a message cannot vouch for it.
     this.observed = new Map();
-    // The channels whose cursor this read has checked against the row at it.
-    this.cursorChecked = new Set();
     this.keys = keys;
     this.owner = owner;
     this.clock = clock;
@@ -454,7 +452,7 @@ export class NodeRuntime {
     const before = this.state.channels.map((channel) => (isObject(channel) ? [channel, channel.label, channel.muted] : null));
     const noted = this.attention.length;
     if (old) old.label = this.freeLabel(`inbox-${old.expire_at}`);
-    const inbox = { label: "inbox", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: wanted ?? [], after: 0, after_sha256: null, created_at: null, gone: false, muted: false, seen: [] };
+    const inbox = { label: "inbox", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: wanted ?? [], after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [] };
     this.state.channels.push(inbox);
     const muted = this.muteGenerations(reason);
     try {
@@ -808,7 +806,7 @@ export class NodeRuntime {
     }
     const label = held?.label;
     if (held) held.label = this.freeLabel(`board-${held.expire_at}`);
-    const channel = { label: "board", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: ["*"], after: 0, after_sha256: null, created_at: null, gone: false, muted: false, seen: [] };
+    const channel = { label: "board", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: ["*"], after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [] };
     this.state.channels.push(channel);
     try {
       await this.saveState();
@@ -1023,28 +1021,9 @@ export class NodeRuntime {
   /** The cursor and what was read belonged to a thread that is not there now. The hashes are the reader's and stay. */
   forgetThread(channel) {
     channel.after = 0;
-    channel.after_sha256 = null;
     channel.created_at = null;
+    channel.instance = null;
     this.observed.delete(channel.w);
-  }
-
-  /**
-   * Whether the row at this channel's cursor is still the one read there: it is
-   * asked for on its own and its hash compared with the one kept. True when it
-   * is, false when the thread at the address is another one, and null when the
-   * service did not say, which the read that follows reports.
-   */
-  async cursorStillHolds(channel) {
-    const path = "/" + channel.w + (channel.after > 1 ? "/after/" + (channel.after - 1) : "");
-    let data;
-    try {
-      data = await this.client.request("GET", path, { headers: { "X-Read": channel.read_key, "X-Limit": "1" }, expect: [200] });
-    } catch {
-      return null;
-    }
-    if (!isObject(data) || data.exists === false || !Array.isArray(data.messages)) return null;
-    const row = data.messages[0];
-    return isObject(row) && row.seq === channel.after && row.sha256 === channel.after_sha256;
   }
 
   /**
@@ -1054,7 +1033,7 @@ export class NodeRuntime {
    */
   async poll(channel, wait = 0, limit = null, maxBytes = null) {
     if (channel.muted) return [];
-    const before = { after: channel.after, after_sha256: channel.after_sha256 ?? null, created_at: channel.created_at, expire_at: channel.expire_at, gone: channel.gone, seen: [...channel.seen], peers: { ...this.state.peers } };
+    const before = { after: channel.after, created_at: channel.created_at, instance: channel.instance ?? null, expire_at: channel.expire_at, gone: channel.gone, seen: [...channel.seen], peers: { ...this.state.peers } };
     try {
       return await this.pollOnce(channel, wait, limit, true, maxBytes);
     } catch (error) {
@@ -1062,7 +1041,7 @@ export class NodeRuntime {
       // What this read changed is undone in memory too: the cursor, the hashes
       // and the bindings stay as the file has them, and the messages wait at
       // the service for the next read, which hands them over.
-      Object.assign(channel, { after: before.after, after_sha256: before.after_sha256, created_at: before.created_at, expire_at: before.expire_at, gone: before.gone, seen: before.seen });
+      Object.assign(channel, { after: before.after, created_at: before.created_at, instance: before.instance, expire_at: before.expire_at, gone: before.gone, seen: before.seen });
       this.state.peers = before.peers;
       this.note(channel.label, "not_saved", `what this read found here could not be written down (${error.cause?.code || error.cause?.message}), so nothing from this channel was handed over. It is still there for the next read, and nothing was skipped.`, channel.w);
       return [];
@@ -1090,26 +1069,15 @@ export class NodeRuntime {
     let held = this.observed.get(channel.w);
     const created = channel.created_at ?? null;
     const expires = Number.isInteger(channel.expire_at) ? channel.expire_at : null;
-    if (!held || held.created_at !== created || held.expire_at !== expires) this.observed.set(channel.w, (held = { created_at: created, expire_at: expires, rows: new Map() }));
+    const instance = typeof channel.instance === "string" ? channel.instance : null;
+    if (!held || held.created_at !== created || held.expire_at !== expires || held.instance !== instance) {
+      this.observed.set(channel.w, (held = { created_at: created, expire_at: expires, instance, rows: new Map() }));
+    }
     const message = isObject(raw) ? raw : {};
     held.rows.set(entry.seq, { seq: entry.seq, at: entry.at, sha256: entry.sha256, from: typeof message.from === "string" ? message.from : null, verified: entry.verified === true, from_key: entry.from_key ?? null });
   }
 
   async pollOnce(channel, wait, limit, again, maxBytes = null) {
-    // The cursor is used again only on the thread it belongs to. A thread opened
-    // again at the same address in the same second, with the same lifetime and
-    // the same list, looks the same in every field the service gives, and a
-    // cursor taken from the old one passed over its first messages (a review of
-    // 10 November 2026). So before the cursor is used, the row at it is asked for
-    // and its hash compared with the one kept there, once in a read.
-    if (again && channel.after > 0 && typeof channel.after_sha256 === "string" && !this.cursorChecked.has(channel.w)) {
-      this.cursorChecked.add(channel.w);
-      if ((await this.cursorStillHolds(channel)) === false) {
-        this.note(channel.label, "restarted", `the message at this channel's cursor, seq ${channel.after}, is not the one read there, so the thread at this address is a new one and it is read again from the start`, channel.w);
-        this.forgetThread(channel);
-        return this.pollOnce(channel, wait, limit, false, maxBytes);
-      }
-    }
     let path = "/" + channel.w;
     if (channel.after > 0 || wait > 0) path += "/after/" + channel.after;
     if (wait > 0) path += "/wait/" + Math.min(25, wait);
@@ -1147,13 +1115,21 @@ export class NodeRuntime {
     channel.gone = false;
     const created = data.created_at ?? null;
     const expires = Number.isInteger(data.expire_at) ? data.expire_at : null;
-    // A thread is known by when it was opened and when it expires. One that a
-    // write opened after the service restarted has the service's own lifetime,
-    // so it is told apart even when it was opened in the same second.
-    const another = channel.created_at !== null
-      && ((created !== null && created !== channel.created_at) || (expires !== null && Number.isInteger(channel.expire_at) && expires !== channel.expire_at));
+    const instance = typeof data.instance === "string" ? data.instance : null;
+    // A thread is known by its instance, which the service gives each thread
+    // when it is opened: a thread opened again at the same address in the same
+    // second, with the same lifetime and list, looked the same in every other
+    // field, and a cursor taken from the old one passed over its first messages
+    // (a review of 10 November 2026). A service that names no instance is read
+    // by when the thread was opened and when it expires, as before.
+    const known = typeof channel.instance === "string" && instance !== null;
+    const another = known
+      ? instance !== channel.instance
+      : channel.created_at !== null && ((created !== null && created !== channel.created_at) || (expires !== null && Number.isInteger(channel.expire_at) && expires !== channel.expire_at));
     if (again && another && !data.reset) {
-      this.note(channel.label, "restarted", `the thread at this address is a new one, opened at ${created} and expiring at ${expires}, where this channel knew one opened at ${channel.created_at} and expiring at ${channel.expire_at}, so it is read again from the start`, channel.w);
+      this.note(channel.label, "restarted", known
+        ? `the thread at this address is a new one, instance ${instance} where this channel knew instance ${channel.instance}, so it is read again from the start`
+        : `the thread at this address is a new one, opened at ${created} and expiring at ${expires}, where this channel knew one opened at ${channel.created_at} and expiring at ${channel.expire_at}, so it is read again from the start`, channel.w);
       // What was read of the old thread is no line of the new one's receipt.
       this.forgetThread(channel);
       return this.pollOnce(channel, 0, limit, false, maxBytes);
@@ -1166,6 +1142,7 @@ export class NodeRuntime {
     // cursor was forgotten may expire at another time than the one opened.
     if (channel.created_at === null && expires !== null) channel.expire_at = expires;
     channel.created_at = created;
+    if (instance !== null) channel.instance = instance;
     // What the service kept back. It answers a byte budget with whole messages
     // only, so a message larger than the budget is named here and stays at the
     // service, with what came after it waiting behind it.
@@ -1176,7 +1153,6 @@ export class NodeRuntime {
     const entries = [];
     const keptOut = [];
     let lastSeq = null;
-    let lastSha = null;
     // The budget is kept here as well, for what is handed over, measured as it
     // is handed over. The service counts its own form of each message, which is
     // not the size of the message opened here, and a service without read
@@ -1222,9 +1198,6 @@ export class NodeRuntime {
       // Every message read counts for the receipt, the ones the list keeps out too.
       this.observe(channel, raw, entry);
       lastSeq = lastSeq === null ? entry.seq : Math.max(lastSeq, entry.seq);
-      // The hash of the row at the cursor, as the service gave it, to know the
-      // thread by before the cursor is used again.
-      if (lastSeq === entry.seq) lastSha = isObject(raw) && typeof raw.sha256 === "string" ? raw.sha256 : null;
       if (excluded) {
         keptOut.push(entry.seq);
         continue;
@@ -1265,20 +1238,11 @@ export class NodeRuntime {
     }
     // A read that stopped early moves the cursor to the last row it took and
     // no further: next would skip the rest of the page.
-    // The hash of the row at the cursor goes with it.
     const stoppedEarly = stoppedAtBudget || leftHere;
     if (stoppedEarly) {
-      if (lastSeq !== null) {
-        channel.after = lastSeq;
-        channel.after_sha256 = lastSha;
-      }
-    } else if (Number.isInteger(data.next)) {
-      if (data.next !== channel.after) channel.after_sha256 = data.next === lastSeq ? lastSha : null;
-      channel.after = data.next;
-    } else if (lastSeq !== null && lastSeq > channel.after) {
-      channel.after = lastSeq;
-      channel.after_sha256 = lastSha;
-    }
+      if (lastSeq !== null) channel.after = lastSeq;
+    } else if (Number.isInteger(data.next)) channel.after = data.next;
+    else if (lastSeq !== null) channel.after = Math.max(channel.after, lastSeq);
     await this.saveRead();
     return entries;
   }
@@ -1317,10 +1281,14 @@ export class NodeRuntime {
     // the service restarted, a new thread at the same address was compared with
     // what was read of the old one, and its signer named as checked here.
     const observed = this.observed.get(channel.w);
-    const sameThread = observed !== undefined && observed.created_at !== null && observed.created_at === data.created_at
-      && (observed.expire_at === null || observed.expire_at === data.expire_at);
+    // The same thread by its instance where the service names one, and by when
+    // it was opened and expires where it does not.
+    const sameThread = observed !== undefined && (typeof data.instance === "string" && observed.instance !== null
+      ? observed.instance === data.instance
+      : observed.created_at !== null && observed.created_at === data.created_at && (observed.expire_at === null || observed.expire_at === data.expire_at));
     const earlier = observed !== undefined && !sameThread && observed.rows.size > 0 ? observed : null;
     const entries = sameThread ? [...observed.rows.values()].sort((a, b) => a.seq - b.seq) : [];
+    const which = (thread) => (typeof thread.instance === "string" ? `instance ${thread.instance}, ` : "the one ") + `opened at ${thread.created_at} and expiring at ${thread.expire_at}`;
     const held = entries.length;
     const line = (m) => `${m.seq}\t${m.at}\t${m.sha256}\t${m.from ?? "-"}\n`;
     const listed = data.messages.map(line).join("");
@@ -1359,7 +1327,7 @@ export class NodeRuntime {
       result.local_check = "Mismatch: the receipt counts fewer messages than this process read. The thread was replaced or the service lost messages.";
     } else if (!comparable) {
       result.local_check = `Not compared: this process holds ${held} of the ${data.count} messages the receipt counts, so a local root would differ for a reason that is not the receipt's.`
-        + (earlier !== null ? ` What this process read at this address was on another thread, opened at ${earlier.created_at} and expiring at ${earlier.expire_at}; this receipt is for the one opened at ${data.created_at} and expiring at ${data.expire_at}, so none of that counts here.` : "")
+        + (earlier !== null ? ` What this process read at this address was on another thread, ${which(earlier)}; this receipt is for ${which(data)}, so none of that counts here.` : "")
         + " root_adds_up checks only the receipt's arithmetic; our signature records what was fetched, not that its claims are true. For the independent check, take the receipt in the process that read the messages.";
     }
     if (anchor === true) {
@@ -1381,7 +1349,6 @@ export class NodeRuntime {
   /** Messages on every channel still read, the inbox first. The inbox is opened and presence published as the read starts. */
   async read({ wait = 0, limit = 50, maxBytes = null } = {}) {
     const noted = this.attention.length;
-    this.cursorChecked.clear();
     await this.ensureInbox();
     await this.publishPresence();
     const now = this.now();

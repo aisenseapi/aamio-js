@@ -1521,7 +1521,8 @@ export class Aamio {
     } catch {
       result = {};
     }
-    if (rpc === null || typeof rpc !== "object" || rpc.result?.isError || !result?.proof_id) throw new AamioError(response.status, rpc ?? text, "anchor failed");
+    // A proof_id of blanks names no proof (a review of 10 November 2026).
+    if (rpc === null || typeof rpc !== "object" || rpc.result?.isError || typeof result?.proof_id !== "string" || result.proof_id.trim() === "") throw new AamioError(response.status, rpc ?? text, "anchor failed");
     return { proofId: result.proof_id, proofUrl: result.proof_url, status: result.status, commitment };
   }
 

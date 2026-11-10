@@ -37,20 +37,21 @@ not what moved in the source.
   had no room left to ask, as aamio-python does. Nothing was passed over before
   either: the rest came with the next read, unannounced. One read says a thing
   once, also when it asked a channel before a wait and in it.
-- A thread is known by when it was opened and when it expires, and before a
-  cursor kept from an earlier read is used again, the message at it is asked for
-  and its hash compared with the one kept, once in a read. A thread opened again
-  at the same address in the same second, after the service restarted, passed
-  its first messages by unread. `state.json` keeps that hash beside each
-  channel's cursor, as `after_sha256`; a client that does not know the field
-  leaves the check out until the next message it reads.
+- A thread is known by the `instance` the service names it by in every read
+  answer and receipt, and by when it was opened and expires where the service
+  names none. A thread opened again at the same address in the same second,
+  after the service restarted, passed its first messages by unread. Each
+  channel in `state.json` keeps its thread's `instance`, and a client that does
+  not know the field keeps it as it is, so a home read in turn by an older
+  client is not read again from the start.
 - A receipt names a signer only for a line it lists as this process read it,
   and its keys must be the signers of its lines, each once: one that left a
   signer out was signed as if nobody had signed.
 - A binding conflict is weighed with its message, and an address is bound only
   by a message taken: a conflict added after the weighing let 1146 bytes through
   a budget of 900.
-- An anchoring whose answer broke off after its status keeps the status.
+- An anchoring whose answer broke off after its status keeps the status, and a
+  `proof_id` of blanks names no proof.
 - A read that stops at its own limit says so, also when the service sent every
   row after the cursor.
 

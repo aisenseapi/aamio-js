@@ -1,6 +1,7 @@
 // aamio as the runtime sees it, in memory, through a fetch of its own: threads with read keys, allowlists and
 // signatures, presence, and the board at BOARD. Enough of the wire contract (https://aamio.at/api.md) for the
 // runtime's tests, and no more: the real service is what code/php/tools/check-node-exchange.py runs against.
+import { randomBytes } from "node:crypto";
 import { boardDeleteSigningInput, boardSigningInput, deriveAddress, isEnvelope, keyHash, presenceSigningInput, sha256hex, threadSigningInput, verify } from "../src/aamio.js";
 
 export const BOARD = "https://fake.board";
@@ -48,6 +49,8 @@ export class FakeAamio {
     this.ignoreBudget = false;
     // A service that does not take X-Limit either, and sends every row after the cursor.
     this.ignoreLimit = false;
+    // A service from before instances: no thread is named by one.
+    this.noInstance = false;
     this.fetch = (url, init = {}) => {
       const where = new URL(url);
       if (where.host === new URL(VERIFYUM).host) return this.anchorAnswer(init);
@@ -77,7 +80,10 @@ export class FakeAamio {
   }
 
   thread(w, { id = null, ttl = 600, allow = [] } = {}) {
-    const thread = { id, w, expire_at: this.time + ttl, allow, created_at: this.time, messages: [] };
+    // Each thread an instance of its own, as the service gives it (aamio_thread_instance), unless the test service
+    // plays one from before instances.
+    const instance = this.noInstance ? undefined : randomBytes(10).toString("hex").slice(0, 16);
+    const thread = { id, w, expire_at: this.time + ttl, allow, created_at: this.time, messages: [], instance };
     this.threads.set(w, thread);
     return thread;
   }
@@ -93,7 +99,7 @@ export class FakeAamio {
       if (!id || deriveAddress(id) !== w) return this.reply(400, { error: "X-Read does not derive this address", fix: "Make w from the read key." });
       const allow = (this.header(init, "X-Allow") || "").split(",").map((key) => key.trim()).filter(Boolean);
       const thread = this.thread(w, { id, ttl: Number(this.header(init, "X-TTL") || 600), allow: allow.includes("*") ? ["*"] : allow });
-      return this.reply(201, { w, expire_at: thread.expire_at, allow: thread.allow });
+      return this.reply(201, { w, expire_at: thread.expire_at, allow: thread.allow, instance: thread.instance });
     }
     if (method === "GET" && parts[1] === "gate") return this.reply(200, {});
     if (method === "POST" && parts.length === 1) {
@@ -121,7 +127,7 @@ export class FakeAamio {
       const messages = thread.messages.map((m) => ({ seq: m.seq, at: m.at, sha256: m.sha256, from: m.from }));
       const root = sha256hex(messages.map((m) => `${m.seq}\t${m.at}\t${m.sha256}\t${m.from ?? "-"}\n`).join(""));
       const receipt = {
-        schema: "aamio-receipt-v1", w, created_at: thread.created_at, expire_at: thread.expire_at, count: messages.length,
+        schema: "aamio-receipt-v1", w, instance: thread.instance, created_at: thread.created_at, expire_at: thread.expire_at, count: messages.length,
         bytes: thread.messages.reduce((sum, m) => sum + m.body.length, 0), allow: thread.allow, messages,
         keys: [...new Set(messages.map((m) => m.from).filter(Boolean))], root, commitment: "sha256:" + root, issued_at: this.time,
       };
@@ -166,7 +172,7 @@ export class FakeAamio {
         messages = kept;
       }
       const next = messages.length ? messages[messages.length - 1].seq : after;
-      const answer = { exists: true, created_at: thread.created_at, expire_at: thread.expire_at, messages: messages.map((m) => ({ ...m })), next };
+      const answer = { exists: true, created_at: thread.created_at, expire_at: thread.expire_at, instance: thread.instance, messages: messages.map((m) => ({ ...m })), next };
       if (more) answer.more = true;
       if (tooLarge) answer.too_large = tooLarge;
       return this.reply(200, answer);
