@@ -1191,6 +1191,9 @@ export class Aamio {
     const body = gate ? JSON.stringify({ gate }) : undefined;
     const data = await this.request("PUT", "/" + w, { headers, body });
     const thread = { id, w, expireAt: data.expire_at, allow };
+    // The service names each thread by an instance of its own, and listen()
+    // knows the thread by it.
+    if (typeof data.instance === "string") thread.instance = data.instance;
     if (JSON.stringify(data.allow) !== JSON.stringify(allow)) thread.allowAnswered = data.allow ?? null;
     if (data.gate) thread.gate = data.gate;
     return thread;
@@ -1428,6 +1431,29 @@ export class Aamio {
     let seq = after;
     while (!(signal && signal.aborted)) {
       const data = await this.read(thread, { after: seq, wait });
+      // A thread is known by the instance the service names it by. One opened
+      // again at this address, by its owner or by a write after a restart,
+      // that already holds as many messages as the cursor is not reset by the
+      // service, and listen went on from the old cursor past its first messages
+      // without a word (a review of 10 November 2026). So it is read from the
+      // start, and that is said once, as a reset.
+      if (data.exists === true && typeof data.instance === "string") {
+        if (typeof thread.instance === "string" && data.instance !== thread.instance && !data.reset && seq > 0) {
+          const reset = { after: seq, newest: Number.isInteger(data.count) ? data.count : 0, what: `the thread at this address is a new one, instance ${data.instance} where this listener knew instance ${thread.instance}, so it is read again from the start` };
+          thread.instance = data.instance;
+          if (Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
+          thread.reset = reset;
+          this.forgetGate(thread.w);
+          if (typeof onReset === "function") onReset(reset);
+          else console.warn("aamio: the thread cursor was reset", reset);
+          seq = 0;
+          continue;
+        }
+        // The thread that is there, with its own expiry: after the service read
+        // it from the start it may expire at another time than the one opened.
+        if (thread.instance !== data.instance && Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
+        thread.instance = data.instance;
+      }
       // What the thread's own allowlist kept out is not yielded, and it is said.
       if (data.keptOut?.length) {
         if (typeof onKeptOut === "function") onKeptOut(data.keptOut);

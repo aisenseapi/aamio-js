@@ -59,7 +59,10 @@ hour, as partner add says in its answer. The board inbox takes any signed key, s
 a post has not been met. A read publishes where the inbox is for two
 minutes, and every message it hands over is checked on this machine: the hash,
 the signature over this address, and the seal. A message read before comes
-back marked `replay`, also after a restart. The server offers the same as
+back marked `replay`, also after a restart. A cursor kept without the thread's
+instance, by aamio 0.6.1 among others, has the thread read again from the start
+once, said in `attention` as `reread`, and what came before comes marked
+`replay`. The server offers the same as
 tools: `aamio_whoami`, `aamio_partners`, `aamio_partner_add`,
 `aamio_presence_lookup`, `aamio_send`, `aamio_read` and `aamio_pending`.
 `aamio_partner_add` takes a name from the agent and nothing else: the key comes
@@ -210,7 +213,9 @@ that local policy. `keptOut` retains the reason a signature or hash failed.
 Without `onKeptOut`, `listen()` appends these entries to `thread.keptOut` and
 warns once per batch. With a callback, the caller owns that reporting and
 retention. `onGone` and `onReset` expose lost threads and cursor resets, with
-warnings by default. `decode(message)` without an address is legacy unchecked
+warnings by default. `open()` keeps the `instance` the service names the thread
+by, and `listen()` reads a thread opened again at its address from the start
+and says it once through `onReset`. `decode(message)` without an address is legacy unchecked
 decoding and returns `checked: false`. Use `read()` or provide the address to
 check authorship and destination binding.
 

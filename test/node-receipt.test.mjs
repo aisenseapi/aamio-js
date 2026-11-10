@@ -471,7 +471,7 @@ test("what was read of a thread is let go once its receipt can no longer be take
 /** A channel at an address of its own, open to anyone, with the service's own lifetime: the case where a thread a write opens looks the same. */
 async function openChannel(receiver, label, ttl = 600) {
   const thread = await receiver.client.open({ ttl });
-  const channel = { label, read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: [], after: 0, after_sha256: null, created_at: null, gone: false, muted: false, seen: [] };
+  const channel = { label, read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: [], after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [] };
   receiver.state.channels.push(channel);
   return channel;
 }
@@ -668,4 +668,124 @@ test("a read that stops at its own limit says so, also from a service that sent 
     else assert.deepEqual(said, [], "and nothing when nothing was left");
   }
   assert.deepEqual(taken.map((m) => [m.body.text, m.replay]), [["one", false], ["two", false], ["three", false]]);
+});
+
+// The post-check of 10 November 2026 (code/php/docs/aamio-trad-id-etterkontroll-2026-11-10.md).
+
+test("a thread the service read from the start after a restart is followed in its expiry, also by a home opened again", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender, homeA, open } = await pair(t, fake);
+  await sender.send("receiver", { text: "one" });
+  await sender.send("receiver", { text: "two" });
+  assert.equal((await receiver.read()).length, 2);
+  const inbox = receiver.channel("inbox");
+  const w = inbox.w;
+  assert.equal(inbox.expire_at, fake.time + 3600);
+  // The service restarts without its store, and a write opens a thread with the service's own lifetime, 600 seconds.
+  // The cursor at 2 is past its one message, so the service reads it from the start and says reset.
+  fake.forget(w);
+  await sender.client.send(w, { text: "after the restart" }, { encryptTo: receiver.keys.public });
+  fake.requests = [];
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["after the restart"]);
+  assert.ok(fake.requests.includes(`GET /${w}/after/2`), "the service was asked from the old cursor, and read from the start");
+  assert.ok((await receiver.attentionTaken()).some((note) => note.state === "restarted" && /past the last message this thread holds/.test(note.what)));
+  const thread = fake.threads.get(w);
+  assert.equal(inbox.instance, thread.instance);
+  assert.equal(inbox.expire_at, thread.expire_at, "the expiry of the thread that is there, with its instance");
+  assert.equal(inbox.expire_at, fake.time + 600);
+  await receiver.close();
+  const again = await open(homeA);
+  assert.equal(again.channel("inbox").expire_at, thread.expire_at, "and state.json keeps it");
+  // When that thread is about to expire, a read opens a new inbox for the partners rather than reading one that has.
+  fake.time += 601;
+  await again.read();
+  assert.notEqual(again.channel("inbox").w, w, "a new inbox");
+});
+
+test("a thread the service read from the start that expires later than the one opened is read until it does", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender } = await pair(t, fake);
+  const side = await openChannel(receiver, "side", 300);
+  await sender.client.send(side.w, "one");
+  await sender.client.send(side.w, "two");
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["one", "two"]);
+  fake.forget(side.w);
+  await sender.client.send(side.w, "after the restart");
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["after the restart"]);
+  assert.equal(side.expire_at, fake.threads.get(side.w).expire_at);
+  // Past the 300 seconds the channel was opened for, inside the 600 of the thread that is there.
+  fake.time += 301;
+  await sender.client.send(side.w, "later");
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["later"], "still read");
+});
+
+/** The home as a client that does not keep the instance leaves it: the cursor and the hashes, and no instance. */
+async function withoutInstance(home, label, after = null) {
+  const file = join(home, "state.json");
+  const state = JSON.parse(await readFile(file, "utf8"));
+  const channel = state.channels.find((c) => c.label === label);
+  delete channel.instance;
+  if (after !== null) channel.after = after;
+  await writeFile(file, JSON.stringify(state));
+  return channel;
+}
+
+test("a cursor kept without the thread's instance is read again from the start once, what came before marked replay", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender, homeA, open } = await pair(t, fake);
+  await sender.send("receiver", { text: "one" });
+  await sender.send("receiver", { text: "two" });
+  assert.equal((await receiver.read()).length, 2);
+  await receiver.close();
+  await withoutInstance(homeA, "inbox");
+  await sender.send("receiver", { text: "three" });
+  const again = await open(homeA);
+  assert.deepEqual((await again.read()).map((m) => [m.body.text, m.replay]), [["one", true], ["two", true], ["three", false]], "all of it, and nothing passed over");
+  const said = (await again.attentionTaken()).filter((note) => note.state === "reread");
+  assert.equal(said.length, 1);
+  assert.match(said[0].what, /cursor, 2, was kept by a client that did not keep the thread's instance/);
+  assert.match(again.channel("inbox").instance, /^[0-9a-f]{16}$/, "the instance is kept from now on");
+  assert.deepEqual(await again.read(), [], "once");
+  assert.deepEqual((await again.attentionTaken()).filter((note) => note.state === "reread"), []);
+});
+
+test("a thread opened again in the same second under a cursor kept without its instance gives up none of its messages", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender, homeA, open } = await pair(t, fake);
+  await sender.send("receiver", { text: "old one" });
+  assert.equal((await receiver.read()).length, 1);
+  await receiver.close();
+  const inbox = await withoutInstance(homeA, "inbox");
+  // Its owner opens the address again in the same second, with the same lifetime and list: another thread only by its
+  // instance, and the cursor at 1 is not past its messages.
+  fake.threads.set(inbox.w, { ...fake.threads.get(inbox.w), messages: [], instance: "4".repeat(16) });
+  await sender.send("receiver", { text: "new one" });
+  await sender.send("receiver", { text: "new two" });
+  const again = await open(homeA);
+  assert.deepEqual((await again.read()).map((m) => [m.body.text, m.replay]), [["new one", false], ["new two", false]]);
+  assert.equal((await again.attentionTaken()).filter((note) => note.state === "reread").length, 1);
+});
+
+test("another sender's message with the same text reaches the agent when a cursor kept without the instance is read again", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender, homeA, open } = await pair(t, fake);
+  const other = new Aamio({ base: HOST, keys: Keys.generate(), fetch: (url, init) => fake.fetch(url, init) });
+  const side = await openChannel(receiver, "side");
+  await sender.client.send(side.w, "OK");
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["OK"]);
+  await other.send(side.w, "OK");
+  assert.equal(fake.threads.get(side.w).messages[0].sha256, fake.threads.get(side.w).messages[1].sha256, "the hash is of the text alone");
+  await receiver.close();
+  // The same thread, the first OK read before the cursor was kept.
+  await withoutInstance(homeA, "side");
+  let again = await open(homeA);
+  assert.deepEqual((await again.read()).map((m) => [m.seq, m.body.text, m.from_key]), [[1, "OK", sender.keys.public], [2, "OK", other.keys.public]], "both, the other sender's too");
+  await again.close();
+  // A thread opened again at the address in the same second, whose first message is the other sender's OK, under a
+  // cursor at 1 kept without the instance.
+  fake.threads.set(side.w, { ...fake.threads.get(side.w), messages: [], instance: "5".repeat(16) });
+  await other.send(side.w, "OK");
+  await withoutInstance(homeA, "side", 1);
+  again = await open(homeA);
+  assert.deepEqual((await again.read()).map((m) => [m.seq, m.body.text, m.from_key]), [[1, "OK", other.keys.public]], "the new thread's first message comes");
 });

@@ -135,9 +135,16 @@ export class FakeAamio {
     }
     if (method === "GET") {
       const thread = this.threads.get(w);
-      if (!thread) return this.reply(200, { exists: false, messages: [], next: 0 });
+      let after = parts[1] === "after" ? Number(parts[2]) : 0;
+      // A cursor sent to an address with no thread, or past the last message of the one there, is from an earlier
+      // thread at this address: the service says reset, and reads from the start (func_aamio_thread.php).
+      if (!thread) return this.reply(200, { exists: false, messages: [], next: 0, ...(after > 0 ? { reset: { after, newest: 0, what: "The cursor sent was for a thread that is not here now, so next is 0: a thread that opens here starts again at one." } } : {}) });
       if (thread.id !== null && this.header(init, "X-Read") !== thread.id) return this.reply(403, { error: "wrong read key", fix: "Read with the key the thread was opened with." });
-      const after = parts[1] === "after" ? Number(parts[2]) : 0;
+      let reset = null;
+      if (after > thread.messages.length) {
+        reset = { after, newest: thread.messages.length, what: `after ${after} is past the last message this thread holds, ${thread.messages.length}, so the cursor is from an earlier thread at this address. This answer reads from the start, and next is the cursor to keep.` };
+        after = 0;
+      }
       const limit = this.ignoreLimit ? 0 : Number(this.header(init, "X-Limit") || 0);
       const asked = this.header(init, "X-Max-Bytes");
       // Checked as the service checks it (blocks/api-thread.php): one to eight digits, at least 512.
@@ -175,6 +182,7 @@ export class FakeAamio {
       const answer = { exists: true, created_at: thread.created_at, expire_at: thread.expire_at, instance: thread.instance, messages: messages.map((m) => ({ ...m })), next };
       if (more) answer.more = true;
       if (tooLarge) answer.too_large = tooLarge;
+      if (reset) answer.reset = reset;
       return this.reply(200, answer);
     }
     return this.reply(404, { error: "not in the fake", fix: "none" });

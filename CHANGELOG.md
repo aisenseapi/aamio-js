@@ -44,6 +44,21 @@ not what moved in the source.
   channel in `state.json` keeps its thread's `instance`, and a client that does
   not know the field keeps it as it is, so a home read in turn by an older
   client is not read again from the start.
+- A cursor kept without the thread's instance, by aamio 0.6.1 or another client
+  that did not know it, has the thread read again from the start once, said as
+  `reread`: what was handed over before comes again marked `replay`. Under such
+  a cursor, a thread opened again at the address in the same second, with the
+  same lifetime and list, passed its first messages by unread. Nothing is passed
+  over by its hash, which is the hash of the text alone, and another sender's
+  message with the same text has it too.
+- A thread the service reads from the start after a restart is followed in its
+  expiry as well as its instance. The channel took the new instance and kept
+  the old expiry: an inbox that had expired was still taken for live, and a
+  thread that expired later was given up early.
+- `open()` keeps the `instance` the service names the thread by, and `listen()`
+  reads a thread opened again at the address from the start and says it once
+  through `onReset`. It went on from the old cursor past the new thread's first
+  messages. `Thread` and `ReadResult` name the field in the types.
 - A receipt names a signer only for a line it lists as this process read it,
   and its keys must be the signers of its lines, each once: one that left a
   signer out was signed as if nobody had signed.

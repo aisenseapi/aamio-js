@@ -1134,13 +1134,32 @@ export class NodeRuntime {
       this.forgetThread(channel);
       return this.pollOnce(channel, 0, limit, false, maxBytes);
     }
+    // A cursor kept by a client that did not keep the thread's instance, aamio
+    // 0.6.1 among them, cannot be checked against it: a thread opened again at
+    // this address in the same second, with the same lifetime and list, looks
+    // the same in every other field, and its first messages were passed over
+    // without a word (a review of 10 November 2026). So the thread is read again
+    // from the start, once, and all of it is handed over: what this channel
+    // handed over before comes again marked replay, as after a restart. Nothing
+    // is passed over by its hash, which is the hash of the text alone: another
+    // sender's message with the same text has it too (the same review).
+    if (!another && !data.reset && channel.after > 0 && typeof channel.instance !== "string" && instance !== null) {
+      this.note(channel.label, "reread", `this channel's cursor, ${channel.after}, was kept by a client that did not keep the thread's instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, and nothing is passed over.`, channel.w);
+      channel.after = 0;
+      return this.pollOnce(channel, 0, limit, false, maxBytes);
+    }
     if (data.reset) {
       this.note(channel.label, "restarted", (isObject(data.reset) && data.reset.what) || "the service read this thread from the start", channel.w);
       this.observed.delete(channel.w);
     }
-    // The channel follows the thread that is there: one taken up after its
-    // cursor was forgotten may expire at another time than the one opened.
-    if (channel.created_at === null && expires !== null) channel.expire_at = expires;
+    // The channel follows the thread that is there, all of it at once: one
+    // taken up after its cursor was forgotten, or read from the start by the
+    // service after a restart, may expire at another time than the one opened.
+    // A channel that took the new instance and kept the old expiry chose an
+    // inbox that had expired, and one that expired later was given up early
+    // (a review of 10 November 2026). The list this channel was opened with is
+    // its own, and stays.
+    if ((channel.created_at === null || another || data.reset) && expires !== null) channel.expire_at = expires;
     channel.created_at = created;
     if (instance !== null) channel.instance = instance;
     // What the service kept back. It answers a byte budget with whole messages

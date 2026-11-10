@@ -97,6 +97,12 @@ export interface Thread {
   id: string;
   w: string;
   expireAt?: number;
+  /**
+   * The instance the service named the thread by, kept by open() and by listen(). A thread opened again at
+   * this address has another one, and listen() reads it from the start and says so once, as a reset. Absent
+   * from a service that names none.
+   */
+  instance?: string;
   allow?: string[];
   /** The service's echo when it differs from the requested, locally kept list. null when absent. */
   allowAnswered?: unknown;
@@ -146,6 +152,8 @@ export interface ReadResult {
   exists: boolean;
   created_at?: number;
   expire_at?: number;
+  /** The thread's instance, from a service that names one: another one than before is another thread at this address. */
+  instance?: string;
   count: number;
   allow: string[];
   /** Checked here: verified and from are this client's result, not the service's word. */
