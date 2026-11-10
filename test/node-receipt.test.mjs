@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { Keys, sha256hex } from "../src/aamio.js";
+import { Aamio, Keys, sha256hex } from "../src/aamio.js";
 import { initIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
 import { NodeRuntime } from "../src/node-runtime.js";
@@ -319,7 +319,7 @@ test("a receipt for a thread opened again at the same address compares nothing r
   assert.equal(before.local_root_matches, null);
   assert.deepEqual(before.keys, [sender.keys.public], "its signer is the service's word, not a partner checked here");
   assert.equal(before.keys_unverified_count, 1);
-  assert.match(before.local_check, /on an earlier thread, opened at \d+; this receipt is for the one opened at \d+/);
+  assert.match(before.local_check, /on another thread, opened at \d+ and expiring at \d+; this receipt is for the one opened at \d+ and expiring at \d+/);
 
   assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["on the new thread"]);
   const after = await receiver.receipt();
@@ -342,6 +342,10 @@ test("an answer that is not a receipt for this channel is refused before it is c
     [(r) => ({ ...r, messages: [{ ...r.messages[0], sha256: "x" }] }), /line 1 is not a message line in order/],
     [(r) => ({ ...r, root: "ROOT", commitment: "sha256:ROOT" }), /its root is not a sha256 in hex/],
     [(r) => ({ ...r, keys: [7] }), /its keys are not a list of keys/],
+    [(r) => ({ ...r, keys: null }), /its keys are not a list of keys/],
+    [(r) => ({ ...r, keys: [...r.keys, ...r.keys] }), /its keys are not a list of keys/],
+    [(r) => ({ ...r, keys: [] }), /its keys are not the signers of its lines/],
+    [(r) => ({ ...r, keys: [...r.keys, Keys.generate().public] }), /its keys are not the signers of its lines/],
   ];
   for (const [tamper, why] of refused) {
     fake.tamperReceipt = tamper;
@@ -459,4 +463,158 @@ test("what was read of a thread is let go once its receipt can no longer be take
   fake.time = inbox.expire_at + 121;
   await receiver.read();
   assert.equal(receiver.observed.has(inbox.w), false, "and let go after it");
+});
+
+/** A channel at an address of its own, open to anyone, with the service's own lifetime: the case where a thread a write opens looks the same. */
+async function openChannel(receiver, label, ttl = 600) {
+  const thread = await receiver.client.open({ ttl });
+  const channel = { label, read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: [], after: 0, after_sha256: null, created_at: null, gone: false, muted: false, seen: [] };
+  receiver.state.channels.push(channel);
+  return channel;
+}
+
+test("an inbox a write opened again in the same second is told apart by when it expires, and its first message comes", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender } = await pair(t, fake);
+  await sender.send("receiver", { text: "on the first thread" });
+  assert.equal((await receiver.read()).length, 1);
+  const inbox = receiver.channel("inbox");
+  // A state written by a client that kept no hash at the cursor: the lifetime alone tells the threads apart.
+  inbox.after_sha256 = null;
+  // The service restarts without its store, and in the same second a write opens a thread with its own lifetime.
+  fake.forget(inbox.w);
+  await sender.client.send(inbox.w, { text: "on the new thread" }, { encryptTo: receiver.keys.public });
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["on the new thread"], "read without a receipt first");
+  const said = (await receiver.attentionTaken()).filter((note) => note.state === "restarted");
+  assert.equal(said.length, 1);
+  assert.match(said[0].what, /expiring at \d+, where this channel knew one opened at \d+ and expiring at \d+/);
+  assert.equal(inbox.expire_at, fake.time + 600, "and the channel follows the thread that is there");
+  assert.deepEqual(await receiver.read(), [], "nothing twice");
+});
+
+test("an open thread a write opened again in the same second with the same lifetime is told apart by the hash at the cursor", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender } = await pair(t, fake);
+  const side = await openChannel(receiver, "side");
+  await sender.client.send(side.w, { text: "on the first thread" });
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["on the first thread"]);
+  assert.equal(side.after, 1);
+  assert.match(side.after_sha256, /^[0-9a-f]{64}$/);
+  fake.forget(side.w);
+  await sender.client.send(side.w, { text: "on the new thread" });
+  assert.equal(fake.threads.get(side.w).expire_at, side.expire_at, "every field the service gives is the same");
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["on the new thread"], "read without a receipt first");
+  assert.ok((await receiver.attentionTaken()).some((note) => note.state === "restarted" && /seq 1, is not the one read there/.test(note.what)));
+  assert.deepEqual(await receiver.read(), [], "nothing twice");
+});
+
+test("an address its owner opened again in the same second with the same lifetime and list is told apart by the hash, and a receipt names nobody for it", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender } = await pair(t, fake);
+  await sender.send("receiver", { text: "on the first thread" });
+  assert.equal((await receiver.read()).length, 1);
+  const inbox = receiver.channel("inbox");
+  // The same read key, the same lifetime, the same list, the same second: a thread that is another only by its messages.
+  fake.threads.set(inbox.w, { ...fake.threads.get(inbox.w), messages: [] });
+  await sender.send("receiver", { text: "on the new thread" });
+  const receipt = await receiver.receipt();
+  assert.equal(receipt.local_root_matches, false, "what was read here is not what it lists");
+  assert.deepEqual(receipt.local_differences, [{ seq: 1, fields: ["sha256"] }]);
+  assert.deepEqual(receipt.keys, [sender.keys.public], "and its signer is not named for a line this process did not read");
+  assert.equal(receipt.keys_unverified_count, 1);
+  assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["on the new thread"]);
+  const after = await receiver.receipt();
+  assert.equal(after.local_root_matches, true);
+  assert.deepEqual(after.keys, ["sender"]);
+});
+
+test("the row at the cursor is asked for once in a read, also when the read waits, and an unchanged thread says nothing", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender } = await pair(t, fake);
+  await sender.send("receiver", { text: "one" });
+  await receiver.read();
+  await receiver.attentionTaken();
+  const inbox = receiver.channel("inbox");
+  fake.requests = [];
+  assert.deepEqual(await receiver.read({ wait: 1 }), []);
+  assert.equal(fake.requests.filter((request) => request === `GET /${inbox.w}`).length, 1, "the row at cursor 1 asked for once");
+  assert.ok(fake.requests.includes(`GET /${inbox.w}/after/1/wait/1`), "and then the wait from the cursor");
+  assert.deepEqual((await receiver.attentionTaken()).filter((note) => note.state === "restarted"), []);
+});
+
+test("a binding conflict is weighed with its message, and an address is bound only by a message taken", async (t) => {
+  const fake = new FakeAamio();
+  fake.ignoreBudget = true;
+  const { receiver, sender } = await pair(t, fake);
+  const size = (m) => Buffer.byteLength(JSON.stringify(m), "utf8");
+  const inbox = receiver.channel("inbox");
+  const taken = "a".repeat(20);
+  receiver.state.peers[taken] = Keys.generate().public;
+  for (const text of ["one", "two"]) await sender.client.send(inbox.w, { text, reply_to: taken });
+  const kept = { after: inbox.after, after_sha256: inbox.after_sha256 ?? null, seen: [...inbox.seen], peers: { ...receiver.state.peers } };
+  const both = await receiver.read();
+  assert.ok(both.length === 2 && both.every((m) => m.binding_conflicts?.length === 1), "each carries its conflict");
+  const sizes = both.map(size);
+  await receiver.attentionTaken();
+  // The same two again, from where the read began.
+  Object.assign(inbox, { after: kept.after, after_sha256: kept.after_sha256, seen: kept.seen });
+  receiver.state.peers = { ...kept.peers };
+  receiver.observed.delete(inbox.w);
+  const one = await receiver.read({ maxBytes: sizes[0] + sizes[1] - 1 });
+  assert.equal(one.length, 1, "the two with their conflicts do not fit");
+  assert.equal(size(one[0]), sizes[0], "weighed as handed over, conflict and all");
+  const notes = await receiver.attentionTaken();
+  assert.equal(notes.filter((note) => note.state === "binding_conflict").length, 1, "and only the message taken is said");
+  assert.ok(notes.some((note) => note.state === "more"));
+  const alone = await receiver.read({ maxBytes: sizes[1] - 1 });
+  assert.equal(alone.length, 1);
+  assert.ok((await receiver.attentionTaken()).some((note) => note.state === "over_budget"), "one whole message, over the budget on its own and said");
+
+  const unbound = "b".repeat(20);
+  await sender.client.send(inbox.w, { text: "x".repeat(800) });
+  await sender.client.send(inbox.w, { text: "binds", reply_to: unbound });
+  assert.equal((await receiver.read({ maxBytes: 1200 })).length, 1);
+  assert.equal(receiver.state.peers[unbound], undefined, "a message not taken binds nothing");
+  assert.deepEqual((await receiver.read({ maxBytes: 1200 })).map((m) => m.body.text), ["binds"]);
+  assert.equal(receiver.state.peers[unbound], sender.keys.public, "and binds when it is taken");
+});
+
+test("a receipt whose keys are the signers of its lines is taken: none for an unsigned line, one for two lines by one key", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender } = await pair(t, fake);
+  const side = await openChannel(receiver, "side");
+  const anonymous = new Aamio({ base: HOST, fetch: (url, init) => fake.fetch(url, init) });
+  await anonymous.send(side.w, { text: "nobody's" });
+  await sender.client.send(side.w, { text: "one" });
+  await sender.client.send(side.w, { text: "two" });
+  await receiver.read();
+  const receipt = await receiver.receipt("side");
+  assert.equal(receipt.count, 3);
+  assert.equal(receipt.root_adds_up, true);
+  assert.equal(receipt.local_root_matches, true);
+  assert.deepEqual(receipt.keys, ["sender"], "the one signer, checked here, by its name in the book");
+});
+
+test("an anchoring whose answer broke off after its status keeps the status, and the receipt stands", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver } = await pair(t, fake);
+  fake.anchorAnswer = () => new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("terminated")); } }), { status: 503 });
+  const cut = await receiver.receipt("inbox", { anchor: true });
+  assert.equal(cut.root_adds_up, true);
+  assert.deepEqual(cut.anchor, { error: 503, detail: "terminated" });
+});
+
+test("a read that stops at its own limit says so, also from a service that sent every row", async (t) => {
+  const fake = new FakeAamio();
+  fake.ignoreLimit = true;
+  const { receiver, sender } = await pair(t, fake);
+  for (const text of ["one", "two", "three"]) await sender.send("receiver", { text });
+  const taken = [];
+  for (let i = 0; i < 3; i++) {
+    taken.push(...(await receiver.read({ limit: 1 })));
+    const said = (await receiver.attentionTaken()).filter((note) => note.state === "more");
+    if (i < 2) assert.match(said[0]?.what ?? "nothing said", /as many messages as its limit allows/, `read ${i + 1}`);
+    else assert.deepEqual(said, [], "and nothing when nothing was left");
+  }
+  assert.deepEqual(taken.map((m) => [m.body.text, m.replay]), [["one", false], ["two", false], ["three", false]]);
 });

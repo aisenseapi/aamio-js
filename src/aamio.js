@@ -1500,7 +1500,14 @@ export class Aamio {
     // The status first. A 503 with a proof_id in its body is no anchoring, and a
     // 503 in plain text is still a 503: the body used to be read as JSON before
     // the status was looked at (a review of 10 November 2026).
-    const text = await response.text();
+    // The status came before the body, and it is the answer's even when the body
+    // breaks off: a 503 cut short was reported as 0 (a review of 10 November 2026).
+    let text;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw new AamioError(response.status, String(error?.message ?? error), `anchor failed: Verifyum answered ${response.status} and the answer broke off`);
+    }
     let rpc = null;
     try {
       rpc = JSON.parse(text);

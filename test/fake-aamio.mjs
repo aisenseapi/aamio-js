@@ -46,6 +46,8 @@ export class FakeAamio {
     // service without read limits answers.
     this.budgets = [];
     this.ignoreBudget = false;
+    // A service that does not take X-Limit either, and sends every row after the cursor.
+    this.ignoreLimit = false;
     this.fetch = (url, init = {}) => {
       const where = new URL(url);
       if (where.host === new URL(VERIFYUM).host) return this.anchorAnswer(init);
@@ -130,7 +132,7 @@ export class FakeAamio {
       if (!thread) return this.reply(200, { exists: false, messages: [], next: 0 });
       if (thread.id !== null && this.header(init, "X-Read") !== thread.id) return this.reply(403, { error: "wrong read key", fix: "Read with the key the thread was opened with." });
       const after = parts[1] === "after" ? Number(parts[2]) : 0;
-      const limit = Number(this.header(init, "X-Limit") || 0);
+      const limit = this.ignoreLimit ? 0 : Number(this.header(init, "X-Limit") || 0);
       const asked = this.header(init, "X-Max-Bytes");
       // Checked as the service checks it (blocks/api-thread.php): one to eight digits, at least 512.
       if (!this.ignoreBudget && asked !== undefined && (!/^[0-9]{1,8}$/.test(asked) || Number(asked) < 512)) {
