@@ -99,8 +99,9 @@ export interface Thread {
   expireAt?: number;
   /**
    * The instance the service named the thread by, kept by open() and by listen(). A thread opened again at
-   * this address has another one, and listen() reads it from the start and says so once, as a reset. Absent
-   * from a service that names none.
+   * this address has another one, and listen() reads it from the start and says so once, as a reset; so does
+   * a listen() given a cursor and a thread without one, as one stored by an earlier version, since that
+   * cursor cannot be checked. Absent from a service that names none.
    */
   instance?: string;
   allow?: string[];

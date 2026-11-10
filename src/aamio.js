@@ -1429,6 +1429,12 @@ export class Aamio {
    */
   async *listen(thread, { after = 0, wait = 25, signal, onKeptOut, onGone, onReset } = {}) {
     let seq = after;
+    // The instance this iterator last saw the thread by, its own. Two iterators
+    // on one thread object shared the field on it: the first to see a new
+    // thread wrote it, and the second went on past its first message (a review
+    // of 10 November 2026). The field on the thread is kept as well, for a
+    // caller that stores the thread.
+    let known = typeof thread.instance === "string" ? thread.instance : null;
     while (!(signal && signal.aborted)) {
       const data = await this.read(thread, { after: seq, wait });
       // A thread is known by the instance the service names it by. One opened
@@ -1436,10 +1442,17 @@ export class Aamio {
       // that already holds as many messages as the cursor is not reset by the
       // service, and listen went on from the old cursor past its first messages
       // without a word (a review of 10 November 2026). So it is read from the
-      // start, and that is said once, as a reset.
+      // start, and that is said once, as a reset. A cursor that came without
+      // the instance, as with a thread stored by an earlier version, cannot be
+      // checked at all, and is read again from the start once in the same way:
+      // what came before it may come again (the same review).
       if (data.exists === true && typeof data.instance === "string") {
-        if (typeof thread.instance === "string" && data.instance !== thread.instance && !data.reset && seq > 0) {
-          const reset = { after: seq, newest: Number.isInteger(data.count) ? data.count : 0, what: `the thread at this address is a new one, instance ${data.instance} where this listener knew instance ${thread.instance}, so it is read again from the start` };
+        if (data.instance !== known && !data.reset && seq > 0) {
+          const what = known !== null
+            ? `the thread at this address is a new one, instance ${data.instance} where this listener knew instance ${known}, so it is read again from the start`
+            : `this listener's cursor, ${seq}, came without the thread's instance, so it cannot be told whether the thread here is the one it was kept on. It is read again from the start this once, and messages before the cursor may come again.`;
+          const reset = { after: seq, newest: Number.isInteger(data.count) ? data.count : 0, what };
+          known = data.instance;
           thread.instance = data.instance;
           if (Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
           thread.reset = reset;
@@ -1451,7 +1464,8 @@ export class Aamio {
         }
         // The thread that is there, with its own expiry: after the service read
         // it from the start it may expire at another time than the one opened.
-        if (thread.instance !== data.instance && Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
+        if (known !== data.instance && Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
+        known = data.instance;
         thread.instance = data.instance;
       }
       // What the thread's own allowlist kept out is not yielded, and it is said.

@@ -58,7 +58,12 @@ not what moved in the source.
 - `open()` keeps the `instance` the service names the thread by, and `listen()`
   reads a thread opened again at the address from the start and says it once
   through `onReset`. It went on from the old cursor past the new thread's first
-  messages. `Thread` and `ReadResult` name the field in the types.
+  messages. Each listener compares with the instance it last saw: two on one
+  thread object shared it, and the second passed its first message. A cursor
+  given with a thread that has no `instance`, as one stored by an earlier
+  version, is read again from the start once in the same way, and what came
+  before it may come again. `Thread` and `ReadResult` name the field in the
+  types.
 - A receipt names a signer only for a line it lists as this process read it,
   and its keys must be the signers of its lines, each once: one that left a
   signer out was signed as if nobody had signed.
