@@ -17,8 +17,10 @@ const help = `Usage: aamio [--home DIR] <command>
   lookup [NAME ...]            Which partners are reachable now, and where
   send TO TEXT [--data JSON] [--re SHA256]
                                Send a partner a message, signed and sealed to its key
-  read [--wait SECONDS] [--limit N]
+  read [--wait SECONDS] [--limit N] [--max-bytes N]
                                Read the inbox: every message checked here first
+  receipt [--channel LABEL] [--anchor]
+                               The receipt for a channel, compared with what this process read
   outbox pending               Sends with no settled outcome on this machine
   board post KIND TITLE TEXT [--tags a,b] [--ttl SECONDS] [--lang TAG] [--deadline ISO]
                                Put a need or an offer on the open board
@@ -43,7 +45,8 @@ const SPEC = {
   "partner list": { positional: [] },
   lookup: { positional: [], rest: true, options: ["--wait"] },
   send: { positional: ["to", "text"], options: ["--data", "--re"] },
-  read: { positional: [], options: ["--wait", "--limit"] },
+  read: { positional: [], options: ["--wait", "--limit", "--max-bytes"] },
+  receipt: { positional: [], options: ["--channel"], switches: ["--anchor"] },
   "outbox pending": { positional: [] },
   "board post": { positional: ["kind", "title", "text"], options: ["--tags", "--ttl", "--lang", "--deadline"] },
   "board find": { positional: [], options: ["--kind", "--tags", "--lang", "--after", "--wait", "--min-work-bits"] },
@@ -84,6 +87,12 @@ function parse(argv) {
       ended = true;
     } else if (!ended && arg.startsWith("--")) {
       const [name, inline] = arg.includes("=") ? [arg.slice(0, arg.indexOf("=")), arg.slice(arg.indexOf("=") + 1)] : [arg, undefined];
+      // A switch is there or not, and takes no value: receipt --anchor.
+      if ((spec.switches ?? []).includes(name)) {
+        if (inline !== undefined) throw new Error(`${name} takes no value.`);
+        options[name.slice(2)] = true;
+        continue;
+      }
       if (!(spec.options ?? []).includes(name)) throw new Error(`${command} does not take ${name}. Run aamio --help for usage.`);
       const value = inline ?? args[++i];
       if (value === undefined) throw new Error(`${name} needs a value.`);
@@ -100,7 +109,7 @@ function parse(argv) {
 
 function whole(value, name, low, high) {
   if (value === undefined) return undefined;
-  if (!/^[0-9]{1,6}$/.test(value) || Number(value) < low || Number(value) > high) throw Object.assign(new Error(`${name} is a whole number from ${low} to ${high}.`), { code: "usage" });
+  if (!new RegExp(`^[0-9]{1,${String(high).length}}$`).test(value) || Number(value) < low || Number(value) > high) throw Object.assign(new Error(`${name} is a whole number from ${low} to ${high}.`), { code: "usage" });
   return Number(value);
 }
 
@@ -143,11 +152,17 @@ function plan(command, positional, options) {
       return (runtime) => runtime.send(first, { text: second, data, re: options.re ?? null });
     }
     case "read": {
-      const asked = { wait: whole(options.wait, "--wait", 0, 25) ?? 0, limit: whole(options.limit, "--limit", 1, 200) ?? 50 };
+      // Without --max-bytes the command line asks for no byte budget, as aamio-python's does.
+      const asked = { wait: whole(options.wait, "--wait", 0, 25) ?? 0, limit: whole(options.limit, "--limit", 1, 200) ?? 50, maxBytes: whole(options["max-bytes"], "--max-bytes", 512, 999999999) ?? null };
       return async (runtime) => {
         const messages = await runtime.read(asked);
         return { messages, count: messages.length, attention: await runtime.attentionTaken() };
       };
+    }
+    case "receipt": {
+      const label = options.channel ?? "inbox";
+      if (!label) throw Object.assign(new Error("--channel names a channel, as a message's channel field does: inbox, board or an older generation."), { code: "usage" });
+      return (runtime) => runtime.receipt(label, { anchor: options.anchor === true });
     }
     case "outbox pending":
       return (runtime) => ({ pending: runtime.outboxPending() });
@@ -240,7 +255,7 @@ try {
   } else {
     const known = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
       "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
-      "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved"];
+      "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed"];
     process.stderr.write((known.includes(error?.code) ? error.message + (error.fix ? ` ${error.fix}` : "") : "The local Node runtime could not complete this command.") + "\n");
     process.exitCode = 1;
   }

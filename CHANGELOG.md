@@ -4,6 +4,27 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- `receipt [--channel LABEL] [--anchor]` and the MCP tool `aamio_receipt`: the
+  receipt for a channel of the home, compared with what this process read.
+  `root_adds_up` checks the receipt's own arithmetic; `local_root_matches` is
+  `true` or `false` when this process holds every message the receipt counts,
+  `false` when it holds more, and `null` when it holds fewer, as a new process
+  does, which is not a failure. A signer is named only when its signature was
+  checked here. The receipt is signed with the home's key, and `--anchor`
+  publishes the root through Verifyum under the idempotency key aamio-python and
+  aamio-php use. Messages the inbox's list kept out count among what was read.
+- A byte budget on reads: `read --max-bytes N` (512 or more) and `max_bytes` on
+  `aamio_read`, which reads 65536 bytes per channel unless told otherwise, as
+  aamio-python's server does. Whole messages only. What does not fit stays at
+  the service and is said in `attention`, and a message larger than the budget is
+  named with its size until a read with a larger budget takes it. A budget above
+  what the service takes is sent as the largest it takes.
+- A read that stops at its limit says so in its own words, and names a channel it
+  had no room left to ask, as aamio-python does. Nothing was passed over before
+  either: the rest came with the next read, unannounced.
+
 ## 0.6.1 - 2026-11-10
 
 - The package names its MCP server, `"mcpName": "at.aamio/aamio"`, so the MCP

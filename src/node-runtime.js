@@ -2,7 +2,7 @@ import { open, readFile, rename, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Aamio, AamioError, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, checkMessage, gatePlan, isEnvelope, isKey, keyHash, sha256hex, threadSigningInput } from "./aamio.js";
+import { Aamio, AamioError, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, sha256hex, threadSigningInput } from "./aamio.js";
 import { readKeys } from "./node-identity.js";
 import { takeHome } from "./node-lock.js";
 
@@ -31,6 +31,8 @@ export const ANSWER_MARGIN = 600;
 // the runtime before anything is saved over it: a save is how a broken file
 // becomes a lost one.
 const KEPT_FILES = ["partners.json", "state.json", "outbox.json"];
+// The largest X-Max-Bytes the service takes: one to eight digits.
+const MAX_BYTES_HEADER = 99_999_999;
 // Answers that prove a message was not stored: refusals the service will give
 // again, and a rate window, which it decides before it reads the body.
 const SEND_DETERMINISTIC = [400, 403, 410, 413, 415, 422, 428, 501];
@@ -76,10 +78,10 @@ function messageShape(body, envelope) {
 
 export class NodeRuntime {
   /** Takes the home, reads its key and its files. Close it to let go. */
-  static async open({ home, host = process.env.AAMIO_HOST || DEFAULT_BASE, board = process.env.AAMIO_BOARD || DEFAULT_BOARD, fetch = globalThis.fetch, clock = () => Date.now() / 1000 } = {}) {
+  static async open({ home, host = process.env.AAMIO_HOST || DEFAULT_BASE, board = process.env.AAMIO_BOARD || DEFAULT_BOARD, verifyum = process.env.AAMIO_VERIFYUM || VERIFYUM_MCP, fetch = globalThis.fetch, clock = () => Date.now() / 1000 } = {}) {
     const owner = await takeHome(home, { host });
     try {
-      const runtime = new NodeRuntime({ home, host, board, keys: await readKeys(home), owner, fetch, clock });
+      const runtime = new NodeRuntime({ home, host, board, verifyum, keys: await readKeys(home), owner, fetch, clock });
       await runtime.load();
       return runtime;
     } catch (error) {
@@ -88,9 +90,15 @@ export class NodeRuntime {
     }
   }
 
-  constructor({ home, host, board = DEFAULT_BOARD, keys, owner, fetch, clock }) {
+  constructor({ home, host, board = DEFAULT_BOARD, verifyum = VERIFYUM_MCP, keys, owner, fetch, clock }) {
     this.home = home;
     this.host = host.replace(/\/+$/, "");
+    // Where a receipt's root is anchored, as aamio-python reads it: AAMIO_VERIFYUM.
+    this.verifyum = String(verifyum).replace(/\/+$/, "");
+    // What this process read of each thread, by write address and seq: the
+    // lines a receipt is compared with. In memory only, as in aamio-python, so
+    // a process that did not read a message cannot vouch for it.
+    this.observed = new Map();
     this.keys = keys;
     this.owner = owner;
     this.clock = clock;
@@ -975,11 +983,11 @@ export class NodeRuntime {
    * before the caller sees a message: a crash after that redelivers nothing, and
    * one before it redelivers what the stored hashes then mark as replays.
    */
-  async poll(channel, wait = 0, limit = null) {
+  async poll(channel, wait = 0, limit = null, maxBytes = null) {
     if (channel.muted) return [];
     const before = { after: channel.after, created_at: channel.created_at, gone: channel.gone, seen: [...channel.seen], peers: { ...this.state.peers } };
     try {
-      return await this.pollOnce(channel, wait, limit, true);
+      return await this.pollOnce(channel, wait, limit, true, maxBytes);
     } catch (error) {
       if (!error?.notSaved) throw error;
       // What this read changed is undone in memory too: the cursor, the hashes
@@ -1000,12 +1008,27 @@ export class NodeRuntime {
     }
   }
 
-  async pollOnce(channel, wait, limit, again) {
+  /** One message this process read on a channel, kept for the receipt: the service's line for it as this process saw it, and what was checked here. */
+  observe(channel, raw, entry) {
+    if (!Number.isInteger(entry.seq) || entry.seq < 1) return;
+    let rows = this.observed.get(channel.w);
+    if (!rows) this.observed.set(channel.w, (rows = new Map()));
+    const message = isObject(raw) ? raw : {};
+    rows.set(entry.seq, { seq: entry.seq, at: entry.at, sha256: entry.sha256, from: typeof message.from === "string" ? message.from : null, verified: entry.verified === true, from_key: entry.from_key ?? null });
+  }
+
+  async pollOnce(channel, wait, limit, again, maxBytes = null) {
     let path = "/" + channel.w;
     if (channel.after > 0 || wait > 0) path += "/after/" + channel.after;
     if (wait > 0) path += "/wait/" + Math.min(25, wait);
     const headers = { "X-Read": channel.read_key };
     if (limit !== null) headers["X-Limit"] = String(limit);
+    // Whole messages only, and this many bytes of them at most: the service
+    // keeps the rest, and says so with more or too_large. It takes the header
+    // as at most eight digits and holds any budget to the thread's maximum, a
+    // megabyte, so a larger one is sent as the largest it takes: nine digits
+    // were answered 400 and the channel went unread.
+    if (maxBytes !== null) headers["X-Max-Bytes"] = String(Math.min(maxBytes, MAX_BYTES_HEADER));
     let data;
     try {
       data = await this.client.request("GET", path, { headers, expect: [200] });
@@ -1027,6 +1050,7 @@ export class NodeRuntime {
       // The cursor belonged to that thread. The hashes are the reader's and stay.
       channel.after = 0;
       channel.created_at = null;
+      this.observed.delete(channel.w);
       await this.saveRead();
       return [];
     }
@@ -1036,10 +1060,31 @@ export class NodeRuntime {
       this.note(channel.label, "restarted", `the thread at this address is a new one, opened at ${created} where this channel knew one opened at ${channel.created_at}, so it is read again from the start`, channel.w);
       channel.after = 0;
       channel.created_at = null;
-      return this.pollOnce(channel, 0, limit, false);
+      // What was read of the old thread is no line of the new one's receipt.
+      this.observed.delete(channel.w);
+      return this.pollOnce(channel, 0, limit, false, maxBytes);
     }
-    if (data.reset) this.note(channel.label, "restarted", (isObject(data.reset) && data.reset.what) || "the service read this thread from the start", channel.w);
+    if (data.reset) {
+      this.note(channel.label, "restarted", (isObject(data.reset) && data.reset.what) || "the service read this thread from the start", channel.w);
+      this.observed.delete(channel.w);
+    }
     channel.created_at = created;
+    // What the budget kept back. The service answers a byte budget with whole
+    // messages only, so a message larger than the budget is named here and
+    // stays at the service, with what came after it waiting behind it.
+    if (isObject(data.too_large)) {
+      this.note(channel.label, "too_large", `message ${data.too_large.seq} on this channel is ${data.too_large.bytes} bytes and does not fit the byte budget this read asked for, so it was not sent. It is still there, what was written after it waits behind it, and every read at this budget will leave it. Read again with a larger budget to take it: max_bytes over MCP, or --max-bytes on the command line.`, channel.w);
+    } else if (data.more === true) {
+      // The service says more both when the count this read asked for was
+      // reached and when the byte budget was. A note that blamed a budget
+      // nobody set would send the reader looking for the wrong cause.
+      const atLimit = limit !== null && data.messages.length >= limit;
+      this.note(channel.label, "more", atLimit
+        ? "this read handed over as many messages as its limit allows, and the service has more waiting on this channel. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest."
+        : maxBytes !== null
+          ? "the service had more waiting on this channel than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over."
+          : "the service says it has more waiting on this channel than it sent. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest.", channel.w);
+    }
 
     const entries = [];
     const keptOut = [];
@@ -1047,6 +1092,8 @@ export class NodeRuntime {
     for (const raw of data.messages) {
       if (limit !== null && entries.length >= limit) break;
       const entry = this.readEntry(channel, raw);
+      // Every message read counts for the receipt, the ones the list keeps out too.
+      this.observe(channel, raw, entry);
       lastSeq = lastSeq === null ? entry.seq : Math.max(lastSeq, entry.seq);
       const allow = channel.allow || [];
       const excluded = allow.length > 0 && !(entry.verified && (allow.includes("*") || allow.includes(entry.from_key)));
@@ -1073,30 +1120,124 @@ export class NodeRuntime {
     return entries;
   }
 
+  /**
+   * The receipt for one channel, and two checks of it that are not one. Whether
+   * its own lines hash to the root it claims can always be checked:
+   * root_adds_up. Whether it agrees with what this process read can be, when
+   * this process holds every message it counts: local_root_matches, null when
+   * it holds fewer, which is not a failure, and false when it holds more. A
+   * signer the service names is shown by name only when this process checked
+   * that signature itself. The receipt is signed with this home's key as it
+   * was fetched, which records what was taken, not that its claims are true.
+   * With anchor, and only then, its root goes to Verifyum, with the same
+   * idempotency key aamio-python and aamio-php use.
+   */
+  async receipt(label = "inbox", { anchor = false } = {}) {
+    const channel = this.channel(String(label));
+    if (!isObject(channel)) {
+      const labels = this.state.channels.filter(isObject).map((c) => c.label);
+      throw runtimeError("unknown_channel", `no channel called ${label} in this home. It has ${labels.length ? labels.join(", ") : "none yet: a read opens the inbox"}. A message names the channel it came on.`);
+    }
+    let data;
+    try {
+      ({ receipt: data } = await this.client.receipt({ id: channel.read_key, w: channel.w }));
+    } catch (error) {
+      throw runtimeError("receipt_failed", `the receipt could not be taken: ${error.status ?? 0} ${JSON.stringify(error.body ?? error.message)}`, { status: error.status ?? 0 });
+    }
+    if (!isObject(data) || typeof data.root !== "string" || !Number.isInteger(data.count) || !Array.isArray(data.messages ?? [])) {
+      throw runtimeError("receipt_failed", "the service answered with something that is not a receipt, so nothing was compared or signed");
+    }
+    const entries = [...(this.observed.get(channel.w)?.values() ?? [])].sort((a, b) => a.seq - b.seq);
+    const held = entries.length;
+    const line = (m) => `${m.seq}\t${m.at}\t${m.sha256}\t${m.from ?? "-"}\n`;
+    const listed = (data.messages ?? []).map(line).join("");
+    const ours = entries.map(line).join("");
+    const comparable = held === data.count;
+    const verifiedKeys = new Set(entries.filter((e) => e.verified && typeof e.from_key === "string").map((e) => e.from_key));
+    const claimed = Array.isArray(data.keys) ? data.keys : [];
+    const unverified = claimed.filter((key) => typeof key !== "string" || !verifiedKeys.has(key));
+    const attestation = `aamio-receipt-v1\n${channel.w}\n${data.root}\n${data.count}\n${data.issued_at ?? 0}`;
+    const result = {
+      label: channel.label, w: channel.w, root: data.root, commitment: data.commitment ?? null, count: data.count,
+      keys: claimed.map((key) => (typeof key === "string" && verifiedKeys.has(key) ? this.nameForKey(key) ?? key : key)),
+      keys_unverified_count: unverified.length, keys_service_claim_only: unverified,
+      root_adds_up: sha256hex(listed) === data.root, held_locally: held,
+      local_root_matches: comparable ? sha256hex(ours) === data.root : held > data.count ? false : null,
+      signed_by: this.keys.public, signature: this.keys.sign(attestation), signed_text: attestation, receipt: data,
+    };
+    if (comparable) {
+      const local = new Map(entries.map((e) => [e.seq, e]));
+      result.local_differences = (data.messages ?? []).map((m) => {
+        const seen = local.get(m.seq);
+        return { seq: m.seq, fields: ["at", "sha256", "from"].filter((field) => !seen || (seen[field] ?? null) !== (m[field] ?? null)) };
+      }).filter((difference) => difference.fields.length);
+      result.signers_not_verified_locally = entries.filter((e) => e.from && !e.verified).map((e) => e.seq);
+    }
+    if (held > data.count) {
+      result.local_check = "Mismatch: the receipt counts fewer messages than this process read. The thread was replaced or the service lost messages.";
+    } else if (!comparable) {
+      result.local_check = `Not compared: this process holds ${held} of the ${data.count} messages the receipt counts, so a local root would differ for a reason that is not the receipt's. root_adds_up checks only the receipt's arithmetic; our signature records what was fetched, not that its claims are true. For the independent check, take the receipt in the process that read the messages.`;
+    }
+    if (anchor === true) {
+      const idempotencyKey = sha256hex(`aamio-listen:${this.keys.hash}:${data.root}`).slice(0, 32);
+      try {
+        const proof = await this.client.anchor(`sha256:${data.root}`, { endpoint: this.verifyum, idempotencyKey });
+        result.anchor = { proof_id: proof.proofId, proof_url: proof.proofUrl ?? null, status: proof.status ?? null, commitment: proof.commitment };
+      } catch (error) {
+        // The receipt stands; only the anchoring failed, and it says how: the
+        // HTTP status, 0 when nothing answered, and Verifyum's own words when
+        // its tool answered with an error.
+        const said = error.body?.result?.content?.[0]?.text;
+        result.anchor = { error: error.status ?? 0, detail: typeof said === "string" ? said : error.body ?? error.message };
+      }
+    }
+    return result;
+  }
+
   /** Messages on every channel still read, the inbox first. The inbox is opened and presence published as the read starts. */
-  async read({ wait = 0, limit = 50 } = {}) {
+  async read({ wait = 0, limit = 50, maxBytes = null } = {}) {
     await this.ensureInbox();
     await this.publishPresence();
     const now = this.now();
     const channels = this.state.channels.filter((c) => isObject(c) && !c.muted && Number(c.expire_at) > now)
       .sort((a, b) => (a.label === "inbox" ? -1 : b.label === "inbox" ? 1 : 0));
     const messages = [];
+    // A channel this read had no room left to ask is named, as aamio-python
+    // names it: what waits there was not looked at, and a read that stopped at
+    // its limit is not a read of everything.
+    const notAsked = [];
+    const notAskedAfter = [];
     // Every channel without waiting first: a message on an older inbox that
     // is still read is handed over at once, not after a wait on the new one.
+    // The byte budget is per channel, as in aamio-python: one split between
+    // them would refuse a message that fits.
     for (const channel of channels) {
-      if (messages.length >= limit) break;
-      messages.push(...(await this.poll(channel, 0, limit - messages.length)));
+      if (messages.length >= limit) {
+        notAsked.push(channel);
+        continue;
+      }
+      messages.push(...(await this.poll(channel, 0, limit - messages.length, maxBytes)));
     }
     const inbox = this.channel("inbox");
     if (!messages.length && wait > 0 && inbox && !inbox.muted) {
-      messages.push(...(await this.poll(inbox, wait, limit)));
+      messages.push(...(await this.poll(inbox, wait, limit, maxBytes)));
       // What reached the other channels during the wait comes with this
       // answer, as in aamio-python: only the inbox can end the wait early. It
       // used to wait for the next read (a review of 9 November 2026).
       for (const channel of channels) {
-        if (channel === inbox || messages.length >= limit) continue;
-        messages.push(...(await this.poll(channel, 0, limit - messages.length)));
+        if (channel === inbox) continue;
+        if (messages.length >= limit) {
+          notAskedAfter.push(channel);
+          continue;
+        }
+        messages.push(...(await this.poll(channel, 0, limit - messages.length, maxBytes)));
       }
+    }
+    for (const channel of notAsked) {
+      this.note(channel.label, "more", `this read reached its limit of ${limit} message(s) before it asked this channel, so what waits here was not looked at. Nothing was passed over: read again for it.`, channel.w);
+    }
+    for (const channel of notAskedAfter) {
+      this.note(channel.label, "more", `this read reached its limit of ${limit} message(s) during the wait, so this channel was asked before the wait and not after it. What reached it meanwhile comes with the next read.`, channel.w);
     }
     return messages;
   }

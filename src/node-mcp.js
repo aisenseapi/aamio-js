@@ -52,8 +52,12 @@ const RUNTIME_TOOLS = [
   },
   {
     name: "aamio_read",
-    description: "New messages on your inbox. With wait, returns as soon as one arrives or after that many seconds (max 25). Each message says who signed it (a name from your address book, or unknown key), whether the signature verified (checked on this machine, not taken on the service's word), whether it was sealed to you, and whether it is a replay of one read before. What could not be read, or was kept out by the inbox's list, is in attention. No messages and no attention means nobody wrote. limit caps how many come back, fifty by default; the rest wait for the next call.",
-    inputSchema: schema({ wait: { type: "integer", minimum: 0, maximum: 25 }, limit: { type: "integer", minimum: 1, maximum: 200 } }),
+    description: "New messages on your inbox. With wait, returns as soon as one arrives or after that many seconds (max 25). Each message says who signed it (a name from your address book, or unknown key), whether the signature verified (checked on this machine, not taken on the service's word), whether it was sealed to you, and whether it is a replay of one read before. What could not be read, or was kept out by the inbox's list, is in attention. No messages and no attention means nobody wrote. limit caps how many come back, fifty by default; the rest wait for the next call. max_bytes caps how many bytes of them, per channel, and defaults to 65536: one message's worth, so ordinary traffic never meets it and a backlog arrives a page at a time. Pass a larger number to take more in one go. A message bigger than the budget stays at the service, named in attention with its size, until a read with a larger budget takes it.",
+    inputSchema: schema({
+      wait: { type: "integer", minimum: 0, maximum: 25 },
+      limit: { type: "integer", minimum: 1, maximum: 200, description: "at most this many messages in the answer" },
+      max_bytes: { type: "integer", minimum: 512, description: "how many bytes of messages to hand over, per channel, 65536 unless you say otherwise: a read across several channels can return that much from each, since a budget split between them would refuse a message that fits. Whole messages only. A message larger than the budget stays at the service and is named in attention." },
+    }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   {
@@ -99,6 +103,12 @@ const RUNTIME_TOOLS = [
     name: "aamio_board_tags",
     description: "Every tag in use on the board with live counts of needs and offers, dotted children under their branch. Use it to pick where to look before finding or watching.",
     inputSchema: schema(), annotations: { ...READ_ONLY, openWorldHint: true },
+  },
+  {
+    name: "aamio_receipt",
+    description: "The receipt for one channel: hashes, times and signer keys of every message in it, and one root. channel is a local channel label, inbox by default, board for answers to your posts, or an older generation such as inbox-1800000000: take it from the channel field of the message you are working with. root_adds_up says the receipt's own lines hash to the root it claims; local_root_matches compares it to what this server read and is null when it holds fewer messages than the receipt counts, which is not a failure. The signer column is the service's record unless compared with locally verified messages. keys_unverified_count and keys_service_claim_only identify unchecked claims; they are never turned into contact names. Observations include kept-out messages. Fewer receipt lines than observed messages is a mismatch; local_differences names changed fields when counts match. Signing or anchoring a fetched root does not endorse its claims. A receipt does not prove that the other side read, understood or acted. With anchor, the root is published to Verifyum and anchored on Solana, which leaves this machine and cannot be undone.",
+    inputSchema: schema({ channel: { type: "string", description: "local channel label, as a message's channel field names it; defaults to inbox" }, anchor: { type: "boolean", description: "publish the root externally" } }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   {
     name: "aamio_pending",
@@ -201,6 +211,8 @@ async function handle(message, session) {
 
 const PARTNER_QUESTION = "aamio_partner_key";
 const CONFIRM_SECONDS = 900;
+// What aamio_read hands over per channel when the caller names no budget: one message's maximum.
+const DEFAULT_MAX_BYTES = 65536;
 const PARTNER_NAME = /^[\p{L}\p{N}][\p{L}\p{N}_.-]{0,31}$/u;
 const CONFIRMATIONS = { secret: randomBytes(32), taken: new Map() };
 
@@ -414,6 +426,7 @@ function wrongArguments(tool, args) {
     if (!want) return `${tool.name} takes no argument called ${name}`;
     const ok = want.type === "string" ? typeof value === "string" && (!want.pattern || new RegExp(want.pattern).test(value)) && value.length >= (want.minLength ?? 0) && value.length <= (want.maxLength ?? Infinity) && (!want.enum || want.enum.includes(value))
       : want.type === "integer" ? Number.isInteger(value) && value >= (want.minimum ?? -Infinity) && value <= (want.maximum ?? Infinity)
+        : want.type === "boolean" ? typeof value === "boolean"
         : want.type === "object" ? object(value)
           : want.type === "array" ? Array.isArray(value) && value.every((item) => typeof item === "string") && value.length <= (want.maxItems ?? Infinity) : false;
     if (!ok) return `${name} is not what ${tool.name} takes: ${JSON.stringify(want)}`;
@@ -451,9 +464,11 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
         case "aamio_presence_lookup": return runtime.lookup(args.names ?? null, args.wait ?? 0);
         case "aamio_send": return runtime.send(args.to, { text: args.text ?? null, data: args.data ?? null, re: args.re ?? null });
         case "aamio_read": {
-          const messages = await runtime.read({ wait: args.wait ?? 0, limit: args.limit ?? 50 });
+          // One message's maximum per channel unless the caller says otherwise, as aamio-python's server reads.
+          const messages = await runtime.read({ wait: args.wait ?? 0, limit: args.limit ?? 50, maxBytes: args.max_bytes ?? DEFAULT_MAX_BYTES });
           return { messages, count: messages.length, attention: await runtime.attentionTaken() };
         }
+        case "aamio_receipt": return runtime.receipt(args.channel ?? "inbox", { anchor: args.anchor === true });
         case "aamio_pending": return { pending: runtime.outboxPending() };
         case "aamio_board_post": return runtime.boardPost({ kind: args.kind, title: args.title, text: args.text, tags: args.tags ?? [], ttl: args.ttl ?? undefined, lang: args.lang ?? null, deadline: args.deadline ?? null });
         case "aamio_board_find": return runtime.boardFind({ kind: args.kind ?? null, tags: args.tags ?? null, lang: args.lang ?? null, after: args.after ?? 0, wait: args.wait ?? 0, min_work_bits: args.min_work_bits ?? 0 });

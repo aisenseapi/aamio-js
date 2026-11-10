@@ -4,6 +4,8 @@
 import { boardDeleteSigningInput, boardSigningInput, deriveAddress, isEnvelope, keyHash, presenceSigningInput, sha256hex, threadSigningInput, verify } from "../src/aamio.js";
 
 export const BOARD = "https://fake.board";
+// Verifyum's MCP endpoint in memory: each anchoring is counted in anchors, and answered with a proof.
+export const VERIFYUM = "https://fake.verifyum/mcp";
 
 export class FakeAamio {
   constructor({ now = 1_800_000_000 } = {}) {
@@ -18,8 +20,14 @@ export class FakeAamio {
     this.boardBits = 0;
     // Presence answers its matches in this order, or the other way round.
     this.reverseLookup = false;
+    // The arguments of every anchoring Verifyum was asked for, and what the receipt route hands out, changed if a test says so.
+    this.anchors = [];
+    this.tamperReceipt = null;
+    // The byte budget each thread read asked for, in order: null for none.
+    this.budgets = [];
     this.fetch = (url, init = {}) => {
       const where = new URL(url);
+      if (where.host === new URL(VERIFYUM).host) return this.anchorAnswer(init);
       this.requests.push(`${init.method || "GET"} ${where.host === new URL(BOARD).host ? "board" : ""}${where.pathname}`);
       return where.host === new URL(BOARD).host ? this.boardAnswer(where, init) : this.answer(where, init);
     };
@@ -82,16 +90,63 @@ export class FakeAamio {
       thread.messages.push(message);
       return this.reply(201, { seq: message.seq, at: message.at, sha256: message.sha256, expire_at: thread.expire_at, verified });
     }
+    if (method === "GET" && parts[1] === "receipt") {
+      // The service's account of the thread: one line per message, and the root of the lines.
+      const thread = this.threads.get(w);
+      if (!thread) return this.reply(404, { error: "no thread at this address", fix: "Take the receipt before the thread expires." });
+      if (thread.id !== null && this.header(init, "X-Read") !== thread.id) return this.reply(403, { error: "wrong read key", fix: "Read with the key the thread was opened with." });
+      const messages = thread.messages.map((m) => ({ seq: m.seq, at: m.at, sha256: m.sha256, from: m.from }));
+      const root = sha256hex(messages.map((m) => `${m.seq}\t${m.at}\t${m.sha256}\t${m.from ?? "-"}\n`).join(""));
+      const receipt = {
+        schema: "aamio-receipt-v1", w, created_at: thread.created_at, expire_at: thread.expire_at, count: messages.length,
+        bytes: thread.messages.reduce((sum, m) => sum + m.body.length, 0), allow: thread.allow, messages,
+        keys: [...new Set(messages.map((m) => m.from).filter(Boolean))], root, commitment: "sha256:" + root, issued_at: this.time,
+      };
+      return this.reply(200, this.tamperReceipt ? this.tamperReceipt(receipt) : receipt);
+    }
     if (method === "GET") {
       const thread = this.threads.get(w);
       if (!thread) return this.reply(200, { exists: false, messages: [], next: 0 });
       if (thread.id !== null && this.header(init, "X-Read") !== thread.id) return this.reply(403, { error: "wrong read key", fix: "Read with the key the thread was opened with." });
       const after = parts[1] === "after" ? Number(parts[2]) : 0;
       const limit = Number(this.header(init, "X-Limit") || 0);
+      const asked = this.header(init, "X-Max-Bytes");
+      // Checked as the service checks it (blocks/api-thread.php): one to eight digits, at least 512.
+      if (asked !== undefined && (!/^[0-9]{1,8}$/.test(asked) || Number(asked) < 512)) {
+        return this.reply(400, { error: "Bad X-Max-Bytes", fix: "a whole number of bytes, at least 512." });
+      }
+      const budget = asked === undefined ? null : Number(asked);
+      this.budgets.push(budget);
       let messages = thread.messages.filter((m) => m.seq > after);
-      if (limit) messages = messages.slice(0, limit);
+      // More than the count asked for is said with more, as the service says it (func_aamio_thread.php).
+      let more = false;
+      if (limit && messages.length > limit) {
+        messages = messages.slice(0, limit);
+        more = true;
+      }
+      // Whole messages only, as the service answers a byte budget: what does not fit stays, said with more, and a
+      // first message larger than the whole budget is named in too_large with the cursor where it was.
+      let tooLarge = null;
+      if (budget !== null) {
+        const kept = [];
+        let used = 0;
+        for (const m of messages) {
+          const size = JSON.stringify(m).length;
+          if (used + size > budget) {
+            if (!kept.length) tooLarge = { seq: m.seq, bytes: size, fix: "Read with a bigger budget, or pass its seq as after to go past it." };
+            more = true;
+            break;
+          }
+          kept.push(m);
+          used += size;
+        }
+        messages = kept;
+      }
       const next = messages.length ? messages[messages.length - 1].seq : after;
-      return this.reply(200, { exists: true, created_at: thread.created_at, expire_at: thread.expire_at, messages: messages.map((m) => ({ ...m })), next });
+      const answer = { exists: true, created_at: thread.created_at, expire_at: thread.expire_at, messages: messages.map((m) => ({ ...m })), next };
+      if (more) answer.more = true;
+      if (tooLarge) answer.too_large = tooLarge;
+      return this.reply(200, answer);
     }
     return this.reply(404, { error: "not in the fake", fix: "none" });
   }
@@ -159,5 +214,14 @@ export class FakeAamio {
       return this.reply(200, { withdrawn: true, id });
     }
     return this.reply(404, { error: "not on the fake board", fix: "none" });
+  }
+
+  /** Verifyum's anchoring tool: the commitment and the idempotency key are kept, and a proof is given. */
+  anchorAnswer(init) {
+    const call = JSON.parse(typeof init.body === "string" ? init.body : "{}");
+    const args = call.params?.arguments ?? {};
+    this.anchors.push(args);
+    const proof = { proof_id: "proof-" + String(args.idempotency_key).slice(0, 8), proof_url: "https://fake.verifyum/p/" + args.idempotency_key, status: "pending" };
+    return this.reply(200, { jsonrpc: "2.0", id: call.id, result: { content: [{ type: "text", text: JSON.stringify(proof) }], isError: false } });
   }
 }
