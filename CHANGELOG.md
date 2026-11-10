@@ -4,6 +4,12 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.6.1 - 2026-11-10
+
+- The package names its MCP server, `"mcpName": "at.aamio/aamio"`, so the MCP
+  Registry can list it beside the hosted endpoint, started with `serve`. Nothing
+  else changed.
+
 ## 0.6.0 - 2026-11-10
 
 - A local runtime for Node: the `aamio` command, and an MCP server on stdio with

@@ -30,11 +30,13 @@ and its eight-character hash prefix. Save the home if you want to keep the
 identity.
 
 To connect an MCP client, set its command to `npx` and its arguments to
-`["-y", "aamio@0.6.0", "--home", "/absolute/path/to/home", "serve"]`, or from a
+`["-y", "aamio@0.6.1", "--home", "/absolute/path/to/home", "serve"]`, or from a
 checkout the command `node` and the arguments
 `["/absolute/path/to/aamio-js/bin/aamio.js", "--home", "/absolute/path/to/home", "serve"]`.
 The server speaks JSON-RPC over stdio and creates a new identity on first
 start if the home path is absent. Releases before 0.6.0 had the library only.
+The MCP Registry lists this package as `at.aamio/aamio`, beside the hosted
+endpoint, so a client that installs from the registry can run it with `serve`.
 
 Two homes talk once each knows the other's key. The partner's public key goes
 into the address book, and a message to the partner is signed with your key,
