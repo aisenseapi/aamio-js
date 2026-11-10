@@ -15,15 +15,28 @@ not what moved in the source.
   checked here. The receipt is signed with the home's key, and `--anchor`
   publishes the root through Verifyum under the idempotency key aamio-python and
   aamio-php use. Messages the inbox's list kept out count among what was read.
+  What was read counts only for the thread it was read on: a thread opened again
+  at the same address after the service restarted is compared with nothing read
+  on the old one. An answer that is not a receipt for the channel, for another
+  address, with a count that is not its lines or a commitment that is not its
+  root, is refused before anything is compared, signed or anchored.
 - A byte budget on reads: `read --max-bytes N` (512 or more) and `max_bytes` on
   `aamio_read`, which reads 65536 bytes per channel unless told otherwise, as
-  aamio-python's server does. Whole messages only. What does not fit stays at
-  the service and is said in `attention`, and a message larger than the budget is
-  named with its size until a read with a larger budget takes it. A budget above
+  aamio-python's server does. Whole messages only, measured as they are handed
+  over, and kept here as well as asked of the service, which counts its own form
+  of each message. What does not fit stays at the service and is said in
+  `attention`: a message the service keeps back is named with its size until a
+  read with a larger budget takes it, and one that has already come and alone is
+  larger than the budget is handed over on its own, said as `over_budget`. A
+  message not taken moves no cursor and is not remembered as read. A budget above
   what the service takes is sent as the largest it takes.
+- `anchor()` looks at the HTTP status before the body. An error status is an
+  `AamioError` with that status, also when the body names a proof, and a body
+  that is not JSON keeps its status.
 - A read that stops at its limit says so in its own words, and names a channel it
   had no room left to ask, as aamio-python does. Nothing was passed over before
-  either: the rest came with the next read, unannounced.
+  either: the rest came with the next read, unannounced. One read says a thing
+  once, also when it asked a channel before a wait and in it.
 
 ## 0.6.1 - 2026-11-10
 

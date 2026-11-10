@@ -33,6 +33,10 @@ export const ANSWER_MARGIN = 600;
 const KEPT_FILES = ["partners.json", "state.json", "outbox.json"];
 // The largest X-Max-Bytes the service takes: one to eight digits.
 const MAX_BYTES_HEADER = 99_999_999;
+// How long after a thread expires what this process read of it is kept for its
+// receipt: the service keeps an expired thread for a best-effort minute of grace
+// for receipts, and the margin is for clocks that differ.
+const RECEIPT_KEEP = 120;
 // Answers that prove a message was not stored: refusals the service will give
 // again, and a rate window, which it decides before it reads the body.
 const SEND_DETERMINISTIC = [400, 403, 410, 413, 415, 422, 428, 501];
@@ -54,6 +58,36 @@ export function checkRe(re) {
 
 function runtimeError(code, message, extra = {}) {
   return Object.assign(new Error(message), { code, ...extra });
+}
+
+/**
+ * Why a service's answer is not a receipt for the thread at w, or null when it
+ * is one: the v1 schema, the address that was asked for, its times, one line in
+ * order for every message it counts, and a root its commitment names. Checked
+ * before anything is compared, signed or anchored: a receipt for another address,
+ * and one that counted seven messages and listed one, were signed with
+ * root_adds_up true (a review of 10 November 2026).
+ */
+function receiptFault(data, w) {
+  if (!isObject(data)) return "it is not an object";
+  if (data.schema !== "aamio-receipt-v1") return `its schema is ${JSON.stringify(data.schema ?? null)}, not aamio-receipt-v1`;
+  if (data.w !== w) return `it is for ${JSON.stringify(data.w ?? null)}, not for ${w}, the address asked for`;
+  for (const field of ["created_at", "expire_at", "issued_at"]) {
+    if (!Number.isInteger(data[field]) || data[field] < 0) return `its ${field} is not a time`;
+  }
+  if (!Array.isArray(data.messages)) return "it has no list of messages";
+  if (!Number.isInteger(data.count) || data.count !== data.messages.length) return `it counts ${JSON.stringify(data.count ?? null)} messages and has ${data.messages.length} lines`;
+  let previous = 0;
+  for (const [index, m] of data.messages.entries()) {
+    const fine = isObject(m) && Number.isInteger(m.seq) && m.seq > previous && Number.isInteger(m.at) && m.at >= 0
+      && typeof m.sha256 === "string" && HASH.test(m.sha256) && (m.from === undefined || m.from === null || typeof m.from === "string");
+    if (!fine) return `line ${index + 1} is not a message line in order`;
+    previous = m.seq;
+  }
+  if (typeof data.root !== "string" || !HASH.test(data.root)) return "its root is not a sha256 in hex";
+  if (data.commitment !== "sha256:" + data.root) return "its commitment is not sha256: and its root";
+  if (data.keys !== undefined && data.keys !== null && (!Array.isArray(data.keys) || data.keys.some((key) => typeof key !== "string"))) return "its keys are not a list of keys";
+  return null;
 }
 
 function isObject(value) {
@@ -1008,13 +1042,21 @@ export class NodeRuntime {
     }
   }
 
-  /** One message this process read on a channel, kept for the receipt: the service's line for it as this process saw it, and what was checked here. */
+  /**
+   * One message this process read on a channel, kept for the receipt: the
+   * service's line for it as this process saw it, and what was checked here.
+   * The rows belong to the thread they were read on, the one opened at
+   * created_at at this address. A thread opened at the same address after the
+   * service restarted is another thread, and its receipt is never compared with
+   * them (a review of 10 November 2026).
+   */
   observe(channel, raw, entry) {
     if (!Number.isInteger(entry.seq) || entry.seq < 1) return;
-    let rows = this.observed.get(channel.w);
-    if (!rows) this.observed.set(channel.w, (rows = new Map()));
+    let held = this.observed.get(channel.w);
+    const created = channel.created_at ?? null;
+    if (!held || held.created_at !== created) this.observed.set(channel.w, (held = { created_at: created, rows: new Map() }));
     const message = isObject(raw) ? raw : {};
-    rows.set(entry.seq, { seq: entry.seq, at: entry.at, sha256: entry.sha256, from: typeof message.from === "string" ? message.from : null, verified: entry.verified === true, from_key: entry.from_key ?? null });
+    held.rows.set(entry.seq, { seq: entry.seq, at: entry.at, sha256: entry.sha256, from: typeof message.from === "string" ? message.from : null, verified: entry.verified === true, from_key: entry.from_key ?? null });
   }
 
   async pollOnce(channel, wait, limit, again, maxBytes = null) {
@@ -1069,12 +1111,68 @@ export class NodeRuntime {
       this.observed.delete(channel.w);
     }
     channel.created_at = created;
-    // What the budget kept back. The service answers a byte budget with whole
-    // messages only, so a message larger than the budget is named here and
-    // stays at the service, with what came after it waiting behind it.
+    // What the service kept back. It answers a byte budget with whole messages
+    // only, so a message larger than the budget is named here and stays at the
+    // service, with what came after it waiting behind it.
     if (isObject(data.too_large)) {
       this.note(channel.label, "too_large", `message ${data.too_large.seq} on this channel is ${data.too_large.bytes} bytes and does not fit the byte budget this read asked for, so it was not sent. It is still there, what was written after it waits behind it, and every read at this budget will leave it. Read again with a larger budget to take it: max_bytes over MCP, or --max-bytes on the command line.`, channel.w);
-    } else if (data.more === true) {
+    }
+
+    const entries = [];
+    const keptOut = [];
+    let lastSeq = null;
+    // The budget is kept here as well, for what is handed over, measured as it
+    // is handed over. The service counts its own form of each message, which is
+    // not the size of the message opened here, and a service without read
+    // limits sends everything: 512 bytes asked for, 628 handed over (a review of
+    // 10 November 2026). A row that does not fit is not taken at all. It is not
+    // observed for the receipt, not remembered as read and binds no address, and
+    // the cursor stays before it, so the next read asks the service for it.
+    let used = 0;
+    let stoppedAtBudget = false;
+    let oversized = null;
+    for (const raw of data.messages) {
+      if (limit !== null && entries.length >= limit) break;
+      const entry = this.readEntry(channel, raw);
+      const allow = channel.allow || [];
+      const excluded = allow.length > 0 && !(entry.verified && (allow.includes("*") || allow.includes(entry.from_key)));
+      if (!excluded) {
+        this.takeScopeShare(entry);
+        if (maxBytes !== null) {
+          const weight = Buffer.byteLength(JSON.stringify(entry), "utf8");
+          if (entries.length > 0 && used + weight > maxBytes) {
+            stoppedAtBudget = true;
+            break;
+          }
+          // Alone and still over the budget: it has come, so it is handed over
+          // on its own rather than kept back for ever, and that is said.
+          if (entries.length === 0 && weight > maxBytes) oversized = { seq: entry.seq, weight };
+          used += weight;
+        }
+      }
+      // Every message read counts for the receipt, the ones the list keeps out too.
+      this.observe(channel, raw, entry);
+      lastSeq = lastSeq === null ? entry.seq : Math.max(lastSeq, entry.seq);
+      if (excluded) {
+        keptOut.push(entry.seq);
+        continue;
+      }
+      if (entry.sha256 !== null && !channel.seen.includes(entry.sha256)) channel.seen.push(entry.sha256);
+      if (isObject(entry.body) && entry.verified && entry.from_key) {
+        for (const field of ["reply_to", "channel"]) this.bindClaimedAddress(channel, entry, field, entry.body[field], entry.from_key);
+      }
+      entries.push(entry);
+    }
+    if (keptOut.length) {
+      const openedFor = (channel.allow || []).includes("*") ? "any key, signed only" : `${channel.allow.length} named key(s)`;
+      this.note(channel.label, "kept_out", `${keptOut.length} message(s) (seq ${keptOut.join(", ")}): this channel was opened for ${openedFor}, and these did not satisfy that list as checked here. They are not handed over.`, channel.w);
+    }
+    if (oversized) {
+      this.note(channel.label, "over_budget", `message ${oversized.seq} on this channel is ${oversized.weight} bytes as handed over here, larger than the whole byte budget of ${maxBytes} this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.`, channel.w);
+    }
+    if (stoppedAtBudget) {
+      this.note(channel.label, "more", `this read stopped at the byte budget it asked for, ${maxBytes} bytes of messages as they are handed over here, and left the rest at the service. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest.`, channel.w);
+    } else if (data.more === true && !isObject(data.too_large)) {
       // The service says more both when the count this read asked for was
       // reached and when the byte budget was. A note that blamed a budget
       // nobody set would send the reader looking for the wrong cause.
@@ -1085,36 +1183,12 @@ export class NodeRuntime {
           ? "the service had more waiting on this channel than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over."
           : "the service says it has more waiting on this channel than it sent. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest.", channel.w);
     }
-
-    const entries = [];
-    const keptOut = [];
-    let lastSeq = null;
-    for (const raw of data.messages) {
-      if (limit !== null && entries.length >= limit) break;
-      const entry = this.readEntry(channel, raw);
-      // Every message read counts for the receipt, the ones the list keeps out too.
-      this.observe(channel, raw, entry);
-      lastSeq = lastSeq === null ? entry.seq : Math.max(lastSeq, entry.seq);
-      const allow = channel.allow || [];
-      const excluded = allow.length > 0 && !(entry.verified && (allow.includes("*") || allow.includes(entry.from_key)));
-      if (excluded) {
-        keptOut.push(entry.seq);
-        continue;
-      }
-      if (entry.sha256 !== null && !channel.seen.includes(entry.sha256)) channel.seen.push(entry.sha256);
-      this.takeScopeShare(entry);
-      if (isObject(entry.body) && entry.verified && entry.from_key) {
-        for (const field of ["reply_to", "channel"]) this.bindClaimedAddress(channel, entry, field, entry.body[field], entry.from_key);
-      }
-      entries.push(entry);
-    }
-    if (keptOut.length) {
-      const openedFor = (channel.allow || []).includes("*") ? "any key, signed only" : `${channel.allow.length} named key(s)`;
-      this.note(channel.label, "kept_out", `${keptOut.length} message(s) (seq ${keptOut.join(", ")}): this channel was opened for ${openedFor}, and these did not satisfy that list as checked here. They are not handed over.`, channel.w);
-    }
-    const stoppedEarly = limit !== null && entries.length >= limit && data.messages.length > entries.length + keptOut.length;
-    if (stoppedEarly && lastSeq !== null) channel.after = lastSeq;
-    else if (Number.isInteger(data.next)) channel.after = data.next;
+    // A read that stopped early moves the cursor to the last row it took and
+    // no further: next would skip the rest of the page.
+    const stoppedEarly = stoppedAtBudget || (limit !== null && entries.length >= limit && data.messages.length > entries.length + keptOut.length);
+    if (stoppedEarly) {
+      if (lastSeq !== null) channel.after = lastSeq;
+    } else if (Number.isInteger(data.next)) channel.after = data.next;
     else if (lastSeq !== null) channel.after = Math.max(channel.after, lastSeq);
     await this.saveRead();
     return entries;
@@ -1144,13 +1218,22 @@ export class NodeRuntime {
     } catch (error) {
       throw runtimeError("receipt_failed", `the receipt could not be taken: ${error.status ?? 0} ${JSON.stringify(error.body ?? error.message)}`, { status: error.status ?? 0 });
     }
-    if (!isObject(data) || typeof data.root !== "string" || !Number.isInteger(data.count) || !Array.isArray(data.messages ?? [])) {
-      throw runtimeError("receipt_failed", "the service answered with something that is not a receipt, so nothing was compared or signed");
+    // Checked as a receipt for this channel before anything is compared,
+    // signed or anchored.
+    const fault = receiptFault(data, channel.w);
+    if (fault !== null) {
+      throw runtimeError("receipt_failed", `the service's answer is not a receipt for this channel: ${fault}. Nothing was compared, signed or anchored.`);
     }
-    const entries = [...(this.observed.get(channel.w)?.values() ?? [])].sort((a, b) => a.seq - b.seq);
+    // What this process read counts only for the thread it was read on. After
+    // the service restarted, a new thread at the same address was compared with
+    // what was read of the old one, and its signer named as checked here.
+    const observed = this.observed.get(channel.w);
+    const sameThread = observed !== undefined && observed.created_at !== null && observed.created_at === data.created_at;
+    const earlier = observed !== undefined && !sameThread && observed.rows.size > 0 ? observed.created_at : null;
+    const entries = sameThread ? [...observed.rows.values()].sort((a, b) => a.seq - b.seq) : [];
     const held = entries.length;
     const line = (m) => `${m.seq}\t${m.at}\t${m.sha256}\t${m.from ?? "-"}\n`;
-    const listed = (data.messages ?? []).map(line).join("");
+    const listed = data.messages.map(line).join("");
     const ours = entries.map(line).join("");
     const comparable = held === data.count;
     const verifiedKeys = new Set(entries.filter((e) => e.verified && typeof e.from_key === "string").map((e) => e.from_key));
@@ -1176,7 +1259,9 @@ export class NodeRuntime {
     if (held > data.count) {
       result.local_check = "Mismatch: the receipt counts fewer messages than this process read. The thread was replaced or the service lost messages.";
     } else if (!comparable) {
-      result.local_check = `Not compared: this process holds ${held} of the ${data.count} messages the receipt counts, so a local root would differ for a reason that is not the receipt's. root_adds_up checks only the receipt's arithmetic; our signature records what was fetched, not that its claims are true. For the independent check, take the receipt in the process that read the messages.`;
+      result.local_check = `Not compared: this process holds ${held} of the ${data.count} messages the receipt counts, so a local root would differ for a reason that is not the receipt's.`
+        + (earlier !== null ? ` What this process read at this address was on an earlier thread, opened at ${earlier}; this receipt is for the one opened at ${data.created_at}, so none of that counts here.` : "")
+        + " root_adds_up checks only the receipt's arithmetic; our signature records what was fetched, not that its claims are true. For the independent check, take the receipt in the process that read the messages.";
     }
     if (anchor === true) {
       const idempotencyKey = sha256hex(`aamio-listen:${this.keys.hash}:${data.root}`).slice(0, 32);
@@ -1196,9 +1281,17 @@ export class NodeRuntime {
 
   /** Messages on every channel still read, the inbox first. The inbox is opened and presence published as the read starts. */
   async read({ wait = 0, limit = 50, maxBytes = null } = {}) {
+    const noted = this.attention.length;
     await this.ensureInbox();
     await this.publishPresence();
     const now = this.now();
+    // What was read of a thread is kept for its receipt while the receipt can
+    // still be taken, and no longer: a server that ran for days held the rows
+    // of every inbox it had read (a review of 10 November 2026).
+    for (const w of [...this.observed.keys()]) {
+      const known = this.state.channels.find((c) => isObject(c) && c.w === w);
+      if (!known || Number(known.expire_at) + RECEIPT_KEEP < now) this.observed.delete(w);
+    }
     const channels = this.state.channels.filter((c) => isObject(c) && !c.muted && Number(c.expire_at) > now)
       .sort((a, b) => (a.label === "inbox" ? -1 : b.label === "inbox" ? 1 : 0));
     const messages = [];
@@ -1239,6 +1332,16 @@ export class NodeRuntime {
     for (const channel of notAskedAfter) {
       this.note(channel.label, "more", `this read reached its limit of ${limit} message(s) during the wait, so this channel was asked before the wait and not after it. What reached it meanwhile comes with the next read.`, channel.w);
     }
+    // A read says a thing once. A channel asked before a wait and in it gave
+    // the same too_large twice (a review of 10 November 2026).
+    const said = new Set();
+    const fresh = this.attention.slice(noted).filter((note) => {
+      const key = `${note.w}\u0000${note.state}\u0000${note.what}`;
+      if (said.has(key)) return false;
+      said.add(key);
+      return true;
+    });
+    this.attention.splice(noted, this.attention.length - noted, ...fresh);
     return messages;
   }
 }

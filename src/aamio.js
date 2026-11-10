@@ -1497,14 +1497,24 @@ export class Aamio {
       headers: { "Content-Type": "application/json", Accept: "application/json", "MCP-Protocol-Version": "2025-11-25" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "verifyum_anchor_commitment", arguments: { commitment, idempotency_key: idem } } }),
     });
-    const rpc = await response.json();
+    // The status first. A 503 with a proof_id in its body is no anchoring, and a
+    // 503 in plain text is still a 503: the body used to be read as JSON before
+    // the status was looked at (a review of 10 November 2026).
+    const text = await response.text();
+    let rpc = null;
+    try {
+      rpc = JSON.parse(text);
+    } catch {
+      rpc = null;
+    }
+    if (!response.ok) throw new AamioError(response.status, rpc ?? text, `anchor failed: Verifyum answered ${response.status}`);
     let result = {};
     try {
       result = JSON.parse(rpc?.result?.content?.[0]?.text ?? "{}");
     } catch {
       result = {};
     }
-    if (rpc?.result?.isError || !result.proof_id) throw new AamioError(response.status, rpc, "anchor failed");
+    if (rpc === null || typeof rpc !== "object" || rpc.result?.isError || !result?.proof_id) throw new AamioError(response.status, rpc ?? text, "anchor failed");
     return { proofId: result.proof_id, proofUrl: result.proof_url, status: result.status, commitment };
   }
 

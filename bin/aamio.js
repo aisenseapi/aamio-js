@@ -107,9 +107,14 @@ function parse(argv) {
   return { command, home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), positional, options };
 }
 
-function whole(value, name, low, high) {
+function whole(value, name, low, high = null) {
   if (value === undefined) return undefined;
-  if (!new RegExp(`^[0-9]{1,${String(high).length}}$`).test(value) || Number(value) < low || Number(value) > high) throw Object.assign(new Error(`${name} is a whole number from ${low} to ${high}.`), { code: "usage" });
+  // Leading zeros are the number's own business: --limit 0001 was taken before
+  // 10 November 2026 and is again. The digits are capped only to keep the
+  // number exact; the bounds are checked on its value.
+  if (!/^[0-9]{1,15}$/.test(value) || Number(value) < low || (high !== null && Number(value) > high)) {
+    throw Object.assign(new Error(high === null ? `${name} is a whole number, ${low} or more.` : `${name} is a whole number from ${low} to ${high}.`), { code: "usage" });
+  }
   return Number(value);
 }
 
@@ -152,8 +157,9 @@ function plan(command, positional, options) {
       return (runtime) => runtime.send(first, { text: second, data, re: options.re ?? null });
     }
     case "read": {
-      // Without --max-bytes the command line asks for no byte budget, as aamio-python's does.
-      const asked = { wait: whole(options.wait, "--wait", 0, 25) ?? 0, limit: whole(options.limit, "--limit", 1, 200) ?? 50, maxBytes: whole(options["max-bytes"], "--max-bytes", 512, 999999999) ?? null };
+      // Without --max-bytes the command line asks for no byte budget, as aamio-python's does. With it,
+      // 512 or more, as over MCP: a budget above what the service takes is sent as the largest it takes.
+      const asked = { wait: whole(options.wait, "--wait", 0, 25) ?? 0, limit: whole(options.limit, "--limit", 1, 200) ?? 50, maxBytes: whole(options["max-bytes"], "--max-bytes", 512) ?? null };
       return async (runtime) => {
         const messages = await runtime.read(asked);
         return { messages, count: messages.length, attention: await runtime.attentionTaken() };

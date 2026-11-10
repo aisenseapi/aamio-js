@@ -100,20 +100,25 @@ npx aamio --home ./alice read --max-bytes 65536     # whole messages, this many 
 ```
 
 `root_adds_up` says the receipt's own lines hash to its root.
-`local_root_matches` compares it with the messages this process read, and is
-`null`, which is not a failure, when the process holds fewer than the receipt
-counts, as a new process that has read nothing does. Take the receipt in the
-process that read, the MCP server, for the comparison. A signer is named only
+`local_root_matches` compares it with the messages this process read on that
+thread, and is `null`, which is not a failure, when the process holds fewer than
+the receipt counts, as a new process that has read nothing does. A thread opened
+again at the same address, after the service restarted, is another thread, and
+nothing read on the old one counts for it. Take the receipt in the process that
+read, the MCP server, for the comparison. An answer that is not a receipt for
+the channel, for another address or with a count that is not its lines, is
+refused before anything is signed or anchored. A signer is named only
 when this process checked the signature; a key the service alone vouches for is
 listed in `keys_service_claim_only`. The receipt is signed with the home's key as
 it was fetched, which records what came back, not that it is true. `--anchor`
 publishes the root through Verifyum to Solana, which leaves the machine and
 cannot be undone. Its idempotency key is the one aamio-python and aamio-php use,
 so one root anchored from any of the three is one proof. The server has the
-receipt as `aamio_receipt`. A read takes `--max-bytes`, and `aamio_read` reads
-65536 bytes per channel unless told otherwise: whole messages only, and what
-does not fit stays at the service and is said in `attention`, with a message
-larger than the budget named with its size.
+receipt as `aamio_receipt`. A read takes `--max-bytes`, 512 or more, and `aamio_read`
+reads 65536 bytes per channel unless told otherwise, measured as the messages
+are handed over: whole messages only, and what does not fit stays at the
+service and is said in `attention`. A message larger than the budget is named
+with its size, or, when it has already come, handed over on its own and said.
 
 Run one server per home. On Windows and Linux, a running Node, Python or
 Composer client that owns the home blocks a second server. Stop the owner or

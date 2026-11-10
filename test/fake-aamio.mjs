@@ -7,6 +7,24 @@ export const BOARD = "https://fake.board";
 // Verifyum's MCP endpoint in memory: each anchoring is counted in anchors, and answered with a proof.
 export const VERIFYUM = "https://fake.verifyum/mcp";
 
+/**
+ * A message as the service hands it out and measures it against a byte budget
+ * (aamio_thread_public_message in func_aamio_thread.php): these fields in this
+ * order, counted in UTF-8 bytes. The length of the JavaScript string counted
+ * an emoji as two and let through what the service holds back.
+ */
+export function publicBytes(m) {
+  let type = "text";
+  try {
+    JSON.parse(m.body);
+    type = "json";
+  } catch {
+    type = "text";
+  }
+  const row = { seq: m.seq, at: m.at, type, body: m.body, sha256: m.sha256, from: m.from ?? null, sig: m.sig ?? null, verified: m.from != null, sealed: Boolean(m.sealed) };
+  return Buffer.byteLength(JSON.stringify(row), "utf8");
+}
+
 export class FakeAamio {
   constructor({ now = 1_800_000_000 } = {}) {
     this.time = now;
@@ -23,8 +41,11 @@ export class FakeAamio {
     // The arguments of every anchoring Verifyum was asked for, and what the receipt route hands out, changed if a test says so.
     this.anchors = [];
     this.tamperReceipt = null;
-    // The byte budget each thread read asked for, in order: null for none.
+    // The byte budget each thread read asked for, in order: null for none. With
+    // ignoreBudget the header is recorded and nothing else is done with it, as a
+    // service without read limits answers.
     this.budgets = [];
+    this.ignoreBudget = false;
     this.fetch = (url, init = {}) => {
       const where = new URL(url);
       if (where.host === new URL(VERIFYUM).host) return this.anchorAnswer(init);
@@ -112,11 +133,11 @@ export class FakeAamio {
       const limit = Number(this.header(init, "X-Limit") || 0);
       const asked = this.header(init, "X-Max-Bytes");
       // Checked as the service checks it (blocks/api-thread.php): one to eight digits, at least 512.
-      if (asked !== undefined && (!/^[0-9]{1,8}$/.test(asked) || Number(asked) < 512)) {
+      if (!this.ignoreBudget && asked !== undefined && (!/^[0-9]{1,8}$/.test(asked) || Number(asked) < 512)) {
         return this.reply(400, { error: "Bad X-Max-Bytes", fix: "a whole number of bytes, at least 512." });
       }
-      const budget = asked === undefined ? null : Number(asked);
-      this.budgets.push(budget);
+      this.budgets.push(asked === undefined ? null : Number(asked));
+      const budget = this.ignoreBudget || asked === undefined ? null : Number(asked);
       let messages = thread.messages.filter((m) => m.seq > after);
       // More than the count asked for is said with more, as the service says it (func_aamio_thread.php).
       let more = false;
@@ -131,7 +152,7 @@ export class FakeAamio {
         const kept = [];
         let used = 0;
         for (const m of messages) {
-          const size = JSON.stringify(m).length;
+          const size = publicBytes(m);
           if (used + size > budget) {
             if (!kept.length) tooLarge = { seq: m.seq, bytes: size, fix: "Read with a bigger budget, or pass its seq as after to go past it." };
             more = true;
