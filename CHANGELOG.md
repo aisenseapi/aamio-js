@@ -16,7 +16,15 @@ not what moved in the source.
   signer with no record of its own comes with `replay: false` and
   `replay_unknown: true`, and `attention` says so as `replay_unknown`. Taken as a
   copy, another signer's first answer with the same text was passed over, and
-  taken as new, the same signer's copy was acted on twice.
+  taken as new, the same signer's copy was acted on twice. Where `replay`
+  decides what is done, upgrade every client that reads one home together: an
+  earlier version that reads in between records no signer for what it hands
+  over, and a copy from that signer can then come with `replay: false`.
+- A read whose state could not be written down hands nothing over, and now
+  says nothing of what it did not hand over either: `replay_unknown`,
+  `binding_conflict`, `kept_out`, `over_budget` and `more` are said once the
+  read is saved. It said `replay_unknown` for messages that had not come, beside
+  `not_saved`.
 
 ## 0.6.2 - 2026-11-11
 

@@ -857,6 +857,40 @@ test("a hash kept without its signer leaves it not known whose it was: B and A s
   assert.ok(kept.seen_from.includes(sha256hex("OK") + ":?"), "who sent it before stays not known, beside the signers recorded since");
 });
 
+test("a read that cannot be written down says nothing of what it did not hand over, and the next read says it", async (t) => {
+  // Over aamio_read in a review of 11 November 2026: count 0 and no messages, with not_saved, and replay_unknown for
+  // rows 2 and 3, which were not handed over. Once the home could be written to, all of them came, once each.
+  const fake = new FakeAamio();
+  const { receiver, sender } = await pair(t, fake);
+  const other = new Aamio({ base: HOST, keys: Keys.generate(), fetch: (url, init) => fake.fetch(url, init) });
+  const side = await openChannel(receiver, "side");
+  await sender.client.send(side.w, "OK");
+  const thread = fake.threads.get(side.w);
+  // As npm 0.6.2 left the channel after A's "OK": the hash, and nobody named for it.
+  Object.assign(side, { after: 1, created_at: thread.created_at, instance: thread.instance, seen: [sha256hex("OK")], seen_from: [] });
+  await receiver.read();
+  await receiver.attentionTaken();
+  await other.send(side.w, "OK");
+  await sender.client.send(side.w, "OK");
+  await other.send(side.w, "new");
+  const real = receiver.saveJson.bind(receiver);
+  let failing = true;
+  receiver.saveJson = async (name, value) => {
+    if (name === "state.json" && failing) throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+    return real(name, value);
+  };
+  assert.deepEqual((await receiver.read()).filter((m) => m.channel === "side"), [], "nothing handed over while it could not be written down");
+  const first = (await receiver.attentionTaken()).filter((note) => note.channel === "side").map((note) => note.state);
+  assert.ok(first.includes("not_saved"), "and that is said");
+  assert.ok(!first.includes("replay_unknown"), "and nothing of the messages it did not hand over");
+  failing = false;
+  const marks = (await receiver.read()).filter((m) => m.channel === "side").map((m) => [m.seq, m.replay, m.replay_unknown ?? false]);
+  assert.deepEqual(marks, [[2, false, true], [3, false, true], [4, false, false]]);
+  const unknown = (await receiver.attentionTaken()).filter((note) => note.channel === "side" && note.state === "replay_unknown");
+  assert.equal(unknown.length, 1);
+  assert.match(unknown[0].what, /^message\(s\) 2, 3 carry/);
+});
+
 test("a hash with no record is not known, and one recorded from another signer is a message of its own", () => {
   const digest = "b".repeat(64);
   const channel = { seen: [digest], seen_from: [] };

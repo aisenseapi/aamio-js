@@ -1236,6 +1236,11 @@ export class NodeRuntime {
     let used = 0;
     let stoppedAtBudget = false;
     let oversized = null;
+    // What this read says of the messages it takes is said once the read is
+    // written down. One that cannot be saved hands nothing over, and it said
+    // replay_unknown for rows it never handed over: count 0 and no messages,
+    // with a note on two of them (a review of 11 November 2026).
+    const said = [];
     for (const raw of data.messages) {
       if (limit !== null && entries.length >= limit) break;
       const entry = this.readEntry(channel, raw);
@@ -1280,7 +1285,7 @@ export class NodeRuntime {
         if (planned.conflict === null) {
           this.state.peers[planned.address] = entry.from_key;
         } else {
-          this.note(channel.label, "binding_conflict", `message ${entry.seq} names ${planned.address} as ${planned.field}, signed by ${this.nameForKey(entry.from_key) ?? entry.from_key}, and that address is already bound to ${this.nameForKey(planned.conflict.bound_to) ?? planned.conflict.bound_to}. The binding is kept.`, channel.w);
+          said.push(["binding_conflict", `message ${entry.seq} names ${planned.address} as ${planned.field}, signed by ${this.nameForKey(entry.from_key) ?? entry.from_key}, and that address is already bound to ${this.nameForKey(planned.conflict.bound_to) ?? planned.conflict.bound_to}. The binding is kept.`]);
         }
       }
       entries.push(entry);
@@ -1290,31 +1295,31 @@ export class NodeRuntime {
     // told, and it is said rather than guessed.
     const unknown = entries.filter((entry) => entry.replay_unknown).map((entry) => entry.seq);
     if (unknown.length) {
-      this.note(channel.label, "replay_unknown", `message(s) ${unknown.join(", ")} carry the bytes of a message this channel handed over before, which an earlier version recorded without who sent it, so whether each is a copy cannot be told: each comes with replay false and replay_unknown true.`, channel.w);
+      said.push(["replay_unknown", `message(s) ${unknown.join(", ")} carry the bytes of a message this channel handed over before, which an earlier version recorded without who sent it, so whether each is a copy cannot be told: each comes with replay false and replay_unknown true.`]);
     }
     if (keptOut.length) {
       const openedFor = (channel.allow || []).includes("*") ? "any key, signed only" : `${channel.allow.length} named key(s)`;
-      this.note(channel.label, "kept_out", `${keptOut.length} message(s) (seq ${keptOut.join(", ")}): this channel was opened for ${openedFor}, and these did not satisfy that list as checked here. They are not handed over.`, channel.w);
+      said.push(["kept_out", `${keptOut.length} message(s) (seq ${keptOut.join(", ")}): this channel was opened for ${openedFor}, and these did not satisfy that list as checked here. They are not handed over.`]);
     }
     if (oversized) {
-      this.note(channel.label, "over_budget", `message ${oversized.seq} on this channel is ${oversized.weight} bytes as handed over here, larger than the whole byte budget of ${maxBytes} this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.`, channel.w);
+      said.push(["over_budget", `message ${oversized.seq} on this channel is ${oversized.weight} bytes as handed over here, larger than the whole byte budget of ${maxBytes} this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.`]);
     }
     // Rows the service sent that this read left because its own limit was
     // reached: a service that does not take X-Limit sends them all, and the read
     // that stopped on its own said nothing (a review of 10 November 2026).
     const leftHere = !stoppedAtBudget && limit !== null && entries.length >= limit && data.messages.length > entries.length + keptOut.length;
     if (stoppedAtBudget) {
-      this.note(channel.label, "more", `this read stopped at the byte budget it asked for, ${maxBytes} bytes of messages as they are handed over here, and left the rest at the service. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest.`, channel.w);
+      said.push(["more", `this read stopped at the byte budget it asked for, ${maxBytes} bytes of messages as they are handed over here, and left the rest at the service. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest.`]);
     } else if (leftHere || (data.more === true && !isObject(data.too_large))) {
       // The service says more both when the count this read asked for was
       // reached and when the byte budget was. A note that blamed a budget
       // nobody set would send the reader looking for the wrong cause.
       const atLimit = leftHere || (limit !== null && data.messages.length >= limit);
-      this.note(channel.label, "more", atLimit
+      said.push(["more", atLimit
         ? "this read handed over as many messages as its limit allows, and the service has more waiting on this channel. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest."
         : maxBytes !== null
           ? "the service had more waiting on this channel than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over."
-          : "the service says it has more waiting on this channel than it sent. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest.", channel.w);
+          : "the service says it has more waiting on this channel than it sent. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest."]);
     }
     // A read that stopped early moves the cursor to the last row it took and
     // no further: next would skip the rest of the page.
@@ -1324,6 +1329,7 @@ export class NodeRuntime {
     } else if (Number.isInteger(data.next)) channel.after = data.next;
     else if (lastSeq !== null) channel.after = Math.max(channel.after, lastSeq);
     await this.saveRead();
+    for (const [state, what] of said) this.note(channel.label, state, what, channel.w);
     return entries;
   }
 

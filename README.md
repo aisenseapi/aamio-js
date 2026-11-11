@@ -62,7 +62,10 @@ the signature over this address, and the seal. A message read before, the same
 bytes from the same signer, comes back marked `replay`, also after a restart;
 another signer's message with the same text does not. Bytes an earlier version
 kept without who sent them come with `replay_unknown: true`, said in
-`attention`, until their signer is recorded. A cursor kept without the thread's
+`attention`, until their signer is recorded. Where `replay` decides what is
+done, upgrade every client that reads one home together: an earlier version
+that reads in between records no signer for what it hands over, and a copy from
+that signer can then come with `replay: false`. A cursor kept without the thread's
 instance, by aamio 0.6.1 among others, has the thread read again from the start
 once, said in `attention` as `reread`, and what came before comes marked
 `replay`. The server offers the same as
