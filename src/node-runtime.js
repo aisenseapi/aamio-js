@@ -42,6 +42,31 @@ const RECEIPT_KEEP = 120;
 const SEND_DETERMINISTIC = [400, 403, 410, 413, 415, 422, 428, 501];
 const SEND_NOT_STORED = [...SEND_DETERMINISTIC, 429];
 const HASH = /^[0-9a-f]{64}$/;
+// One message a channel handed over, as the channel remembers it: the hash of
+// its bytes and who signed them, the first 16 hex of sha256 of the key, or -
+// when nobody did. The hash alone is of the text, and two signers who both sent
+// "OK" made the second a replay of the first (a review of 10 November 2026).
+// aamio-python and aamio-php write the same records, so a home reads the same.
+const SEEN_FROM = /^[0-9a-f]{64}:(?:[0-9a-f]{16}|-)$/;
+
+/** The record of a message handed over: its hash, and the signer it was verified from, or -. */
+export function seenRecord(digest, fromKey) {
+  return `${digest}:${typeof fromKey === "string" && fromKey ? sha256hex(fromKey).slice(0, 16) : "-"}`;
+}
+
+/**
+ * Whether this channel handed these bytes over before from this signer, or
+ * unsigned when they are unsigned. Bytes it handed over from another signer
+ * make this another message. A hash kept without its signer, by a version from
+ * before the records, is taken as it always was: a replay.
+ */
+export function isReplay(channel, digest, fromKey) {
+  if (digest === null || digest === undefined) return false;
+  const records = Array.isArray(channel.seen_from) ? channel.seen_from : [];
+  if (records.includes(seenRecord(digest, fromKey))) return true;
+  if (records.some((record) => record.startsWith(digest + ":"))) return false;
+  return channel.seen.includes(digest);
+}
 const ADDRESS = /^[a-z2-7]{20}$/;
 const NAME = /^[^\u0000-\u001f\u007f]{1,64}$/;
 
@@ -208,6 +233,7 @@ export class NodeRuntime {
     for (const channel of this.state.channels) {
       if (!isObject(channel)) continue;
       channel.seen = Array.isArray(channel.seen) ? channel.seen.filter((value) => typeof value === "string" && HASH.test(value)) : [];
+      channel.seen_from = Array.isArray(channel.seen_from) ? channel.seen_from.filter((value) => typeof value === "string" && SEEN_FROM.test(value)) : [];
       channel.allow = Array.isArray(channel.allow) ? channel.allow : [];
       if (!Number.isInteger(channel.after)) channel.after = 0;
     }
@@ -452,7 +478,7 @@ export class NodeRuntime {
     const before = this.state.channels.map((channel) => (isObject(channel) ? [channel, channel.label, channel.muted] : null));
     const noted = this.attention.length;
     if (old) old.label = this.freeLabel(`inbox-${old.expire_at}`);
-    const inbox = { label: "inbox", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: wanted ?? [], after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [] };
+    const inbox = { label: "inbox", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: wanted ?? [], after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [], seen_from: [] };
     this.state.channels.push(inbox);
     const muted = this.muteGenerations(reason);
     try {
@@ -806,7 +832,7 @@ export class NodeRuntime {
     }
     const label = held?.label;
     if (held) held.label = this.freeLabel(`board-${held.expire_at}`);
-    const channel = { label: "board", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: ["*"], after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [] };
+    const channel = { label: "board", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: ["*"], after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [], seen_from: [] };
     this.state.channels.push(channel);
     try {
       await this.saveState();
@@ -969,7 +995,7 @@ export class NodeRuntime {
       const digest = checked.sha256 ?? null;
       const entry = {
         channel: channel.label, w: channel.w, seq, at, verified: checked.verified, from_key: sender, known_contact: known !== null,
-        sender: known ?? (sender ? "unknown key" : "unsigned"), sha256: digest, replay: digest !== null && channel.seen.includes(digest), body, ...meta,
+        sender: known ?? (sender ? "unknown key" : "unsigned"), sha256: digest, replay: isReplay(channel, digest, sender), body, ...meta,
       };
       if (checked.whyNot) entry.unverified_because = checked.whyNot;
       return entry;
@@ -1033,7 +1059,7 @@ export class NodeRuntime {
    */
   async poll(channel, wait = 0, limit = null, maxBytes = null) {
     if (channel.muted) return [];
-    const before = { after: channel.after, created_at: channel.created_at, instance: channel.instance ?? null, expire_at: channel.expire_at, gone: channel.gone, seen: [...channel.seen], peers: { ...this.state.peers } };
+    const before = { after: channel.after, created_at: channel.created_at, instance: channel.instance ?? null, expire_at: channel.expire_at, gone: channel.gone, seen: [...channel.seen], seen_from: [...(channel.seen_from ?? [])], peers: { ...this.state.peers } };
     try {
       return await this.pollOnce(channel, wait, limit, true, maxBytes);
     } catch (error) {
@@ -1041,7 +1067,7 @@ export class NodeRuntime {
       // What this read changed is undone in memory too: the cursor, the hashes
       // and the bindings stay as the file has them, and the messages wait at
       // the service for the next read, which hands them over.
-      Object.assign(channel, { after: before.after, created_at: before.created_at, instance: before.instance, expire_at: before.expire_at, gone: before.gone, seen: before.seen });
+      Object.assign(channel, { after: before.after, created_at: before.created_at, instance: before.instance, expire_at: before.expire_at, gone: before.gone, seen: before.seen, seen_from: before.seen_from });
       this.state.peers = before.peers;
       this.note(channel.label, "not_saved", `what this read found here could not be written down (${error.cause?.code || error.cause?.message}), so nothing from this channel was handed over. It is still there for the next read, and nothing was skipped.`, channel.w);
       return [];
@@ -1221,7 +1247,12 @@ export class NodeRuntime {
         keptOut.push(entry.seq);
         continue;
       }
-      if (entry.sha256 !== null && !channel.seen.includes(entry.sha256)) channel.seen.push(entry.sha256);
+      if (entry.sha256 !== null) {
+        if (!channel.seen.includes(entry.sha256)) channel.seen.push(entry.sha256);
+        const record = seenRecord(entry.sha256, entry.from_key);
+        if (!Array.isArray(channel.seen_from)) channel.seen_from = [];
+        if (!channel.seen_from.includes(record)) channel.seen_from.push(record);
+      }
       for (const planned of bindings) {
         if (planned.conflict === null) {
           this.state.peers[planned.address] = entry.from_key;

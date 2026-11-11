@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { Aamio, Keys, sha256hex } from "../src/aamio.js";
 import { initIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
-import { NodeRuntime } from "../src/node-runtime.js";
+import { NodeRuntime, isReplay, seenRecord } from "../src/node-runtime.js";
 import { FakeAamio, VERIFYUM, publicBytes } from "./fake-aamio.mjs";
 
 const HOST = "https://fake.aamio";
@@ -602,13 +602,13 @@ test("a binding conflict is weighed with its message, and an address is bound on
   const taken = "a".repeat(20);
   receiver.state.peers[taken] = Keys.generate().public;
   for (const text of ["one", "two"]) await sender.client.send(inbox.w, { text, reply_to: taken });
-  const kept = { after: inbox.after, after_sha256: inbox.after_sha256 ?? null, seen: [...inbox.seen], peers: { ...receiver.state.peers } };
+  const kept = { after: inbox.after, seen: [...inbox.seen], seen_from: [...inbox.seen_from], peers: { ...receiver.state.peers } };
   const both = await receiver.read();
   assert.ok(both.length === 2 && both.every((m) => m.binding_conflicts?.length === 1), "each carries its conflict");
   const sizes = both.map(size);
   await receiver.attentionTaken();
   // The same two again, from where the read began.
-  Object.assign(inbox, { after: kept.after, after_sha256: kept.after_sha256, seen: kept.seen });
+  Object.assign(inbox, { after: kept.after, seen: kept.seen, seen_from: kept.seen_from });
   receiver.state.peers = { ...kept.peers };
   receiver.observed.delete(inbox.w);
   const one = await receiver.read({ maxBytes: sizes[0] + sizes[1] - 1 });
@@ -788,4 +788,55 @@ test("another sender's message with the same text reaches the agent when a curso
   await withoutInstance(homeA, "side", 1);
   again = await open(homeA);
   assert.deepEqual((await again.read()).map((m) => [m.seq, m.body.text, m.from_key]), [[1, "OK", other.keys.public]], "the new thread's first message comes");
+});
+
+// A replay is the same bytes from the same signer, or the same unsigned bytes. The hash alone is of the text, and two
+// signers who both sent "OK" made the second a replay of the first (a review of 10 November 2026).
+
+test("the record of a message handed over is the one aamio-python and aamio-php write", () => {
+  const digest = "565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3";
+  assert.equal(sha256hex("OK"), digest);
+  assert.equal(seenRecord(digest, "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"), digest + ":b43cdfe1bf180ef4");
+  assert.equal(seenRecord(digest, null), digest + ":-");
+});
+
+test("two signers who send the same text send two messages, and the same signer or the same unsigned bytes again is a replay", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender, homeA, open } = await pair(t, fake);
+  const fetch = (url, init) => fake.fetch(url, init);
+  const other = new Aamio({ base: HOST, keys: Keys.generate(), fetch });
+  const nobody = new Aamio({ base: HOST, fetch });
+  const side = await openChannel(receiver, "side");
+  await sender.client.send(side.w, "OK");
+  await other.send(side.w, "OK");
+  await sender.client.send(side.w, "OK");
+  await nobody.send(side.w, "OK");
+  await nobody.send(side.w, "OK");
+  const marks = (await receiver.read()).filter((m) => m.channel === "side").map((m) => [m.seq, m.replay]);
+  assert.deepEqual(marks, [[1, false], [2, false], [3, true], [4, false], [5, true]]);
+  await receiver.close();
+  // Who sent each hash travels with the channel through state.json, and what is not a record is left out.
+  const file = join(homeA, "state.json");
+  const state = JSON.parse(await readFile(file, "utf8"));
+  const kept = state.channels.find((c) => c.label === "side");
+  assert.equal(kept.seen_from.length, 3);
+  kept.seen_from.push("not a record", "a".repeat(64) + ":xyz");
+  await writeFile(file, JSON.stringify(state));
+  const again = await open(homeA);
+  const loaded = again.channel("side");
+  assert.equal(loaded.seen_from.length, 3);
+  assert.equal(isReplay(loaded, sha256hex("OK"), other.keys.public), true);
+  assert.equal(isReplay(loaded, sha256hex("OK"), Keys.generate().public), false);
+});
+
+test("a hash kept without its signer is a replay as before, and from then on its signer is kept with it", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender } = await pair(t, fake);
+  const side = await openChannel(receiver, "side");
+  // As an earlier version left a channel: the hash, and nobody named for it.
+  side.seen.push(sha256hex("OK"));
+  await sender.client.send(side.w, "OK");
+  const marks = (await receiver.read()).filter((m) => m.channel === "side").map((m) => [m.seq, m.replay]);
+  assert.deepEqual(marks, [[1, true]]);
+  assert.ok(side.seen_from.includes(seenRecord(sha256hex("OK"), sender.keys.public)));
 });

@@ -58,8 +58,9 @@ for the partners, and the open one is still read until it expires, within the
 hour, as partner add says in its answer. The board inbox takes any signed key, since whoever answers
 a post has not been met. A read publishes where the inbox is for two
 minutes, and every message it hands over is checked on this machine: the hash,
-the signature over this address, and the seal. A message read before comes
-back marked `replay`, also after a restart. A cursor kept without the thread's
+the signature over this address, and the seal. A message read before, the same
+bytes from the same signer, comes back marked `replay`, also after a restart;
+another signer's message with the same text does not. A cursor kept without the thread's
 instance, by aamio 0.6.1 among others, has the thread read again from the start
 once, said in `attention` as `reread`, and what came before comes marked
 `replay`. The server offers the same as
