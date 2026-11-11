@@ -47,7 +47,9 @@ const HASH = /^[0-9a-f]{64}$/;
 // when nobody did. The hash alone is of the text, and two signers who both sent
 // "OK" made the second a replay of the first (a review of 10 November 2026).
 // aamio-python and aamio-php write the same records, so a home reads the same.
-const SEEN_FROM = /^[0-9a-f]{64}:(?:[0-9a-f]{16}|-)$/;
+// ? stands beside a hash an earlier version kept without its signer, once that
+// hash is met again: who sent it then is not known, and stays not known.
+const SEEN_FROM = /^[0-9a-f]{64}:(?:[0-9a-f]{16}|-|\?)$/;
 
 /** The record of a message handed over: its hash, and the signer it was verified from, or -. */
 export function seenRecord(digest, fromKey) {
@@ -56,16 +58,40 @@ export function seenRecord(digest, fromKey) {
 
 /**
  * Whether this channel handed these bytes over before from this signer, or
- * unsigned when they are unsigned. Bytes it handed over from another signer
- * make this another message. A hash kept without its signer, by a version from
- * before the records, is taken as it always was: a replay.
+ * unsigned when they are unsigned: true when it did, and false when it did not,
+ * since bytes it handed over from another signer make this another message.
+ * null when it cannot be told: an earlier version kept the hash without its
+ * signer, and this signer has no record of its own. Taken as a copy, another
+ * signer's first answer with the same text was passed over, and taken as new,
+ * the same signer's copy was acted on twice (a review of 11 November 2026), so
+ * it is said as it is.
  */
-export function isReplay(channel, digest, fromKey) {
+export function replayState(channel, digest, fromKey) {
   if (digest === null || digest === undefined) return false;
   const records = Array.isArray(channel.seen_from) ? channel.seen_from : [];
   if (records.includes(seenRecord(digest, fromKey))) return true;
-  if (records.some((record) => record.startsWith(digest + ":"))) return false;
-  return channel.seen.includes(digest);
+  const mine = records.filter((record) => record.startsWith(digest + ":"));
+  if (mine.includes(digest + ":?") || (mine.length === 0 && channel.seen.includes(digest))) return null;
+  return false;
+}
+
+/** Whether this is known to be a copy: replayState, with not known taken as no. */
+export function isReplay(channel, digest, fromKey) {
+  return replayState(channel, digest, fromKey) === true;
+}
+
+/**
+ * A message handed over: its hash, and who it came from. A hash an earlier
+ * version kept without its signer keeps that, as ?, beside the first signer
+ * recorded for it, so the next signer with the same bytes is not taken for a
+ * new one with certainty.
+ */
+export function remember(channel, digest, fromKey) {
+  if (!Array.isArray(channel.seen_from)) channel.seen_from = [];
+  if (channel.seen.includes(digest) && !channel.seen_from.some((record) => record.startsWith(digest + ":"))) channel.seen_from.push(digest + ":?");
+  if (!channel.seen.includes(digest)) channel.seen.push(digest);
+  const record = seenRecord(digest, fromKey);
+  if (!channel.seen_from.includes(record)) channel.seen_from.push(record);
 }
 const ADDRESS = /^[a-z2-7]{20}$/;
 const NAME = /^[^\u0000-\u001f\u007f]{1,64}$/;
@@ -993,10 +1019,12 @@ export class NodeRuntime {
       const [body, meta] = this.openMessage({ ...message, verified: checked.verified, from: sender });
       const known = this.nameForKey(sender);
       const digest = checked.sha256 ?? null;
+      const replay = replayState(channel, digest, sender);
       const entry = {
         channel: channel.label, w: channel.w, seq, at, verified: checked.verified, from_key: sender, known_contact: known !== null,
-        sender: known ?? (sender ? "unknown key" : "unsigned"), sha256: digest, replay: isReplay(channel, digest, sender), body, ...meta,
+        sender: known ?? (sender ? "unknown key" : "unsigned"), sha256: digest, replay: replay === true, body, ...meta,
       };
+      if (replay === null) entry.replay_unknown = true;
       if (checked.whyNot) entry.unverified_because = checked.whyNot;
       return entry;
     } catch (error) {
@@ -1170,7 +1198,7 @@ export class NodeRuntime {
     // is passed over by its hash, which is the hash of the text alone: another
     // sender's message with the same text has it too (the same review).
     if (!another && !data.reset && channel.after > 0 && typeof channel.instance !== "string" && instance !== null) {
-      this.note(channel.label, "reread", `this channel's cursor, ${channel.after}, was kept by a client that did not keep the thread's instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, and nothing is passed over.`, channel.w);
+      this.note(channel.label, "reread", `this channel's cursor, ${channel.after}, was kept by a client that did not keep the thread's instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, or replay_unknown where an earlier version kept it without who sent it, and nothing is passed over.`, channel.w);
       channel.after = 0;
       return this.pollOnce(channel, 0, limit, false, maxBytes);
     }
@@ -1247,12 +1275,7 @@ export class NodeRuntime {
         keptOut.push(entry.seq);
         continue;
       }
-      if (entry.sha256 !== null) {
-        if (!channel.seen.includes(entry.sha256)) channel.seen.push(entry.sha256);
-        const record = seenRecord(entry.sha256, entry.from_key);
-        if (!Array.isArray(channel.seen_from)) channel.seen_from = [];
-        if (!channel.seen_from.includes(record)) channel.seen_from.push(record);
-      }
+      if (entry.sha256 !== null) remember(channel, entry.sha256, entry.from_key);
       for (const planned of bindings) {
         if (planned.conflict === null) {
           this.state.peers[planned.address] = entry.from_key;
@@ -1261,6 +1284,13 @@ export class NodeRuntime {
         }
       }
       entries.push(entry);
+    }
+    // Messages whose bytes this channel handed over before, which an earlier
+    // version recorded without who sent them: whether each is a copy cannot be
+    // told, and it is said rather than guessed.
+    const unknown = entries.filter((entry) => entry.replay_unknown).map((entry) => entry.seq);
+    if (unknown.length) {
+      this.note(channel.label, "replay_unknown", `message(s) ${unknown.join(", ")} carry the bytes of a message this channel handed over before, which an earlier version recorded without who sent it, so whether each is a copy cannot be told: each comes with replay false and replay_unknown true.`, channel.w);
     }
     if (keptOut.length) {
       const openedFor = (channel.allow || []).includes("*") ? "any key, signed only" : `${channel.allow.length} named key(s)`;
