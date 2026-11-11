@@ -215,7 +215,8 @@ warns once per batch. With a callback, the caller owns that reporting and
 retention. `onGone` and `onReset` expose lost threads and cursor resets, with
 warnings by default. `open()` keeps the `instance` the service names the thread
 by, and `listen()` reads a thread opened again at its address from the start
-and says it once through `onReset`, in each listener of the thread. A cursor
+and says it once through `onReset`, in each listener of the thread. A
+listener knows the thread by the instance it had when `listen()` was called. A cursor
 given with a thread that has no `instance`, as one stored by an earlier
 version, is read again from the start once in the same way, and what came
 before it may come again. `decode(message)` without an address is legacy unchecked

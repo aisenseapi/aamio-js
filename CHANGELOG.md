@@ -58,8 +58,10 @@ not what moved in the source.
 - `open()` keeps the `instance` the service names the thread by, and `listen()`
   reads a thread opened again at the address from the start and says it once
   through `onReset`. It went on from the old cursor past the new thread's first
-  messages. Each listener compares with the instance it last saw: two on one
-  thread object shared it, and the second passed its first message. A cursor
+  messages. Each listener compares with the instance it last saw, from the
+  moment `listen()` is called: two on one thread object shared it, and the
+  second passed its first message, as did one made before the change and first
+  asked after another had seen it. A cursor
   given with a thread that has no `instance`, as one stored by an earlier
   version, is read again from the start once in the same way, and what came
   before it may come again. `Thread` and `ReadResult` name the field in the

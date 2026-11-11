@@ -169,3 +169,28 @@ test("listen on an unchanged thread, from the start, or at a service that names 
     assert.equal(resets.length, said, how);
   }
 });
+
+test("a listener made before the thread changed knows the thread it was made for, also when it is first asked after another one saw the change", async () => {
+  const fake = new FakeAamio();
+  const fetch = capped(fake);
+  const owner = new Aamio({ base: HOST, keys: Keys.generate(), fetch });
+  const writer = new Aamio({ base: HOST, keys: Keys.generate(), fetch });
+  const thread = await owner.open({ ttl: 600 });
+  await writer.send(thread.w, "old one");
+  const first = owner.listen(thread, { wait: 1, onReset: () => {} });
+  assert.equal((await first.next()).value.plain, "old one");
+  // Made now, with its cursor past the old message, and not asked for anything until the thread has changed and the
+  // first listener has written the new instance on the thread.
+  const resets = [];
+  const late = owner.listen(thread, { after: 1, wait: 1, onReset: (reset) => resets.push(reset) });
+  fake.threads.set(thread.w, { ...fake.threads.get(thread.w), messages: [], instance: "9".repeat(16) });
+  await writer.send(thread.w, "new one");
+  await writer.send(thread.w, "new two");
+  assert.equal((await first.next()).value.plain, "new one");
+  await first.return();
+  assert.equal(thread.instance, "9".repeat(16), "the first listener wrote the new instance on the thread");
+  assert.equal((await late.next()).value.plain, "new one", "and the late one still knew the old thread, so it reads the new one from the start");
+  assert.equal((await late.next()).value.plain, "new two");
+  await late.return();
+  assert.equal(resets.length, 1);
+});

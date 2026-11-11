@@ -1427,74 +1427,82 @@ export class Aamio {
    * Yield messages as they arrive, long polling with wait seconds per call,
    * until signal aborts or the thread answers 410 (then AamioError is thrown).
    */
-  async *listen(thread, { after = 0, wait = 25, signal, onKeptOut, onGone, onReset } = {}) {
-    let seq = after;
-    // The instance this iterator last saw the thread by, its own. Two iterators
+  listen(thread, { after = 0, wait = 25, signal, onKeptOut, onGone, onReset } = {}) {
+    // The instance this listener last saw the thread by, its own. Two listeners
     // on one thread object shared the field on it: the first to see a new
     // thread wrote it, and the second went on past its first message (a review
     // of 10 November 2026). The field on the thread is kept as well, for a
-    // caller that stores the thread.
+    // caller that stores the thread. It is taken when listen() is called, not
+    // when the first message is asked for: a generator starts at its first
+    // next(), and a listener made before the thread changed, asked first after
+    // another listener had written the new instance on the thread, took that
+    // one as its own and went on past the new thread's first message (a review
+    // of 11 November 2026).
     let known = typeof thread.instance === "string" ? thread.instance : null;
-    while (!(signal && signal.aborted)) {
-      const data = await this.read(thread, { after: seq, wait });
-      // A thread is known by the instance the service names it by. One opened
-      // again at this address, by its owner or by a write after a restart,
-      // that already holds as many messages as the cursor is not reset by the
-      // service, and listen went on from the old cursor past its first messages
-      // without a word (a review of 10 November 2026). So it is read from the
-      // start, and that is said once, as a reset. A cursor that came without
-      // the instance, as with a thread stored by an earlier version, cannot be
-      // checked at all, and is read again from the start once in the same way:
-      // what came before it may come again (the same review).
-      if (data.exists === true && typeof data.instance === "string") {
-        if (data.instance !== known && !data.reset && seq > 0) {
-          const what = known !== null
-            ? `the thread at this address is a new one, instance ${data.instance} where this listener knew instance ${known}, so it is read again from the start`
-            : `this listener's cursor, ${seq}, came without the thread's instance, so it cannot be told whether the thread here is the one it was kept on. It is read again from the start this once, and messages before the cursor may come again.`;
-          const reset = { after: seq, newest: Number.isInteger(data.count) ? data.count : 0, what };
+    const client = this;
+    return (async function* () {
+      let seq = after;
+      while (!(signal && signal.aborted)) {
+        const data = await client.read(thread, { after: seq, wait });
+        // A thread is known by the instance the service names it by. One opened
+        // again at this address, by its owner or by a write after a restart,
+        // that already holds as many messages as the cursor is not reset by the
+        // service, and listen went on from the old cursor past its first messages
+        // without a word (a review of 10 November 2026). So it is read from the
+        // start, and that is said once, as a reset. A cursor that came without
+        // the instance, as with a thread stored by an earlier version, cannot be
+        // checked at all, and is read again from the start once in the same way:
+        // what came before it may come again (the same review).
+        if (data.exists === true && typeof data.instance === "string") {
+          if (data.instance !== known && !data.reset && seq > 0) {
+            const what = known !== null
+              ? `the thread at this address is a new one, instance ${data.instance} where this listener knew instance ${known}, so it is read again from the start`
+              : `this listener's cursor, ${seq}, came without the thread's instance, so it cannot be told whether the thread here is the one it was kept on. It is read again from the start this once, and messages before the cursor may come again.`;
+            const reset = { after: seq, newest: Number.isInteger(data.count) ? data.count : 0, what };
+            known = data.instance;
+            thread.instance = data.instance;
+            if (Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
+            thread.reset = reset;
+            client.forgetGate(thread.w);
+            if (typeof onReset === "function") onReset(reset);
+            else console.warn("aamio: the thread cursor was reset", reset);
+            seq = 0;
+            continue;
+          }
+          // The thread that is there, with its own expiry: after the service read
+          // it from the start it may expire at another time than the one opened.
+          if (known !== data.instance && Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
           known = data.instance;
           thread.instance = data.instance;
-          if (Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
-          thread.reset = reset;
-          this.forgetGate(thread.w);
-          if (typeof onReset === "function") onReset(reset);
-          else console.warn("aamio: the thread cursor was reset", reset);
-          seq = 0;
-          continue;
         }
-        // The thread that is there, with its own expiry: after the service read
-        // it from the start it may expire at another time than the one opened.
-        if (known !== data.instance && Number.isInteger(data.expire_at)) thread.expireAt = data.expire_at;
-        known = data.instance;
-        thread.instance = data.instance;
-      }
-      // What the thread's own allowlist kept out is not yielded, and it is said.
-      if (data.keptOut?.length) {
-        if (typeof onKeptOut === "function") onKeptOut(data.keptOut);
-        else {
-          (thread.keptOut ??= []).push(...data.keptOut);
-          console.warn("aamio: messages kept out", data.keptOut);
+        // What the thread's own allowlist kept out is not yielded, and it is said.
+        if (data.keptOut?.length) {
+          if (typeof onKeptOut === "function") onKeptOut(data.keptOut);
+          else {
+            (thread.keptOut ??= []).push(...data.keptOut);
+            console.warn("aamio: messages kept out", data.keptOut);
+          }
         }
+        if (data.exists === false) {
+          if (typeof onGone === "function") onGone(data);
+          else if (!thread.gone) console.warn("aamio: the thread is gone", data.note);
+          thread.gone = true;
+        } else if (data.exists === true) thread.gone = false;
+        if (data.reset) {
+          thread.reset = data.reset;
+          client.forgetGate(thread.w);
+          if (typeof onReset === "function") onReset(data.reset);
+          else console.warn("aamio: the thread cursor was reset", data.reset);
+        }
+        for (const message of data.messages) yield message;
+        // The service's next, not the highest seq seen. When a restart takes a
+        // thread and a write opens a new one at the same address, the service
+        // reads from the start and says reset, and next is lower than before.
+        // Keeping the highest seq asked past the new thread on every call and
+        // handed the same messages over each time.
+        if (Number.isInteger(data.next)) seq = data.next;
       }
-      if (data.exists === false) {
-        if (typeof onGone === "function") onGone(data);
-        else if (!thread.gone) console.warn("aamio: the thread is gone", data.note);
-        thread.gone = true;
-      } else if (data.exists === true) thread.gone = false;
-      if (data.reset) {
-        thread.reset = data.reset;
-        this.forgetGate(thread.w);
-        if (typeof onReset === "function") onReset(data.reset);
-        else console.warn("aamio: the thread cursor was reset", data.reset);
-      }
-      for (const message of data.messages) yield message;
-      // The service's next, not the highest seq seen. When a restart takes a
-      // thread and a write opens a new one at the same address, the service
-      // reads from the start and says reset, and next is lower than before.
-      // Keeping the highest seq asked past the new thread on every call and
-      // handed the same messages over each time.
-      if (Number.isInteger(data.next)) seq = data.next;
-    }
+    })();
   }
 
   /** The receipt of a thread you own, with its root recomputed locally. */
