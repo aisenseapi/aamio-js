@@ -21,3 +21,7 @@ for aamio-python and aamio-php, and a number says the same of all three.
   cannot do it, the work is done here and the answer says whether the card or
   the picture had gone there. The package has no dependencies. On contract 2
   of aamio's add-ons, for aamio 0.7.0 or later for Node.
+- The aisense engine goes through a proxy only where Node is told to use one:
+  with `NODE_USE_ENV_PROXY=1` and `HTTPS_PROXY` in the environment, on a Node
+  that knows the setting, as Node 24 does and Node 20 does not. Otherwise it
+  connects directly, and behind a proxy the local engine does the work.

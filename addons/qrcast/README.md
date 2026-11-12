@@ -91,8 +91,13 @@ answer: its `sent` is `yes` when aisenseapi.com answered, so it had the card or
 the picture, and `maybe` when the connection failed. A picture is never sent
 unless aisense is asked for, and `scan` reads only here. Every answer says
 which engine did the work. The aisense engine connects to aisenseapi.com
-directly: Node's own fetch does not go through HTTPS_PROXY, so behind a proxy
-the work is done by the local engine, and the answer says so.
+directly, unless Node itself is told to use a proxy: with
+`NODE_USE_ENV_PROXY=1` in the environment, a Node that knows the setting sends
+its fetch through the proxy `HTTPS_PROXY` names, and aamio passes both to the
+add-on. Node 24 knows it and Node 20 does not. The card or the picture then
+goes to aisenseapi.com through that proxy. Without the setting, or on a Node
+that does not know it, a proxy in the environment is not used: behind one the
+work is done by the local engine, and the answer says so.
 
 ## The flow
 
