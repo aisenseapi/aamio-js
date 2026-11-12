@@ -104,9 +104,11 @@ test("finding 2: a folder that cannot be synced after the rename does not hide a
   };
   const got = await a.read();
   assert.deepEqual(got.map((m) => m.body.text), ["once"], "the message the file now says was read is handed over");
+  // Once for each file the read wrote: the cursor's, and the trace of what it handed over.
   const notes = (await a.attentionTaken()).filter((note) => note.state === "not_synced");
-  assert.equal(notes.length, 1, "and the uncertain sync is said, once");
-  assert.match(notes[0].what, /state\.json was replaced/);
+  assert.deepEqual(notes.map((note) => note.what.split(" ")[0]).sort(), ["state.json", "trace.json"], "and the uncertain sync is said, once for each file");
+  assert.match(notes.find((note) => note.what.startsWith("state.json")).what, /state\.json was replaced.*what was read since would then be read again/);
+  assert.doesNotMatch(notes.find((note) => note.what.startsWith("trace.json")).what, /read again/, "what is true of the cursor's file is not said of another");
   assert.equal((await onDisk(homeA, "state.json")).channels.find((c) => c.label === "inbox").after, a.channel("inbox").after, "memory and disk agree");
   await close(a);
   a = await open(homeA);

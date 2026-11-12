@@ -4,6 +4,32 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- The outbox is settled from Node. `outbox retry [--id ID]` and
+  `aamio_outbox_retry` send the stored bytes of a message again, with the same
+  id, address and envelope, so a recipient that keeps what it has seen marks the
+  copy as a replay. `outbox forget ID` and `aamio_outbox_forget` drop one entry
+  and say which of five it was. A delivery, and a refusal the service will
+  repeat, are never sent again. A send that fails says whether the same bytes
+  are worth sending again, as `retryable`, and what to do, as `fix`.
+- `trace [WHO]` and `aamio_trace` show what was sent to each counterpart and
+  what came back, as hashes and shapes, never content. It is kept in
+  `trace.json`, the file aamio-python and aamio-php keep, and every sealed
+  message names the last message from its recipient that was read and opened
+  here, as `seen`. A trace that cannot be written costs the trace and nothing
+  else: `untraced` in `attention`, and `trace_error` on the send.
+  A row keeps at most 32 field names of a message, each of at most 64
+  characters: the names are the sender's to choose, and a message made of
+  thousands of them would otherwise make the file large.
+- `outbox pending` and `aamio_pending` list by the rule retry uses. An entry an
+  older client wrote as refused, after an answer that proved nothing, was not
+  listed, though its outcome is open.
+- The note about a folder that could not be synced says that what was read
+  would be read again only of `state.json`, the file that holds the cursor. It
+  said so of every file.
+- The local server has sixteen tools.
+
 ## 0.6.3 - 2026-11-11
 
 - A message is a replay only when this channel handed the same bytes over before

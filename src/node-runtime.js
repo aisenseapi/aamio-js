@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Aamio, AamioError, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, sha256hex, threadSigningInput } from "./aamio.js";
 import { readKeys } from "./node-identity.js";
 import { takeHome } from "./node-lock.js";
+import { TRACE_KEEP, TRACE_KEYS, TRACE_READ_FIELDS, TRACE_RECEIVED_FIELDS, TRACE_SENT_FIELDS, isMessageHash, normalizeTraces, traceRow, traceView } from "./node-trace.js";
 
 /*
  * The local runtime for Node: a home held for as long as it runs, an inbox the
@@ -12,10 +13,10 @@ import { takeHome } from "./node-lock.js";
  * outbox before they go, and reads checked here before anything is handed on.
  *
  * A home is shared with aamio-python and aamio-php, so the files are theirs:
- * partners.json, state.json and outbox.json in the same shape, written the same
- * way. A home one of them made opens here, and one this makes opens there. What
- * Python keeps that this does not touch yet, scopes, traces, effects and the
- * archive, is left as it is.
+ * partners.json, state.json, outbox.json and trace.json in the same shape,
+ * written the same way. A home one of them made opens here, and one this makes
+ * opens there. What Python keeps that this does not touch yet, scopes, effects
+ * and the archive, is left as it is.
  */
 
 export const INBOX_TTL = 3600;
@@ -41,6 +42,11 @@ const RECEIPT_KEEP = 120;
 // again, and a rate window, which it decides before it reads the body.
 const SEND_DETERMINISTIC = [400, 403, 410, 413, 415, 422, 428, 501];
 const SEND_NOT_STORED = [...SEND_DETERMINISTIC, 429];
+// Nothing about the message is wrong, only the moment: a rate window, or a
+// service that is busy. 503 is not among the answers that prove nothing was
+// stored: it can be a front door that saw nothing or the service failing after
+// it had written, and this side cannot tell which.
+const SEND_TRY_LATER = [429, 503];
 const HASH = /^[0-9a-f]{64}$/;
 // One message a channel handed over, as the channel remembers it: the hash of
 // its bytes and who signed them, the first 16 hex of sha256 of the key, or -
@@ -95,6 +101,88 @@ export function remember(channel, digest, fromKey) {
 }
 const ADDRESS = /^[a-z2-7]{20}$/;
 const NAME = /^[^\u0000-\u001f\u007f]{1,64}$/;
+
+// ------------------------------------------------------------- the outbox --
+//
+// What happened to a send, read from its entry by the rules aamio-python and
+// aamio-php read it by, so an outbox one of them wrote says the same here.
+
+/**
+ * Which of five things happened to a send, for a caller deciding whether to
+ * replace it, or not_found. Only a stop before the first POST may be called
+ * unsent. An attempt that was answered 500 does not prove the message is
+ * absent, and one that was delivered is certainly not unsent.
+ */
+export function outboxOutcome(entry) {
+  if (!isObject(entry)) return "not_found";
+  const status = entry.status;
+  // Read before the statuses: a retry sets the status back to working while
+  // the first attempt is still with the other side.
+  if (entry.posting && status === "working") return "attempted";
+  if (status === "delivered") return "delivered";
+  if (status === "unknown") return "unknown";
+  if (status === "attempted") return "attempted";
+  if (status === "refused") {
+    // An earlier attempt that was left open is not undone by a later refusal.
+    // An entry from before ever_open is read by its last answer.
+    if (entry.ever_open) return "attempted";
+    return SEND_NOT_STORED.includes(entry.last_status) ? "refused" : "attempted";
+  }
+  // posting is set in the moment before the post, by the runtimes that set
+  // it: the one mark that means bytes were on their way.
+  if (entry.posting) return "attempted";
+  if (status === "working" || status === "stopped") return "never_sent";
+  return Number(entry.attempts) > 0 ? "attempted" : "never_sent";
+}
+
+/** Whether this message still has something to decide: it left, and what came back settles nothing. */
+export function outboxOpen(entry) {
+  return ["attempted", "unknown"].includes(outboxOutcome(entry));
+}
+
+/**
+ * Whether sending these same bytes again is the right next move. Not the same
+ * question as open: a rate window is settled, nothing was stored, and it is
+ * also the one refusal whose advice is to wait and send it again. A refusal
+ * the service will repeat is not here, and a delivery is not here.
+ */
+export function outboxRetryable(entry) {
+  if (!isObject(entry)) return false;
+  if (outboxOpen(entry)) return true;
+  return outboxOutcome(entry) === "refused" && SEND_TRY_LATER.includes(entry.last_status);
+}
+
+export const OUTBOX_NOTES = {
+  never_sent: "nothing had left this machine for it, and nothing will now",
+  attempted: "a send was attempted and its answer does not prove the message is absent, so its outcome stays unknown and nothing here can recall it",
+  delivered: "the service had already stored it when this was dropped; dropping the entry does not unsend it",
+  refused: "the service answered that it refused this one, so it was not stored, but the attempt did leave this machine",
+  unknown: "a send was already away when this was dropped, so its outcome stays unknown and nothing here can recall it",
+  not_found: "this outbox has no message with that id, so nothing was dropped and nothing was sent",
+};
+
+/**
+ * What to do about a send that did not end in a stored message: whether the
+ * same stored bytes are worth sending again, and the fix in words. true: the
+ * message is fine and the moment was not. false: the same message will fail
+ * the same way. null: it cannot be decided from what is known here. Never a
+ * permission to repeat something by itself. The words are aamio-python's.
+ */
+export function sendAdvice(outcome, status) {
+  if (outcome === "never_sent") {
+    return [false, "Nothing left this machine for this message, so it was not delivered and will not be: the error says what stopped it. Put that right, then send it as a new message. There is nothing to retry."];
+  }
+  if (outcome === "unknown") {
+    return [null, "No answer came back, so this message may already have been delivered. Keep its message_id. aamio_pending lists what has no settled outcome on this machine; it does not confirm delivery, and nothing here can, because the address it went to is not yours to read. Do not pass the message_id to aamio_send and do not compose a replacement. An approved retry sends the stored bytes again: aamio_outbox_retry with this id, or aamio outbox retry --id on the command line."];
+  }
+  if (SEND_TRY_LATER.includes(status)) {
+    return [true, `aamio declined this for now, not because of the message: ${status} is a rate window or a busy service. Do not change the content. Wait, then send the stored message again through the runtime's outbox retry rather than composing a new one.`];
+  }
+  if (SEND_DETERMINISTIC.includes(status)) {
+    return [false, "aamio refused this and will refuse the same bytes again. Read the error, correct the request, and send the corrected one as a new message."];
+  }
+  return [null, `aamio answered ${status}, which this client does not classify. It may or may not have stored the message before failing, so treat delivery as unsettled: keep the message_id, read the error, and do not resend blindly.`];
+}
 
 /** A partner's name and key as partnerAdd takes them, checked where nothing has been opened yet. Throws invalid_name or invalid_key. */
 export function checkPartner(name, key) {
@@ -203,6 +291,9 @@ export class NodeRuntime {
     this.untold = new Set();
     // Files whose folder could not be synced after the rename, said once until it can.
     this.unsynced = new Set();
+    // What was sent to each counterpart and what came back, as hashes and
+    // shapes: trace.json, a book per public key.
+    this.traces = {};
   }
 
   /**
@@ -263,7 +354,33 @@ export class NodeRuntime {
       channel.allow = Array.isArray(channel.allow) ? channel.allow : [];
       if (!Number.isInteger(channel.after)) channel.after = 0;
     }
+    this.traces = normalizeTraces(await this.loadTrace(), TRACE_KEEP, TRACE_KEYS);
     await this.settleInterrupted();
+  }
+
+  /**
+   * trace.json, or nothing when it is not there. The trace is diagnostics: a
+   * file that cannot be read never stops the runtime, as aamio-python reads
+   * it. It is said, since the next record written replaces the file.
+   */
+  async loadTrace() {
+    let bytes;
+    try {
+      bytes = await readFile(join(this.home, "trace.json"));
+    } catch (error) {
+      if (error.code !== "ENOENT") this.untraced(`trace.json could not be read (${error.code || error.message}), so the trace starts empty and the next record replaces the file.`);
+      return {};
+    }
+    try {
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (text.trim() === "") return {};
+      const value = JSON.parse(text);
+      if (!isObject(value)) throw new Error("not a JSON object");
+      return value;
+    } catch (error) {
+      this.untraced(`trace.json is not what a trace holds (${error.message}), so the trace starts empty and the next record replaces the file.`);
+      return {};
+    }
   }
 
   /**
@@ -351,7 +468,9 @@ export class NodeRuntime {
       // message was never handed over at all (a review of 9 November 2026).
       if (!this.unsynced.has(name)) {
         this.unsynced.add(name);
-        this.note("files", "not_synced", `${name} was replaced, but the folder ${this.home} could not be synced (${error.code || error.message}). This runtime goes on with what it wrote. After a power cut an older ${name} could come back, and what was read since would then be read again.`);
+        // What an older file coming back would mean is said for the file it is
+        // true of: the cursor is in state.json, and no other file has one.
+        this.note("files", "not_synced", `${name} was replaced, but the folder ${this.home} could not be synced (${error.code || error.message}). This runtime goes on with what it wrote. After a power cut an older ${name} could come back${name === "state.json" ? ", and what was read since would then be read again" : ""}.`);
       }
     }
   }
@@ -373,6 +492,20 @@ export class NodeRuntime {
 
   saveOutbox() {
     return this.saveJson("outbox.json", this.outbox);
+  }
+
+  /**
+   * Written when it changes. A trace that cannot be written costs the trace
+   * and nothing else: the line that says so is given back, and null when the
+   * file was written.
+   */
+  async saveTrace() {
+    try {
+      await this.saveJson("trace.json", this.traces);
+      return null;
+    } catch (error) {
+      return this.untraced(`trace.json: ${error.code || error.name || "Error"}: ${error.message}`);
+    }
   }
 
   async close() {
@@ -679,7 +812,7 @@ export class NodeRuntime {
     const body = { from: this.keys.hash.slice(0, 8), reply_to: inbox.w };
     if (text !== null && text !== undefined) body.text = String(text);
     if (data !== null && data !== undefined) body.data = data;
-    if (re) body.re = re;
+    Object.assign(body, this.conversation(key, re));
     const plaintext = JSON.stringify(body);
     let entry = await this.outboxAdd(w, key, this.keys.seal(key, plaintext), body);
     let answer = await this.deliver(entry, advice);
@@ -693,7 +826,8 @@ export class NodeRuntime {
       answer = await this.deliver(entry, advice);
     }
     if (answer.status !== 201) {
-      throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError });
+      const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
+      throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, retryable, fix });
     }
     // A 201 is a delivery even when the answer carries no receipt: read field
     // by field, a missing one threw after the message was stored, and the
@@ -712,6 +846,8 @@ export class NodeRuntime {
       said.push("Delivered: aamio stored it. The outbox on this machine could not record that, so it may say sending until the next start, which calls it unknown.");
     }
     if (said.length) sent.note = said.join(" ") + " Do not send this message again.";
+    // The trace that could not be written, beside the delivery it is about.
+    if (answer.traceError) sent.trace_error = answer.traceError;
     return sent;
   }
 
@@ -799,7 +935,9 @@ export class NodeRuntime {
     } catch (error) {
       outboxError = `${error.code || error.name}: ${error.message}`;
     }
-    return { ...answer, notes, outboxError };
+    // After the outcome is saved, and unable to change it.
+    const traceError = await this.traceSafely("sent", () => this.traceSent(entry, answer.status, answer.result));
+    return { ...answer, notes, outboxError, traceError };
   }
 
   /** What one answer changes about a message. Certainty only narrows: a delivery settles it, a refusal settles it only when nothing before was left open. */
@@ -827,10 +965,226 @@ export class NodeRuntime {
     entry.status = "attempted";
   }
 
-  /** What has no settled outcome on this machine: sending, unknown, attempted, working. */
+  /**
+   * What has no settled outcome on this machine: working, in flight, or open
+   * after an answer that settles nothing. The question retry asks, so the two
+   * never disagree about one entry, an entry an older client wrote included.
+   */
   outboxPending() {
-    return Object.values(this.outbox).filter((e) => isObject(e) && !["delivered", "refused", "stopped"].includes(e.status))
+    return Object.values(this.outbox).filter((e) => isObject(e) && (["working", "sending"].includes(e.status) || outboxOpen(e)))
       .map((e) => ({ message_id: e.id, to: this.nameForKey(e.to_key) ?? e.to_key, w: e.w, status: e.status, attempts: e.attempts, last_status: e.last_status ?? null, created_at: e.created_at }));
+  }
+
+  /**
+   * The same stored bytes sent again, for one message or for every one worth
+   * sending again: one that left and got no answer that settles it, or one a
+   * rate window or a busy service turned away. The id, the address, the key
+   * and the envelope are the ones stored, so a recipient that keeps what it
+   * has seen marks a second copy as a replay. A delivery, and a refusal the
+   * service will repeat, are not sent again: nothing goes out for them.
+   * Whether the action behind the message is safe to repeat is the
+   * application's agreement with the other side, not this function's.
+   */
+  async outboxRetry(id = null) {
+    const out = [];
+    for (const entry of Object.values(this.outbox)) {
+      if (!isObject(entry) || (id !== null && entry.id !== id) || !outboxRetryable(entry)) continue;
+      let answer;
+      try {
+        answer = await this.deliver(entry, await this.client.planFor(entry.w));
+      } catch (error) {
+        // What was sent again before this one stopped is said with the stop.
+        if (error instanceof Error) error.retried = out;
+        throw error;
+      }
+      const row = { id: entry.id, w: entry.w, status: entry.status, http: answer.status };
+      if (answer.outboxError) {
+        // What the service answered stands. Only the record of it on this
+        // machine failed, and the answer says both.
+        row.outbox_error = answer.outboxError;
+        row.note = answer.status === 201
+          ? "Delivered: aamio stored it. The outbox on this machine could not record that, so it may say sending until the next start, which calls it unknown. Do not send this message again."
+          : "The outbox on this machine could not record this answer, so the entry may say sending until the next start, which calls it unknown.";
+      }
+      if (answer.traceError) row.trace_error = answer.traceError;
+      out.push(row);
+    }
+    return out;
+  }
+
+  /**
+   * One entry dropped once its fate no longer matters. Nothing is retried
+   * after this. A send that is already away cannot be recalled, and the answer
+   * says so rather than reporting a clean stop: the difference decides whether
+   * the caller may compose a replacement. The entry is gone from this runtime
+   * only when it is gone from outbox.json.
+   */
+  async outboxForget(id) {
+    const held = Object.hasOwn(this.outbox, id) && isObject(this.outbox[id]) ? this.outbox[id] : null;
+    const outcome = outboxOutcome(held);
+    if (held !== null) {
+      delete this.outbox[id];
+      try {
+        await this.saveOutbox();
+      } catch (error) {
+        this.outbox[id] = held;
+        throw runtimeError("not_saved", `the outbox could not be written (${error.code || error.message}), so message ${id} is still in it and nothing was dropped. Free the disk, then forget it again.`, { message_id: id, outcome });
+      }
+      this.untold.delete(id);
+    }
+    return { id, forgotten: held !== null, already_sending: !["never_sent", "not_found"].includes(outcome), outcome, note: OUTBOX_NOTES[outcome] };
+  }
+
+  // ------------------------------------------------------------- trace --
+  //
+  // A conversation that goes wrong is hard to take apart from one side. The
+  // trace is what this side can show: for each counterpart, what was sent and
+  // how the service answered, what arrived and whether it opened, as hashes and
+  // shapes and never content. It is diagnostics: whatever goes wrong in it
+  // costs the trace, never the send or the read it records.
+
+  /** A trace that did not happen, said in attention, where a caller looks. The line is given back for the answer it belongs to. */
+  untraced(line) {
+    this.note("trace", "untraced", line + " The sends and reads themselves are unaffected; what is behind is the record of them.");
+    return line;
+  }
+
+  /** update run, and whatever goes wrong in it said as a trace that did not happen. Gives back the line that says so, or null. */
+  async traceSafely(what, update) {
+    try {
+      return (await update()) ?? null;
+    } catch (error) {
+      return this.untraced(`trace ${what}: not recorded: ${error?.name || "Error"}: ${error?.message}`);
+    }
+  }
+
+  /** The record for one key, made when first needed and kept to a bound. */
+  traceBook(key) {
+    let book = this.traces[key];
+    if (!isObject(book)) book = this.traces[key] = { sent: [], received: [], last_read: null, active: 0 };
+    book.active = Math.floor(this.now());
+    const keys = Object.keys(this.traces);
+    if (keys.length > TRACE_KEYS) {
+      const stale = keys.sort((a, b) => (this.traces[a]?.active || 0) - (this.traces[b]?.active || 0)).slice(0, keys.length - TRACE_KEYS);
+      for (const old of stale) if (old !== key) delete this.traces[old];
+    }
+    return book;
+  }
+
+  /**
+   * The two fields a message carries about the conversation it is part of: re,
+   * the message it answers, and seen, the last message from this key that was
+   * read here and could be opened. A trace that cannot say leaves seen out,
+   * and never stops a send.
+   */
+  conversation(key, re = null) {
+    const fields = {};
+    if (re) fields.re = re;
+    const last = isObject(this.traces[key]) ? this.traces[key].last_read : null;
+    if (isObject(last) && isMessageHash(last.sha256)) fields.seen = last.sha256;
+    return fields;
+  }
+
+  /** One answer to one send: what went where, as the service stored it. Once per message id: a retry replaces the row. */
+  async traceSent(entry, status, result) {
+    const key = entry.to_key;
+    if (!key) return null;
+    const stored = status === 201 && isObject(result);
+    const record = traceRow({
+      message_id: entry.id, at: Math.floor(this.now()), w: entry.w, status, outcome: entry.status,
+      seq: stored ? result.seq ?? null : null, sha256: stored ? result.sha256 ?? null : null, sealed: true,
+      ...(isObject(entry.shape) ? entry.shape : {}),
+    }, TRACE_SENT_FIELDS);
+    const book = this.traceBook(key);
+    book.sent = [...book.sent.filter((row) => row.message_id !== record.message_id), record].slice(-TRACE_KEEP);
+    return this.saveTrace();
+  }
+
+  /**
+   * One verified message from a key, as it arrived here. Recorded whether or
+   * not it could be opened, since one that could not is what a trace is for.
+   * Taken as read only when it could: last_read is what the next message to
+   * this key names as seen, and it names a message this side opened, not one
+   * that merely arrived. A replay is neither recorded nor read: its first
+   * arrival was, and an old message sent again must not move seen back to it.
+   * Whether anything changed.
+   */
+  traceReceived(channel, entry) {
+    if (entry.replay) return false;
+    const opened = (entry.format === "text" || entry.format === "json") && !entry.error;
+    const body = opened && isObject(entry.body) ? entry.body : {};
+    const row = traceRow({
+      at: entry.at, channel: channel.label, w: channel.w, seq: entry.seq, sha256: entry.sha256, encrypted: entry.encrypted, format: entry.format,
+      error: entry.error,
+      // What a message held is known only if it opened.
+      fields: opened ? Object.keys(body).sort() : null,
+      text_chars: typeof body.text === "string" ? [...body.text].length : null,
+      re: body.re, seen: body.seen,
+    }, TRACE_RECEIVED_FIELDS);
+    const book = this.traceBook(entry.from_key);
+    if (row.sha256 && book.received.some((held) => held.sha256 === row.sha256)) return false;
+    book.received = [...book.received, row].slice(-TRACE_KEEP);
+    if (opened && entry.verified === true && isMessageHash(entry.sha256)) {
+      book.last_read = traceRow({ sha256: entry.sha256, seq: entry.seq, w: channel.w, at: entry.at }, TRACE_READ_FIELDS);
+    }
+    return true;
+  }
+
+  /** What a read handed over, recorded once the read is written down: a message that was not handed over was not read. */
+  async traceRead(channel, entries) {
+    await this.traceSafely("received", async () => {
+      let changed = false;
+      for (const entry of entries) {
+        if (entry.verified === true && entry.from_key) changed = this.traceReceived(channel, entry) || changed;
+      }
+      return changed ? this.saveTrace() : null;
+    });
+  }
+
+  /** A partner name, a key or a write address, as the key it stands for, or null. */
+  traceKey(who) {
+    const partner = typeof who === "string" ? this.partnerByName(who) : null;
+    if (partner) return partner.key;
+    if (isKey(String(who))) return String(who);
+    return typeof who === "string" && Object.hasOwn(this.state.peers, who) ? this.state.peers[who] : null;
+  }
+
+  /**
+   * What was sent to one counterpart and what came back, as hashes and shapes.
+   * who is a partner name, a key or a write address; without it, one line per
+   * counterpart. Nothing here is content: the sha256 is what the service
+   * stored, byte for byte, so the other side can hold its own trace against
+   * this one.
+   */
+  trace(who = null, limit = 20) {
+    const most = Math.max(1, Math.min(Math.floor(Number(limit) || 20), TRACE_KEEP));
+    if (who === null || who === undefined) {
+      const everyone = [];
+      for (const [key, book] of Object.entries(this.traces)) {
+        if (!isObject(book)) continue;
+        const sent = Array.isArray(book.sent) ? book.sent : [];
+        const received = Array.isArray(book.received) ? book.received : [];
+        everyone.push({
+          with: this.nameForKey(key) ?? key, key, sent: sent.length, received: received.length,
+          last_sent_at: sent.length ? sent[sent.length - 1].at ?? null : null,
+          last_received_at: received.length ? received[received.length - 1].at ?? null : null,
+          no_read_claim: traceView(book, TRACE_KEEP).no_read_claim.length,
+        });
+      }
+      const latest = (row) => Math.max(row.last_sent_at || 0, row.last_received_at || 0);
+      everyone.sort((a, b) => latest(b) - latest(a));
+      return { counterparts: everyone, note: "Name one with who for the messages themselves, as hashes." };
+    }
+    const key = this.traceKey(who);
+    const book = key && Object.hasOwn(this.traces, key) ? this.traces[key] : null;
+    if (!isObject(book)) throw runtimeError("no_trace", `nothing sent to or received from ${who} is recorded here`);
+    const view = traceView(book, most);
+    return {
+      with: this.nameForKey(key) ?? key, key, sent: view.sent, received: view.received,
+      // What this side last read and opened from them: what the next message to them names as seen.
+      last_read: book.last_read ?? null,
+      no_read_claim: view.no_read_claim, note: view.note,
+    };
   }
 
   // ------------------------------------------------------------- board --
@@ -961,10 +1315,12 @@ export class NodeRuntime {
     const body = { post: post.id, reply_to: channel.w, from: this.keys.hash.slice(0, 8) };
     if (text !== null && text !== undefined) body.text = String(text);
     if (data !== null && data !== undefined) body.data = data;
+    Object.assign(body, this.conversation(post.key));
     const entry = await this.outboxAdd(post.w, post.key, this.keys.seal(post.key, JSON.stringify(body)), body);
     const answer = await this.deliver(entry, advice);
     if (answer.status !== 201) {
-      throw runtimeError("send_failed", `answer ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError });
+      const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
+      throw runtimeError("send_failed", `answer ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, retryable, fix });
     }
     const receipt = isObject(answer.result) ? answer.result : {};
     const done = { post: post.id, w: post.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, replies_arrive_on: "board", reply_to: channel.w };
@@ -974,6 +1330,7 @@ export class NodeRuntime {
       done.note = "Delivered: aamio stored it. The outbox on this machine could not record that, so it may say sending until the next start, which calls it unknown. Do not answer again.";
     }
     if (post.key === this.keys.public) done.warning = "You answered your own post. The answer is sealed to your own key, so it reaches nobody but you.";
+    if (answer.traceError) done.trace_error = answer.traceError;
     return done;
   }
 
@@ -1330,6 +1687,10 @@ export class NodeRuntime {
     else if (lastSeq !== null) channel.after = Math.max(channel.after, lastSeq);
     await this.saveRead();
     for (const [state, what] of said) this.note(channel.label, state, what, channel.w);
+    // The trace follows what was handed over: recorded after the read is
+    // written down, in attention when it cannot be, and never on the messages,
+    // which are the size they were weighed at.
+    await this.traceRead(channel, entries);
     return entries;
   }
 

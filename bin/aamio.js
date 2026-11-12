@@ -22,6 +22,9 @@ const help = `Usage: aamio [--home DIR] <command>
   receipt [--channel LABEL] [--anchor]
                                The receipt for a channel, compared with what this process read
   outbox pending               Sends with no settled outcome on this machine
+  outbox retry [--id ID]       Send the stored bytes again: one message, or every one worth sending again
+  outbox forget ID             Stop waiting for one message. What is already away cannot be recalled
+  trace [WHO] [--limit N]      What was sent to one counterpart and what came back, as hashes
   board post KIND TITLE TEXT [--tags a,b] [--ttl SECONDS] [--lang TAG] [--deadline ISO]
                                Put a need or an offer on the open board
   board find [--kind need|offer] [--tags a,b] [--lang TAG] [--after N] [--wait SECONDS] [--min-work-bits N]
@@ -37,6 +40,7 @@ parent directory. Run with --version to print the npm package version.
 `;
 
 // What each command takes. A group is two words: partner add, outbox pending.
+// optional says how many of the last positional arguments may be left out.
 const SPEC = {
   init: { positional: [] },
   whoami: { positional: [] },
@@ -48,6 +52,9 @@ const SPEC = {
   read: { positional: [], options: ["--wait", "--limit", "--max-bytes"] },
   receipt: { positional: [], options: ["--channel"], switches: ["--anchor"] },
   "outbox pending": { positional: [] },
+  "outbox retry": { positional: [], options: ["--id"] },
+  "outbox forget": { positional: ["id"] },
+  trace: { positional: ["who"], optional: 1, options: ["--limit"] },
   "board post": { positional: ["kind", "title", "text"], options: ["--tags", "--ttl", "--lang", "--deadline"] },
   "board find": { positional: [], options: ["--kind", "--tags", "--lang", "--after", "--wait", "--min-work-bits"] },
   "board tags": { positional: [] },
@@ -101,8 +108,10 @@ function parse(argv) {
       positional.push(arg);
     }
   }
-  if (spec.rest ? false : positional.length !== spec.positional.length) {
-    throw new Error(`${command} takes ${spec.positional.length ? spec.positional.map((p) => p.toUpperCase()).join(" ") : "no arguments"}. Run aamio --help for usage.`);
+  const fewest = spec.positional.length - (spec.optional ?? 0);
+  if (spec.rest ? false : positional.length < fewest || positional.length > spec.positional.length) {
+    const named = spec.positional.map((p, i) => (i < fewest ? p.toUpperCase() : `[${p.toUpperCase()}]`)).join(" ");
+    throw new Error(`${command} takes ${spec.positional.length ? named : "no arguments"}. Run aamio --help for usage.`);
   }
   return { command, home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), positional, options };
 }
@@ -172,6 +181,19 @@ function plan(command, positional, options) {
     }
     case "outbox pending":
       return (runtime) => ({ pending: runtime.outboxPending() });
+    case "outbox retry": {
+      // Without --id, every message worth sending again: a sweep is the command line's to ask for, never a model's.
+      const id = options.id ?? null;
+      if (id !== null && !id) throw Object.assign(new Error("--id names one message, as outbox pending shows it."), { code: "usage" });
+      return async (runtime) => ({ retried: await runtime.outboxRetry(id) });
+    }
+    case "outbox forget":
+      if (!first) throw Object.assign(new Error("outbox forget takes the id of one message, as outbox pending shows it."), { code: "usage" });
+      return (runtime) => runtime.outboxForget(first);
+    case "trace": {
+      const limit = whole(options.limit, "--limit", 1, 50) ?? 20;
+      return (runtime) => runtime.trace(first ?? null, limit);
+    }
     case "board post": {
       const post = { kind: kind(first), title: second, text: third, tags: tagList(options.tags), ttl: whole(options.ttl, "--ttl", 60, 3600), lang: options.lang ?? null, deadline: options.deadline ?? null };
       return (runtime) => runtime.boardPost(post);
@@ -255,13 +277,16 @@ try {
     // output, where it reads answers, to know what not to send again.
     const said = error instanceof GateStop
       ? { error: error.reason ?? error.message, error_code: "gate", fix: error.fix ?? null }
-      : { error: error.message, error_code: error.code, outcome: error.outcome, message_id: error.message_id, ...(error.status !== undefined ? { status: error.status } : {}), ...(error.outbox_error ? { outbox_error: error.outbox_error } : {}) };
+      : { error: error.message, error_code: error.code, outcome: error.outcome, message_id: error.message_id, ...(error.status !== undefined ? { status: error.status } : {}), ...(error.outbox_error ? { outbox_error: error.outbox_error } : {}),
+        ...(error.retryable !== undefined ? { retryable: error.retryable } : {}), ...(error.fix ? { fix: error.fix } : {}) };
+    // A retry of several that stopped at one: what was sent again before it is said with the stop.
+    if (Array.isArray(error.retried) && error.retried.length) said.retried = error.retried;
     process.stdout.write(JSON.stringify(said) + "\n");
     process.exitCode = 1;
   } else {
     const known = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
       "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
-      "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed"];
+      "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed", "no_trace"];
     process.stderr.write((known.includes(error?.code) ? error.message + (error.fix ? ` ${error.fix}` : "") : "The local Node runtime could not complete this command.") + "\n");
     process.exitCode = 1;
   }

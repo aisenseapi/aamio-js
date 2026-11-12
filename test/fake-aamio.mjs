@@ -59,7 +59,11 @@ export class FakeAamio {
     };
   }
 
-  /** The next write answers with this status, or with no answer at all for "network". */
+  /**
+   * The next write answers with this status, or with no answer at all: for
+   * "network" nothing is stored, and for "lost" the message is stored and the
+   * answer never arrives, which is the write that leaves a sender not knowing.
+   */
   failNext(what) {
     this.failures.push(what);
   }
@@ -105,7 +109,7 @@ export class FakeAamio {
     if (method === "POST" && parts.length === 1) {
       const failure = this.failures.shift();
       if (failure === "network") throw new TypeError("fetch failed");
-      if (failure) return this.reply(failure, { error: `the test asked for ${failure}`, fix: "none" });
+      if (failure && failure !== "lost") return this.reply(failure, { error: `the test asked for ${failure}`, fix: "none" });
       const thread = this.threads.get(w) ?? this.thread(w);
       const key = this.header(init, "X-Key");
       const sig = this.header(init, "X-Sig");
@@ -117,6 +121,7 @@ export class FakeAamio {
       const message = { seq: thread.messages.length + 1, at: this.time, body, sha256: sha256hex(body), from: verified ? key : null, verified, sealed: isEnvelope(body) };
       if (verified) message.sig = sig;
       thread.messages.push(message);
+      if (failure === "lost") throw new TypeError("fetch failed");
       return this.reply(201, { seq: message.seq, at: message.at, sha256: message.sha256, expire_at: thread.expire_at, verified });
     }
     if (method === "GET" && parts[1] === "receipt") {

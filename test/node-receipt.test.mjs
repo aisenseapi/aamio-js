@@ -234,7 +234,7 @@ test("a read that reaches its limit says so in its own words, and names a channe
   assert.deepEqual((await receiver.read()).map((m) => m.body.text), ["on the older inbox"], "and nothing was passed over");
 });
 
-test("over MCP aamio_read asks for one message's worth per channel unless told, and aamio_receipt is the thirteenth tool", async (t) => {
+test("over MCP aamio_read asks for one message's worth per channel unless told, and aamio_receipt is among the tools", async (t) => {
   const fake = new FakeAamio();
   const { receiver, sender } = await pair(t, fake);
   const call = async (name, args) => {
@@ -246,7 +246,7 @@ test("over MCP aamio_read asks for one message's worth per channel unless told, 
     return JSON.parse(text.trim());
   };
   const tools = (await call("tools/list")).result.tools;
-  assert.equal(tools.length, 13);
+  assert.equal(tools.length, 16);
   assert.ok(tools.some((tool) => tool.name === "aamio_receipt"));
 
   await sender.send("receiver", { text: "over mcp" });
