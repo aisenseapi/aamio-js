@@ -1,0 +1,23 @@
+# Changelog
+
+aamio-qrcast for Node, the add-on. Dates are the day the version was
+committed; it is tagged on release, and the two are the same day. Every entry
+says what changed for somebody using it. The version is the one the add-on has
+for aamio-python and aamio-php, and a number says the same of all three.
+
+## 0.1.1 - 2026-11-12
+
+- The first version for Node. `aamio addon qrcast card`, `show`, `read` and
+  `scan`, and the MCP tools aamio_addon_qrcast_show, aamio_addon_qrcast_read
+  and aamio_addon_qrcast_scan, as in aamio-qrcast 0.1.1 for Python and for
+  PHP: the same manifest, the same answers and exit codes, and the same card,
+  the earshot add-on's, which carries the write address of a scope, exactly 20
+  characters, and never a key. The code is made on this machine, at error
+  correction level M with a quiet zone of four modules, the same code module
+  for module as the other two editions make, and drawn as PNG, SVG or text.
+  zbarimg reads pictures and camera frames here, and ffmpeg takes the frames.
+  aisenseapi.com makes and reads the code when engine aisense is asked for,
+  and is never sent a frame from the camera; when it cannot be reached or
+  cannot do it, the work is done here and the answer says whether the card or
+  the picture had gone there. The package has no dependencies. On contract 2
+  of aamio's add-ons, for an aamio for Node that has `aamio addon`.
