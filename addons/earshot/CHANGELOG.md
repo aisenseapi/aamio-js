@@ -6,10 +6,10 @@ aisenseapi/aamio-earshot, whose changelogs say what each version changed.
 Dates are the day the version was committed. Every entry says what changed for
 somebody using it.
 
-## 0.3.2 - 2026-11-12
+## 0.3.3 - 2026-11-12
 
-- The first version for Node. The same add-on as aamio-earshot 0.3.2 for
-  Python and aisenseapi/aamio-earshot 0.3.2 for PHP, with the same manifest:
+- The first version for Node. The same add-on as aamio-earshot 0.3.3 for
+  Python and aisenseapi/aamio-earshot 0.3.3 for PHP, with the same manifest:
   `aamio addon earshot card`, `broadcast`, `listen` and `decode`, and the MCP
   tools aamio_addon_earshot_broadcast, aamio_addon_earshot_listen and
   aamio_addon_earshot_decode. A card is the write address of a scope, exactly

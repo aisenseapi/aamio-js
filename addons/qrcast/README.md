@@ -29,8 +29,8 @@ aamio addon enable qrcast
 ```
 
 With another home, the folder is `addon-packages/npm` under it. The package
-has no dependencies and no install scripts. It needs an aamio for Node that
-has `aamio addon`, Node 20 or later, and two programs for reading: zbarimg,
+has no dependencies and no install scripts. It needs aamio 0.7.0 or later
+for Node, the first that runs add-ons, Node 20 or later, and two programs for reading: zbarimg,
 which reads the codes, and ffmpeg, which takes frames from the camera.
 
 | System | zbarimg | ffmpeg |

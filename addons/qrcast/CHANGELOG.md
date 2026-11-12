@@ -5,11 +5,11 @@ committed; it is tagged on release, and the two are the same day. Every entry
 says what changed for somebody using it. The version is the one the add-on has
 for aamio-python and aamio-php, and a number says the same of all three.
 
-## 0.1.1 - 2026-11-12
+## 0.1.2 - 2026-11-12
 
 - The first version for Node. `aamio addon qrcast card`, `show`, `read` and
   `scan`, and the MCP tools aamio_addon_qrcast_show, aamio_addon_qrcast_read
-  and aamio_addon_qrcast_scan, as in aamio-qrcast 0.1.1 for Python and for
+  and aamio_addon_qrcast_scan, as in aamio-qrcast 0.1.2 for Python and for
   PHP: the same manifest, the same answers and exit codes, and the same card,
   the earshot add-on's, which carries the write address of a scope, exactly 20
   characters, and never a key. The code is made on this machine, at error
@@ -20,4 +20,4 @@ for aamio-python and aamio-php, and a number says the same of all three.
   and is never sent a frame from the camera; when it cannot be reached or
   cannot do it, the work is done here and the answer says whether the card or
   the picture had gone there. The package has no dependencies. On contract 2
-  of aamio's add-ons, for an aamio for Node that has `aamio addon`.
+  of aamio's add-ons, for aamio 0.7.0 or later for Node.

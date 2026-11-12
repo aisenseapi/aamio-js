@@ -2,6 +2,7 @@
 // of a channel's address to whoever is to write there. Against the fake aamio in memory. The same over the real
 // service, with aamio-python and aamio-php on the other side, is in code/php/tools/check-node-exchange.py.
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -541,4 +542,12 @@ test("on the command line: what can be seen to be wrong about a channel is refus
   }
   assert.equal(existsSync(unused), false);
   assert.deepEqual(await readdir(root), []);
+});
+
+test("the tool says what a close does not do: the address is not closed", () => {
+  // The words are the server's own, read from its source: the same sentence aamio-python and aamio-php give.
+  const source = readFileSync(new URL("../src/node-mcp.js", import.meta.url), "utf8");
+  const line = source.split("\n").find((text) => text.includes('description: "Close a channel before it expires.'));
+  assert.ok(line.includes("The address is not closed: whoever still holds it can write there afterwards, which opens a new thread with no list and no gate, the writer is answered that it was stored, and nobody reads it."));
+  assert.equal(line.includes("gone for everyone"), false);
 });

@@ -143,7 +143,7 @@ const RUNTIME_TOOLS = [
   },
   {
     name: "aamio_close_channel",
-    description: "Close a channel before it expires. The thread is gone for everyone holding its address, and no receipt can be taken afterwards. The answer says whether the service deleted it and whether it left this home: when the service does not say the thread is gone, the channel is kept and still read, so nothing written there is lost unseen.",
+    description: "Close a channel before it expires. The thread is deleted with what was written on it, and no receipt can be taken afterwards. The address is not closed: whoever still holds it can write there afterwards, which opens a new thread with no list and no gate, the writer is answered that it was stored, and nobody reads it. So tell whoever writes there before closing. The answer says whether the service deleted it and whether it left this home: when the service does not say the thread is gone, the channel is kept and still read, so nothing written there is lost unseen.",
     inputSchema: schema({ label: { type: "string", description: "the channel's label, as aamio_channels shows it" } }, ["label"]),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },

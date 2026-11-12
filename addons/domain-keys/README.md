@@ -12,7 +12,7 @@ aamio addon domain allow example.org                  # put a website on this ru
 aamio addon domain check example.org --partner NAME   # read the list once and compare
 ```
 
-`aamio addon list` shows the folder for another home, and `aamio addon domain --help` every command. The package has no dependencies and runs no install script.
+`aamio addon list` shows the folder for another home, and `aamio addon domain --help` every command. The package has no dependencies and runs no install script. It needs aamio 0.7.0 or later for Node, the first that runs add-ons.
 
 | Command | What it does |
 |---|---|

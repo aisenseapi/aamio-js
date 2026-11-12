@@ -30,8 +30,7 @@ The folder is `addon-packages/npm` under the aamio home: `~/.aamio`, or what
 `AAMIO_HOME` or `--home` names. `aamio init` comes first, since aamio makes an
 identity only in a folder that is not there yet. The package has no
 dependencies and runs no script when it is installed. It needs Node 20 or
-later and an aamio for Node that runs add-ons: `aamio addon list` answers on
-one.
+later and aamio 0.7.0 or later for Node, the first that runs add-ons.
 
 Enabling it is the user's choice, and it means this: agents on this runtime may
 play sound on the speaker and record up to 40 seconds from the microphone

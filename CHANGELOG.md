@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.7.0 - 2026-11-12
 
 - The outbox is settled from Node. `outbox retry [--id ID]` and
   `aamio_outbox_retry` send the stored bytes of a message again, with the same
@@ -77,6 +77,10 @@ not what moved in the source.
 - Channels past their time leave the home. Every inbox a home ever had stayed
   in `state.json`, which was written again at each save.
 - The local server has twenty-four tools.
+- `aamio_close_channel` and the README say what a close does not do: the
+  address is not closed. Whoever still holds it can write there afterwards,
+  which opens a new thread with no list and no gate that nobody reads, and
+  the writer is answered that it was stored.
 - Add-ons run in the Node runtime, on contract 2 of aamio's add-ons, the one
   aamio-python and aamio-php speak. An add-on is an npm package of its own
   with a manifest, installed in the home's own folder, `addon-packages/npm`,
