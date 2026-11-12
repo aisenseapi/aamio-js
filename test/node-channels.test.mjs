@@ -672,3 +672,22 @@ test("a sealed message with a byte order mark in front is text, as the other two
   const [plain] = await owner.read();
   assert.deepEqual([plain.format, plain.body.channel, owner.state.peers[offered.w]], ["json", offered.w, guest.keys.public]);
 });
+
+test("on the command line the address book is answered as an object, as the other two runtimes answer it", async (t) => {
+  const fake = new FakeAamio({ now: Math.floor(Date.now() / 1000) });
+  const { owner, guest, homeA } = await pair(t, fake);
+  const friend = Keys.generate().public;
+  await owner.close();
+  await guest.close();
+  const { cli } = await serveFake(t, fake);
+  const said = (run) => {
+    assert.equal(run.status, 0, run.stderr);
+    return JSON.parse(run.stdout);
+  };
+  const listed = said(await cli(homeA, "partner", "list"));
+  assert.deepEqual([Object.keys(listed), listed.partners.map((row) => [row.name, Object.keys(row)])], [["partners"], [["guest", ["name", "key", "hash_prefix"]]]]);
+  const added = said(await cli(homeA, "partner", "add", "friend", friend));
+  assert.deepEqual([added.partner, added.key, added.partners.map((row) => row.name)], ["friend", friend, ["guest", "friend"]], "and a change says the book as it is after it");
+  assert.ok("inbox" in added && "rotated" in added);
+  assert.deepEqual(Object.keys(said(await cli(homeA, "channel", "list"))), ["channels"]);
+});

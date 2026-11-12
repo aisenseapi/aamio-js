@@ -58,6 +58,11 @@ not what moved in the source.
   handed over, a send that was delivered or a post that was made into a
   failure: it is said in `attention` as `archive_failed`, or as `archive_error`
   on the answer.
+- `partner list` on the command line answers with an object, `{"partners":
+  [...]}`, as aamio-python does and as `aamio_partners` does over the local
+  server. **This changes what a script reads:** it was a bare list. `partner
+  add` says the address book after the change as well, in `partners`, as the
+  other two runtimes do.
 - A file of the home with a byte order mark in front, as an editor on Windows
   may save it, is read past the mark wherever the home is read: the state,
   the archive's policy and files, the list of enabled add-ons and an add-on's

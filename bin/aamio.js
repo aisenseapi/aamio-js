@@ -217,11 +217,14 @@ function jsonData(value) {
 function plan(command, positional, options) {
   const [first, second, third] = positional;
   switch (command) {
+    // The address book is answered as an object, with the book after a change
+    // beside what the change did, as aamio-python and aamio-php answer and as
+    // the local server does. partner list was a bare list here.
     case "partner add":
       checkPartner(first, second);
-      return (runtime) => runtime.partnerAdd(first, second);
+      return async (runtime) => ({ ...(await runtime.partnerAdd(first, second)), partners: runtime.partnerList() });
     case "partner list":
-      return (runtime) => runtime.partnerList();
+      return (runtime) => ({ partners: runtime.partnerList() });
     case "lookup": {
       const wait = whole(options.wait, "--wait", 0, 25) ?? 0;
       return (runtime) => runtime.lookup(positional.length ? positional : null, wait);
