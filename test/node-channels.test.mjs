@@ -697,6 +697,40 @@ test("on the command line the address book is answered as an object, as the othe
   assert.deepEqual([twice.known, twice.partners.map((row) => row.name)], [false, ["guest"]]);
 });
 
+test("the inbox that named a removed key is read until it expires: a partner still in the book arrives there, the removed key does not", async (t) => {
+  const fake = new FakeAamio();
+  const { a: homeA, b: homeB, c: homeC, open } = await fixture(t, fake, "a", "b", "c");
+  const owner = await open(homeA);
+  const stays = await open(homeB);
+  const leaves = await open(homeC);
+  await owner.partnerAdd("stays", stays.keys.public);
+  await owner.partnerAdd("leaves", leaves.keys.public);
+  await owner.read();
+  const old = owner.channel("inbox");
+  assert.deepEqual([...old.allow].sort(), [stays.keys.public, leaves.keys.public].sort());
+  const removed = await owner.partnerRemove("leaves");
+  assert.deepEqual([removed.rotated, removed.old_inbox.w, removed.old_inbox.muted], [true, old.w, true]);
+  await owner.attentionTaken();
+
+  // Both still have the old address, as a partner has until it learns the new one.
+  await stays.client.send(old.w, { text: "from a partner who stays" }, { encryptTo: owner.keys.public });
+  await leaves.client.send(old.w, { text: "from the key that was removed" }, { encryptTo: owner.keys.public });
+  const read = await owner.read();
+  assert.deepEqual(read.map((m) => [m.sender, m.body?.text]), [["stays", "from a partner who stays"]], "what a partner still in the book writes to the old inbox arrives, and only that");
+  const said = (await owner.attentionTaken()).filter((note) => note.state === "removed_key");
+  assert.equal(said.length, 1, "and the one from the removed key is said, never dropped in silence");
+  assert.equal(said[0].w, old.w);
+  assert.match(said[0].what, /1 message\(s\) \(seq 2\) are signed by a key that is no longer in the address book/);
+  assert.equal(owner.state.channels.find((channel) => channel.w === old.w).after, 2, "the cursor moves past it, or it is withheld again on every read");
+  assert.deepEqual(await owner.read(), [], "and it is not handed over later");
+
+  // Taken back into the book: what the key writes there from then on arrives.
+  await owner.partnerAdd("leaves", leaves.keys.public);
+  await leaves.client.send(old.w, { text: "back in the book" }, { encryptTo: owner.keys.public });
+  const again = await owner.read();
+  assert.deepEqual(again.map((m) => [m.sender, m.body?.text]), [["leaves", "back in the book"]]);
+});
+
 test("partner remove takes a partner out of the book and out of the inbox, as the other two runtimes do", async (t) => {
   const fake = new FakeAamio();
   const { owner, guest, homeA } = await pair(t, fake);
@@ -712,7 +746,7 @@ test("partner remove takes a partner out of the book and out of the inbox, as th
   assert.notEqual(inbox.w, before.w);
   assert.deepEqual(inbox.allow, ["*"], "the last partner gone: signed writes from any key, not unsigned ones from anyone");
   assert.deepEqual([removed.old_inbox.w, removed.old_inbox.muted], [before.w, true]);
-  assert.equal(owner.state.channels.find((channel) => channel.w === before.w).muted, true, "and the inbox that named the key is read no more");
+  assert.equal(owner.state.channels.find((channel) => channel.w === before.w).muted, true, "and the inbox that named the key is marked so");
 
   // A name nobody has changes nothing.
   assert.deepEqual(await owner.partnerRemove("nobody"), { partner: "nobody", known: false, inbox: inbox.w });

@@ -815,8 +815,10 @@ export class NodeRuntime {
    * A partner out of the address book, and out of the inbox at once, as
    * aamio-python and aamio-php do it. Forgetting the name is not a
    * revocation: the service takes the removed key's writes to the old address
-   * until that thread expires. So the inbox that named the key is read no
-   * more, and a new one opens without it. Once the last partner is gone the
+   * until that thread expires. So a new inbox opens without the key, and the
+   * one that named it is read until it expires for the partners still in the
+   * book, who may not have the new address yet, while what the removed key
+   * writes there is not handed over. Once the last partner is gone the
    * new inbox takes signed writes from any key rather than unsigned writes
    * from anyone at an address the partners were given. The name finds the
    * partner the way a send does, apart from upper and lower case when only
@@ -1093,7 +1095,7 @@ export class NodeRuntime {
     return taken;
   }
 
-  /** A new inbox with the address book as it is now. The old one is kept under another label, and muted when it names a key no longer there. */
+  /** A new inbox with the address book as it is now. The old one is kept under another label, and marked muted when it names a key no longer there. */
   async rotateInbox(reason, { caller = false } = {}) {
     const old = this.channel("inbox");
     let wanted = this.wantedAllow();
@@ -1147,7 +1149,14 @@ export class NodeRuntime {
     return outcome;
   }
 
-  /** Every older inbox that names a key no longer in the address book is read no more. That is this side's delivery stopping, not a revocation. */
+  /**
+   * Every older inbox that names a key no longer in the address book is marked
+   * muted. It is still read until it expires: what the partners still in the
+   * book write there is handed over, and what a removed key writes there is
+   * not. Read no more, a partner that had not yet learned the new address
+   * wrote where nobody read (a check of 12 November 2026). It is this side's
+   * delivery stopping for that key, not a revocation.
+   */
   muteGenerations(reason) {
     const partners = new Set(this.partners.map((p) => p.key));
     const muted = [];
@@ -1157,9 +1166,22 @@ export class NodeRuntime {
       if (!gone.length) continue;
       channel.muted = true;
       muted.push(channel.w);
-      this.note(channel.label, "muted", `inbox ${channel.w} is read no more after ${reason}: ${gone.length} removed key(s) can still write there until ${channel.expire_at}, and nothing from there is delivered`, channel.w);
+      this.note(channel.label, "muted", `inbox ${channel.w} names ${gone.length} key(s) no longer in the address book after ${reason}. They can still write there until ${channel.expire_at}, and what they write is not handed over; what the partners still in the book write there is read until then.`, channel.w);
     }
     return muted;
+  }
+
+  /**
+   * Whether a message on this channel is signed by a key that has left the
+   * address book: on an inbox that named the key, which is read on for the
+   * partners still in the book. Judged message by message against the book
+   * as it is, so a key taken back in is read again.
+   */
+  leftTheBook(channel, key) {
+    if (!isObject(channel) || typeof key !== "string" || !String(channel.label).startsWith("inbox")) return false;
+    const allow = channel.allow || [];
+    if (allow.includes("*") || !allow.includes(key)) return false;
+    return !this.partners.some((p) => p.key === key);
   }
 
   /** The inbox, opened again when it is gone, about to expire, or no longer matches the address book. */
@@ -2409,7 +2431,6 @@ export class NodeRuntime {
    * one before it redelivers what the stored hashes then mark as replays.
    */
   async poll(channel, wait = 0, limit = null, maxBytes = null) {
-    if (channel.muted) return [];
     const before = { after: channel.after, created_at: channel.created_at, instance: channel.instance ?? null, expire_at: channel.expire_at, gone: channel.gone, seen: [...channel.seen], seen_from: [...(channel.seen_from ?? [])], peers: { ...this.state.peers } };
     try {
       return await this.pollOnce(channel, wait, limit, true, maxBytes);
@@ -2548,6 +2569,9 @@ export class NodeRuntime {
 
     const entries = [];
     const keptOut = [];
+    // Messages signed by a key that has left the address book, on an inbox
+    // that named it: passed by like the ones the list keeps out, and said.
+    const withheld = [];
     let lastSeq = null;
     // The budget is kept here as well, for what is handed over, measured as it
     // is handed over. The service counts its own form of each message, which is
@@ -2573,6 +2597,7 @@ export class NodeRuntime {
       const entry = this.readEntry(channel, raw);
       const allow = channel.allow || [];
       const excluded = allow.length > 0 && !(entry.verified && (allow.includes("*") || allow.includes(entry.from_key)));
+      const gone = !excluded && entry.verified === true && this.leftTheBook(channel, entry.from_key);
       // What the message's addresses would bind is worked out before it is
       // weighed, so a conflict it carries is counted with it, and bound only when
       // it is taken: a conflict added after the weighing let 1146 bytes through a
@@ -2581,7 +2606,7 @@ export class NodeRuntime {
       // A scope in the message: its key comes out here, before the message is
       // weighed, observed or shown, and goes to scopes.json or nowhere.
       let share = null;
-      if (!excluded) {
+      if (!excluded && !gone) {
         share = this.scopeSharePlan(entry);
         if (isObject(entry.body) && entry.verified && entry.from_key) {
           for (const field of ["reply_to", "channel"]) {
@@ -2614,6 +2639,10 @@ export class NodeRuntime {
       lastSeq = lastSeq === null ? entry.seq : Math.max(lastSeq, entry.seq);
       if (excluded) {
         keptOut.push(entry.seq);
+        continue;
+      }
+      if (gone) {
+        withheld.push(entry.seq);
         continue;
       }
       if (entry.sha256 !== null) remember(channel, entry.sha256, entry.from_key);
@@ -2663,13 +2692,16 @@ export class NodeRuntime {
       const openedFor = (channel.allow || []).includes("*") ? "any key, signed only" : `${channel.allow.length} named key(s)`;
       said.push(["kept_out", `${keptOut.length} message(s) (seq ${keptOut.join(", ")}): this channel was opened for ${openedFor}, and these did not satisfy that list as checked here. They are not handed over.`]);
     }
+    if (withheld.length) {
+      said.push(["removed_key", `${withheld.length} message(s) (seq ${withheld.join(", ")}) are signed by a key that is no longer in the address book, on an inbox that was given to it. They are not handed over and not archived. Add the key as a partner again to take what it writes from then on.`]);
+    }
     if (oversized) {
       said.push(["over_budget", `message ${oversized.seq} on this channel is ${oversized.weight} bytes as handed over here, larger than the whole byte budget of ${maxBytes} this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.`]);
     }
     // Rows the service sent that this read left because its own limit was
     // reached: a service that does not take X-Limit sends them all, and the read
     // that stopped on its own said nothing (a review of 10 November 2026).
-    const leftHere = !stoppedAtBudget && limit !== null && entries.length >= limit && data.messages.length > entries.length + keptOut.length;
+    const leftHere = !stoppedAtBudget && limit !== null && entries.length >= limit && data.messages.length > entries.length + keptOut.length + withheld.length;
     if (stoppedAtBudget) {
       said.push(["more", `this read stopped at the byte budget it asked for, ${maxBytes} bytes of messages as they are handed over here, and left the rest at the service. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest.`]);
     } else if (leftHere || (data.more === true && !isObject(data.too_large))) {
@@ -2832,7 +2864,8 @@ export class NodeRuntime {
       const known = this.state.channels.find((c) => isObject(c) && c.w === w);
       if (!known || Number(known.expire_at) + RECEIPT_KEEP < now) this.observed.delete(w);
     }
-    const channels = this.state.channels.filter((c) => isObject(c) && !c.muted && Number(c.expire_at) > now)
+    // A muted inbox too: it is read until it expires, for the partners still in the book.
+    const channels = this.state.channels.filter((c) => isObject(c) && Number(c.expire_at) > now)
       .sort((a, b) => (a.label === "inbox" ? -1 : b.label === "inbox" ? 1 : 0));
     const messages = [];
     // A channel this read had no room left to ask is named, as aamio-python

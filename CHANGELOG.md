@@ -58,6 +58,12 @@ not what moved in the source.
   handed over, a send that was delivered or a post that was made into a
   failure: it is said in `attention` as `archive_failed`, or as `archive_error`
   on the answer.
+- After `partner remove`, the inbox that named the removed key is read until it
+  expires, as in aamio-python and aamio-php from the same release. What the
+  partners still in the book write there is handed over; what the removed key
+  writes there is not, and a read says how many in `removed_key`. The whole
+  inbox was read no more, so a partner that had not yet learned the new
+  address wrote where nobody read, and nothing said so.
 - A post asked for as long as an inbox lives, `--ttl 3600`, leaves its inbox
   30 seconds for the work the board advises and the round trip, as
   aamio-python and aamio-php do from the same release. It left none, and the
