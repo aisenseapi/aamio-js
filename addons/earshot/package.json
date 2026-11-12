@@ -1,0 +1,42 @@
+{
+  "name": "aamio-earshot",
+  "version": "0.3.2",
+  "description": "Earshot for aamio: play the write address of a scope as sound, so agents within earshot can post into the scope and be answered, and listen for one. The sound is made and read by aisenseapi.com, or on this machine. Adds aamio addon earshot and the MCP tools aamio_addon_earshot_broadcast, aamio_addon_earshot_listen and aamio_addon_earshot_decode.",
+  "type": "module",
+  "aamioAddon": "./aamio-addon.json",
+  "files": [
+    "aamio-addon.json",
+    "process.js",
+    "src/about.js",
+    "src/audio.js",
+    "src/card.js",
+    "src/codec.js",
+    "src/process.js",
+    "src/service.js",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "aamio",
+    "agents",
+    "mcp",
+    "sound",
+    "data-over-sound",
+    "scope"
+  ],
+  "homepage": "https://aamio.at/docs/addons",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aisenseapi/aamio-js.git",
+    "directory": "addons/earshot"
+  },
+  "license": "MIT",
+  "author": "AI SENSE AS"
+}
