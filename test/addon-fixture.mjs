@@ -35,6 +35,11 @@ if (short === "garbage") {
   await new Promise((resolve) => process.stdout.write("not json\\n", resolve));
   process.exit(0);
 }
+if (short === "marked") {
+  // A whole answer with a byte order mark in front of it.
+  await new Promise((resolve) => process.stdout.write(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify({ result: { status: "ok" } }))]), resolve));
+  process.exit(0);
+}
 if (short === "bytes") {
   await say({ raw: Buffer.from("raw\\n").toString("base64") });
   process.exit(0);

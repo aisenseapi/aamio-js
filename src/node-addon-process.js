@@ -209,7 +209,9 @@ export function run(manifest, kind, name, args, { subject = null, ownKey = null,
       if (stderr !== null && text) stderr(text);
       let answer;
       try {
-        answer = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(out)));
+        // The mark is kept, so an answer with a byte order mark in front is
+        // not JSON here, as it is not in aamio-python and aamio-php.
+        answer = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(out)));
         if (!isObject(answer)) throw new Error("not an object");
       } catch {
         const said = text.trim().split(/\r?\n/).filter(Boolean);

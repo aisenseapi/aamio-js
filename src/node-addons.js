@@ -673,7 +673,9 @@ const unreadable = (path, manifest) => new Refused("hosts_unreadable", `${path} 
 async function readHosts(path, manifest) {
   let rows;
   try {
-    rows = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path)));
+    // The mark is kept: a list with a byte order mark in front cannot be read
+    // by aamio-python or aamio-php, and is not read here as if it were whole.
+    rows = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await readFile(path)));
   } catch (error) {
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw unreadable(path, manifest);

@@ -410,6 +410,10 @@ test("a process that sleeps, dies or talks nonsense is an answer, and the next c
   assert.match(crashed.result.fix, /the add-on demo2 exited with code 3 and gave no answer this aamio can read\. Reinstall it, or aamio addon disable demo2 to go on without it\./);
   const garbage = await run(manifest, "command", "garbage", {});
   assert.match(garbage.result.fix, /exited with code 0 and gave no answer this aamio can read/);
+  // A byte order mark in front of an answer that is whole otherwise: not JSON, here as in aamio-python and aamio-php.
+  const marked = await run(manifest, "command", "marked", {});
+  assert.deepEqual([marked.exit_code, marked.is_error, marked.result.reason], [5, true, "addon_failed"]);
+  assert.match(marked.result.fix, /exited with code 0 and gave no answer this aamio can read/);
   const bad = await run(manifest, "command", "badbytes", {});
   assert.match(bad.result.fix, /answered with raw bytes that are not base64/);
   // A script that is not there any more, between the list and the call.
@@ -509,7 +513,10 @@ test("the list of websites is the core's: one host each, read as it is, and an e
   // The list is beside the add-on's own directory, not in it.
   assert.equal(hostsFile(home, manifest), join(home, "addons", "demo2.hosts.json"));
   // A list that cannot be read is no list at all, and never an empty one.
-  for (const text of ["{ nope", JSON.stringify({ hosts: [] }), JSON.stringify(["Example.org"]), JSON.stringify(["ok.example", 7])]) {
+  // With a byte order mark in front, a list that is whole otherwise: aamio-python and aamio-php cannot read it.
+  const marked = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(["ok.example"]))]).toString("utf8");
+  assert.equal(marked.charCodeAt(0), 0xfeff);
+  for (const text of ["{ nope", JSON.stringify({ hosts: [] }), JSON.stringify(["Example.org"]), JSON.stringify(["ok.example", 7]), marked]) {
     await writeFile(hostsFile(home, manifest), text);
     await assert.rejects(() => allowedHosts(runtime, manifest), (error) => error instanceof Refused && error.reason === "hosts_unreadable");
     const stopped = await runCommand(manifest, parseCommand(manifest, ["allow", "new.example"]), runtime);
