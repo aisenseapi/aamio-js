@@ -620,6 +620,9 @@ test("a message made of thousands of field names does not make the trace large",
   // And a file that already holds such a row is cut to the same bound when it is read.
   const long = normalizeTraces({ [stranger.keys.public]: { sent: [], received: [{ sha256: "a".repeat(64), fields: Object.keys(body) }], last_read: null, active: 1 } });
   assert.equal(long[stranger.keys.public].received[0].fields.length, TRACE_FIELDS);
+  // A name is measured in characters, as aamio-python and aamio-php measure it: sixty-four of an emoji are 128 units.
+  const counted = normalizeTraces({ [stranger.keys.public]: { sent: [], received: [{ sha256: "a".repeat(64), fields: ["\u{1F600}".repeat(64), "\u{1F600}".repeat(65), "text"] }], last_read: null, active: 1 } });
+  assert.deepEqual(counted[stranger.keys.public].received[0].fields, ["text", "\u{1F600}".repeat(64)]);
 });
 
 test("trace.json as the other runtimes write it is read as it is, and written back the same", async (t) => {

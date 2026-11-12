@@ -15,7 +15,8 @@ import { isKey } from "./aamio.js";
 
 export const TRACE_KEEP = 50;
 export const TRACE_KEYS = 100;
-// How many field names a row keeps, and how long a name may be. The names of a
+// How many field names a row keeps, and how long a name may be, in characters,
+// as aamio-python and aamio-php count them. The names of a
 // message that arrived are its sender's to choose: one message of the largest
 // size can carry thousands of them, fifty such from one key were megabytes in a
 // file that is written again at every read, and a board inbox takes any signed
@@ -52,7 +53,12 @@ export const TRACE_READ_FIELDS = { sha256: "hash", seq: "int", w: "string", at: 
 
 function traceValue(kind, value) {
   if (kind === "hash") return isMessageHash(value) ? value : null;
-  if (kind === "list") return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.length <= TRACE_FIELD_CHARS).sort().slice(0, TRACE_FIELDS) : null;
+  if (kind === "list") {
+    if (!Array.isArray(value)) return null;
+    // length counts UTF-16 units, never fewer than the characters: only a name longer than that is counted again.
+    const short = (item) => typeof item === "string" && (item.length <= TRACE_FIELD_CHARS || [...item].length <= TRACE_FIELD_CHARS);
+    return value.filter(short).sort().slice(0, TRACE_FIELDS);
+  }
   if (kind === "int") return Number.isInteger(value) ? value : null;
   if (kind === "bool") return typeof value === "boolean" ? value : null;
   return typeof value === "string" ? value : null;
