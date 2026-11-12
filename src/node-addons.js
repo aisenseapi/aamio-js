@@ -331,6 +331,11 @@ export async function readManifest(row) {
     throw new AddonError(`the add-on ${row.distribution} is written for contract ${JSON.stringify(number ?? null)} of aamio's add-ons, and this aamio (${CORE_VERSION} for Node) knows ${KNOWN_CONTRACTS.join(" and ")}, a process of the add-on's own for each call. Upgrade aamio, or install a version of the add-on for this one; ${fix} goes on without it.`);
   }
   const manifest = new Manifest(row.distribution, path, data, fix);
+  // One package, one version: the list shows it before the add-on is enabled,
+  // and the probe holds the process to it afterwards.
+  if (row.version !== manifest.version) {
+    throw new AddonError(`${row.distribution} cannot be used as an add-on: its manifest says version ${manifest.version} and its package.json ${row.version ?? "none"}. Reinstall it, or ${fix} to go on without it.`);
+  }
   manifest.entry = await inside(row, manifest.script, "the script its manifest names under process.node", fix);
   return manifest;
 }

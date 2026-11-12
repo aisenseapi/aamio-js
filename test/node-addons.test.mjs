@@ -181,6 +181,7 @@ test("enable refuses what cannot be used, records nothing, and the list says wha
     [{ manifest: { ...manifestFor("demo2"), environment: ["AAMIO_HOME"] } }, /environment in its manifest asks for AAMIO_HOME, which no add-on gets/, true, 0],
     [{ manifest: { ...manifestFor("demo2"), environment: ["lower"] } }, /environment in its manifest is not a list of variable names/, true, 0],
     [{ manifest: { ...manifestFor("demo2"), deadline_seconds: 121 } }, /deadline_seconds in its manifest is not a whole number from 1 to 120/, true, 0],
+    [{ manifest: manifestFor("demo2", { version: "0.0.3" }) }, /its manifest says version 0\.0\.3 and its package\.json 0\.0\.2/, true, 0],
     [{ manifest: { ...manifestFor("demo2", { hosts: false }), commands: { see: { arguments: [{ name: "site", host: true }] } } } }, /the argument site of the command see is a host, and the manifest has no hosts/, true, 0],
     [{ manifest: { ...manifestFor("demo2"), commands: { allow: {} } } }, /its manifest has a command allow, which aamio provides for an add-on with hosts/, true, 0],
     [{ manifest: { ...manifestFor("demo2", { hosts: false }), tools: [{ name: "aamio_whoami", description: "taken", inputSchema: { type: "object" } }] } }, /the tool aamio_whoami is offered by the core and by demo2-pkg/, false, 0],
