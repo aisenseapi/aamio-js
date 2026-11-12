@@ -285,6 +285,12 @@ test("what addons.json says and cannot say, and a list of packages that cannot b
   }
   await rm(join(home, "addons.json"));
   await enable(home, "demo2", { ...core, probe });
+  // The home's list with a byte order mark in front, as an editor may save it, is read past the mark.
+  const whole = await readFile(join(home, "addons.json"));
+  await writeFile(join(home, "addons.json"), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), whole]));
+  assert.deepEqual(await enabledNames(home), ["npm:demo2-pkg"]);
+  assert.deepEqual((await describe(home, core)).addons.map((row) => [row.name, row.enabled]), [["demo2", true]]);
+  await writeFile(join(home, "addons.json"), whole);
   await writeFile(join(addonRoot(home), "package.json"), "{ nope");
   await refusedWith(() => installed(home), /package\.json could not be read/);
   const said = await describe(home, core);
@@ -513,10 +519,15 @@ test("the list of websites is the core's: one host each, read as it is, and an e
   // The list is beside the add-on's own directory, not in it.
   assert.equal(hostsFile(home, manifest), join(home, "addons", "demo2.hosts.json"));
   // A list that cannot be read is no list at all, and never an empty one.
-  // With a byte order mark in front, a list that is whole otherwise: aamio-python and aamio-php cannot read it.
-  const marked = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(["ok.example"]))]).toString("utf8");
-  assert.equal(marked.charCodeAt(0), 0xfeff);
-  for (const text of ["{ nope", JSON.stringify({ hosts: [] }), JSON.stringify(["Example.org"]), JSON.stringify(["ok.example", 7]), marked]) {
+  // A byte order mark an editor left in front of a list that is whole otherwise is passed: the list is a file of
+  // the home, and the three runtimes read it the same. Two marks are one too many.
+  const mark = Buffer.from([0xef, 0xbb, 0xbf]);
+  await writeFile(hostsFile(home, manifest), Buffer.concat([mark, Buffer.from(JSON.stringify(["ok.example"]))]));
+  assert.deepEqual(await allowedHosts(runtime, manifest), ["ok.example"]);
+  assert.deepEqual((await allowHost(runtime, manifest, "more.example")).hosts, ["ok.example", "more.example"]);
+  assert.equal((await readFile(hostsFile(home, manifest))).subarray(0, 3).equals(mark), false, "and the next write leaves the list without the mark");
+  const twice = Buffer.concat([mark, mark, Buffer.from(JSON.stringify(["ok.example"]))]).toString("utf8");
+  for (const text of ["{ nope", JSON.stringify({ hosts: [] }), JSON.stringify(["Example.org"]), JSON.stringify(["ok.example", 7]), twice]) {
     await writeFile(hostsFile(home, manifest), text);
     await assert.rejects(() => allowedHosts(runtime, manifest), (error) => error instanceof Refused && error.reason === "hosts_unreadable");
     const stopped = await runCommand(manifest, parseCommand(manifest, ["allow", "new.example"]), runtime);

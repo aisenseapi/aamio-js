@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { isAbsolute, join, relative, sep } from "node:path";
+import { pastMark } from "./node-archive.js";
 import { holdFile } from "./node-lock.js";
 
 /*
@@ -356,7 +357,7 @@ export async function enabledNames(home) {
   const path = enabledFile(home);
   let data;
   try {
-    data = JSON.parse(await readFile(path, "utf8"));
+    data = JSON.parse(pastMark(await readFile(path, "utf8")));
   } catch (error) {
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
     throw new AddonError(`${path} could not be read: ${error.code || error.message}. Fix or remove the file; it lists the add-ons enabled here, one name each under "enabled".`);
@@ -673,9 +674,9 @@ const unreadable = (path, manifest) => new Refused("hosts_unreadable", `${path} 
 async function readHosts(path, manifest) {
   let rows;
   try {
-    // The mark is kept: a list with a byte order mark in front cannot be read
-    // by aamio-python or aamio-php, and is not read here as if it were whole.
-    rows = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await readFile(path)));
+    // A file of the home: read past a byte order mark at its start, as the
+    // other two runtimes read it. Bytes that are not UTF-8 are no list.
+    rows = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path)));
   } catch (error) {
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw unreadable(path, manifest);

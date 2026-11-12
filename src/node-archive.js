@@ -50,11 +50,24 @@ export function archiveName(label) {
   return isSafeLabel(label) ? label : "channel-" + sha256hex(String(label)).slice(0, 16);
 }
 
+/**
+ * The text of a file of the home, past a byte order mark at its start. An
+ * editor on Windows may leave one in front of a file that is whole otherwise.
+ * The state the runtime keeps was read past it, and the rest of the home was
+ * not: a policy file with a mark was read as no choice at all, so an archive
+ * told to keep nothing was kept again, and nothing said so (a check of 12
+ * November 2026). The three runtimes read the home's own files past the mark.
+ * The key is not one of them: it holds the seed and nothing else. And what
+ * comes from outside the home, a message, a card, an add-on's answer, is read
+ * as it is.
+ */
+export const pastMark = (text) => (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+
 /** The archive policy of a home. No file, or one that says nothing usable, means keep, which is what every version did. */
 export async function readPolicy(home) {
   let stored = null;
   try {
-    const config = JSON.parse(await readFile(join(home, "config.json"), "utf8"));
+    const config = JSON.parse(pastMark(await readFile(join(home, "config.json"), "utf8")));
     stored = isObject(config) ? config.archive : null;
   } catch {
     stored = null;
@@ -149,7 +162,7 @@ export async function appendRecord(home, name, record) {
 /** The lines of a file as text, each with the time its record gives, or null when it gives none. */
 async function linesOf(path) {
   const found = [];
-  for (const line of (await readFile(path, "utf8")).split("\n")) {
+  for (const line of pastMark(await readFile(path, "utf8")).split("\n")) {
     if (!line.trim()) continue;
     let at = null;
     try {
@@ -183,7 +196,7 @@ export async function archiveNames(home) {
 export async function archivedRecords(home, name, kind) {
   let text;
   try {
-    text = await readFile(join(home, "archive", name + ".jsonl"), "utf8");
+    text = pastMark(await readFile(join(home, "archive", name + ".jsonl"), "utf8"));
   } catch (error) {
     if (error.code === "ENOENT" || error.code === "EISDIR") return [];
     throw error;

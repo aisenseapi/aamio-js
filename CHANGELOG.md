@@ -58,6 +58,13 @@ not what moved in the source.
   handed over, a send that was delivered or a post that was made into a
   failure: it is said in `attention` as `archive_failed`, or as `archive_error`
   on the answer.
+- A file of the home with a byte order mark in front, as an editor on Windows
+  may save it, is read past the mark wherever the home is read: the state,
+  the archive's policy and files, the list of enabled add-ons and an add-on's
+  list of websites. aamio-python and aamio-php stopped on such a file, and
+  read past it from the same release. The key is not read past a mark: it
+  holds the seed and nothing else, in all three. What comes from outside the
+  home, a message, a card or an add-on's answer, is read as it is.
 - `board post` says until when the inbox its answers go to is open, as
   `inbox_expires_at` beside `inbox`, the name `whoami` gives the inbox's time.
   It is not the post's own time: `post.expire_at` is when the post leaves the

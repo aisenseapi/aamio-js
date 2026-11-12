@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newScopeKey, sha256hex } from "../src/aamio.js";
+import { Keys, newScopeKey, sha256hex } from "../src/aamio.js";
 import { DEFAULT_POLICY, appendRecord, archiveName, archiveNames, archiveStatus, archivedRecords, describePolicy, isSafeLabel, parsePolicy, pruneArchive, readPolicy } from "../src/node-archive.js";
 import { initIdentity } from "../src/node-identity.js";
 import { NodeRuntime } from "../src/node-runtime.js";
@@ -493,4 +493,82 @@ test("channels past their time leave the home, and the inbox and the board inbox
   assert.deepEqual(labels(again).sort(), ["board", "inbox"]);
   assert.equal(again.boardReplyAddress().open, true);
   void sender;
+});
+
+// ------------------------------------------------------------------ a file of the home with a mark in front
+//
+// An editor on Windows may save a file with a byte order mark in front. The state was read past it, and the rest
+// of the home was not. The three runtimes read the home's own files past the mark; the same home is opened by each
+// of them in code/php/tools/check-node-exchange.py.
+
+const MARK = Buffer.from([0xef, 0xbb, 0xbf]);
+
+async function marked(path) {
+  const raw = await readFile(path);
+  assert.ok(raw.length > 0 && !raw.subarray(0, 3).equals(MARK), path);
+  await writeFile(path, Buffer.concat([MARK, raw]));
+  return raw;
+}
+
+test("a file of the home with a byte order mark in front is read past the mark, as the other two runtimes read it", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender, homeA, open } = await pair(t, fake);
+  await receiver.scopeNew("team");
+  await sender.send("receiver", { text: "written down before the mark" });
+  assert.equal((await receiver.read()).length, 1);
+  const posted = await receiver.boardPost({ kind: "need", title: "kept by node", text: "who answers?", ttl: 600 });
+  await receiver.send("sender", { text: "one in the outbox" });
+  const held = (runtime) => [runtime.keys.public, runtime.partnerList(), runtime.scopeList(), Object.keys(runtime.outbox), runtime.state.channels.map((channel) => [channel.label, channel.w]), Object.keys(runtime.traces)];
+  const before = held(receiver);
+  assert.ok(before[3].length === 1 && before[5].length === 1, "there is something in the outbox and in the trace");
+  await receiver.close();
+
+  const files = ["partners.json", "scopes.json", "state.json", "outbox.json", "trace.json", join("archive", "inbox.jsonl"), join("archive", "board.jsonl")];
+  const raw = {};
+  for (const name of files) raw[name] = await marked(join(homeA, name));
+
+  const again = await open(homeA);
+  assert.deepEqual(held(again), before, "the key, the partners, the scopes, the outbox, the channels and the trace the home had");
+  assert.deepEqual(await states(again), [], "and nothing is said, since nothing was lost");
+  // The archive's first line is a record like the rest, with its time, so a lifetime reaches it.
+  assert.deepEqual((await archivedRecords(homeA, "board", "posted")).map((record) => record.post.id), [posted.post.id]);
+  let all = 0;
+  for (const name of await readdir(join(homeA, "archive"))) all += (await readFile(join(homeA, "archive", name), "utf8")).split("\n").filter(Boolean).length;
+  assert.ok(all >= 2);
+  // What is saved next is written without the mark.
+  await again.partnerAdd("third", Keys.generate().public);
+  assert.equal((await readFile(join(homeA, "partners.json"))).subarray(0, 3).equals(MARK), false);
+  await again.close();
+  const gone = await pruneArchive(homeA, { mode: "days", days: 1, max_mb: null }, { now: fake.time + 10 * 86400 });
+  assert.equal(gone.removed, all, "every record is past its day, the first of each file too");
+
+  // Only the mark is passed. Two of them is not what the file holds.
+  await writeFile(join(homeA, "partners.json"), Buffer.concat([MARK, MARK, Buffer.from("{}")]));
+  assert.equal((await failed(() => open(homeA))).code, "state_unreadable");
+  await writeFile(join(homeA, "partners.json"), raw["partners.json"]);
+  // A file that holds the mark and nothing else is an empty file, as the other two runtimes read it.
+  await writeFile(join(homeA, "partners.json"), MARK);
+  const emptied = await open(homeA);
+  assert.deepEqual(emptied.partnerList(), []);
+  await emptied.close();
+  await writeFile(join(homeA, "partners.json"), raw["partners.json"]);
+  // And the key is not read past a mark: it holds the seed and nothing else, here as in the other two.
+  await marked(join(homeA, "key"));
+  assert.equal((await failed(() => open(homeA))).code, "key_unreadable");
+});
+
+test("a policy file with a mark in front is still the choice that was made: nothing is written down", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, sender, homeA, open } = await pair(t, fake);
+  await receiver.archiveSet(parsePolicy("off"));
+  await receiver.close();
+  await marked(join(homeA, "config.json"));
+  assert.equal((await readPolicy(homeA)).mode, "off");
+  const again = await open(homeA);
+  await sender.send("receiver", { text: "not to be written down" });
+  assert.deepEqual((await again.read()).map((m) => [m.body.text, m.archived, m.archive_off]), [["not to be written down", false, true]]);
+  assert.equal(existsSync(join(homeA, "archive", "inbox.jsonl")), false);
+  // A file that is not JSON at all is no choice, as before: only the mark is passed.
+  await writeFile(join(homeA, "config.json"), Buffer.concat([MARK, Buffer.from("{ nope")]));
+  assert.equal((await readPolicy(homeA)).mode, "keep");
 });

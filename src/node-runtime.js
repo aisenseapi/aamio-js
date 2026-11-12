@@ -421,6 +421,8 @@ export class NodeRuntime {
     try {
       // Fatal: a byte that is not UTF-8 makes the file unreadable. Read with
       // replacement characters, a name in it would be saved back changed.
+      // The decoder drops one byte order mark at the start, which is how a
+      // file of the home is read by all three runtimes.
       text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
       throw runtimeError("state_unreadable", `${name} in ${this.home} is not UTF-8, so nothing is saved over it. Restore it from a copy, or move it aside.`);
