@@ -1979,9 +1979,11 @@ export class NodeRuntime {
     // it, and is no reason to tell the caller the post failed: it would be
     // made again.
     const archiveError = await this.archiveSafely("board", { kind: "posted", at: this.now(), post: made.post }, `the post ${isObject(made.post) ? made.post.id : ""}`);
-    // Where the answers go and how to read them, in the answer itself.
+    // Where the answers go, until when that inbox is open and how to read
+    // them, in the answer itself. The inbox's time is not the post's:
+    // post.expire_at is when the post leaves the board.
     return {
-      post: made.post, inbox: channel.w, answers_arrive_on: "board",
+      post: made.post, inbox: channel.w, inbox_expires_at: channel.expire_at, answers_arrive_on: "board",
       read_them_with: "Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes, the board inbox among them. board replies on the command line lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.",
       ...(held ? { scope: held.name } : {}),
       ...(archiveError !== null ? { archive_error: archiveError } : {}),
@@ -2285,7 +2287,10 @@ export class NodeRuntime {
     }
     let text;
     try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(this.keys.open(message.from, raw));
+      // The mark is kept: with a byte order mark in front the text is not
+      // JSON, and aamio-python and aamio-php hand it over as text. Dropped,
+      // this runtime alone read the rest as JSON, a channel in it included.
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(this.keys.open(message.from, raw));
     } catch (error) {
       return [{ text: null }, { signed: true, encrypted: true, format: "unreadable", error: error.name || "Error" }];
     }

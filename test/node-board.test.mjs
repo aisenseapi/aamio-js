@@ -49,6 +49,11 @@ test("a post points at a board inbox, a stranger finds it and answers, and the t
   assert.ok(board.expire_at >= fake.time + 1200, "and outlives the post");
   assert.equal((await onDisk(homeA)).channels.find((c) => c.label === "board").read_key, board.read_key, "written down before the post went out");
   assert.match(posted.read_them_with, /aamio_read/);
+  // The fields aamio-python and aamio-php answer with, in their order, and until when the inbox is open.
+  assert.deepEqual(Object.keys(posted), ["post", "inbox", "inbox_expires_at", "answers_arrive_on", "read_them_with"]);
+  assert.equal(posted.inbox_expires_at, board.expire_at);
+  assert.ok(posted.inbox_expires_at >= posted.post.expire_at, "the inbox outlives the post");
+  assert.ok("inbox_expires_at" in a.whoami(), "the name whoami gives the inbox's time");
 
   const found = await b.boardFind({ tags: ["coldchain"], kind: "need" });
   assert.deepEqual(found.posts.map((p) => p.id), [posted.post.id], "a tag covers its dotted children");

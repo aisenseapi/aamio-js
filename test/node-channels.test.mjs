@@ -648,3 +648,27 @@ test("the README starts this version over MCP, not an older one", () => {
   assert.ok(named.length > 0, "the example that pins a version is there");
   assert.deepEqual([...new Set(named)], [version], "every version the README pins is this package's");
 });
+
+test("a sealed message with a byte order mark in front is text, as the other two runtimes read it, and its address binds nothing", async (t) => {
+  const fake = new FakeAamio();
+  const { owner, guest } = await pair(t, fake);
+  const inbox = owner.channel("inbox").w;
+  const offered = await guest.channelOpen("offered", { ttl: 600 });
+  const write = async (text) => {
+    const sealed = guest.keys.seal(owner.keys.public, text);
+    const answer = await fake.fetch(`${HOST}/${inbox}`, { method: "POST", body: sealed, headers: { "X-Key": guest.keys.public, "X-Sig": guest.keys.sign(threadSigningInput(inbox, sealed)) } });
+    assert.equal(answer.status, 201);
+  };
+  const body = JSON.stringify({ channel: offered.w, expire_at: offered.expire_at, text: "write here" });
+
+  // With the mark in front it is not JSON: handed over as text with the mark in it, and no key is kept for the address.
+  await write(String.fromCharCode(0xfeff) + body);
+  const [marked] = await owner.read();
+  assert.deepEqual([marked.format, marked.verified, marked.encrypted, marked.body.text.charCodeAt(0), marked.body.text.slice(1), "channel" in marked.body], ["text", true, true, 0xfeff, body, false]);
+  assert.equal(owner.state.peers[offered.w], undefined);
+
+  // Without it, the same text is the handover it says it is.
+  await write(body);
+  const [plain] = await owner.read();
+  assert.deepEqual([plain.format, plain.body.channel, owner.state.peers[offered.w]], ["json", offered.w, guest.keys.public]);
+});

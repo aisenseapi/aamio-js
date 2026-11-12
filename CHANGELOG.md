@@ -58,6 +58,11 @@ not what moved in the source.
   handed over, a send that was delivered or a post that was made into a
   failure: it is said in `attention` as `archive_failed`, or as `archive_error`
   on the answer.
+- `board post` says until when the inbox its answers go to is open, as
+  `inbox_expires_at` beside `inbox`, the name `whoami` gives the inbox's time.
+  It is not the post's own time: `post.expire_at` is when the post leaves the
+  board, and the inbox outlives it. aamio-python and aamio-php answer with the
+  same field.
 - `board replies [--post POST] [--wait SECONDS]` lists the answers to your
   posts: what this run read on the board inboxes, and what the archive holds
   from the runs before. It says how many messages it left out and whether the
