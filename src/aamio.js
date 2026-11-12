@@ -25,6 +25,13 @@ export const ENVELOPE = "nacl.box.v1";
 // The board's own default lifetime for a post, mirrored here so an ordinary
 // post gets the same lifetime whether the field is sent or left out.
 export const BOARD_TTL = 1800;
+// What a post leaves its inbox: time for the work the board advises and the
+// round trip. The board refuses a post that would outlive the inbox when it
+// arrives, and the lifetime is in the body the work covers, so it is set
+// before the work is done. With nothing left over, a post asked for as long
+// as an inbox lives was refused whenever the work took a second (a check of
+// 12 November 2026). The same in aamio-python and aamio-php.
+export const BOARD_POST_MARGIN = 30;
 
 // ------------------------------------------------------------------ encoding
 
@@ -906,7 +913,7 @@ class Board {
    */
   async inbox(seconds = 900) {
     const held = this.client.boardInbox;
-    if (held && held.expireAt - Math.floor(Date.now() / 1000) > seconds) return held;
+    if (held && held.expireAt - Math.floor(Date.now() / 1000) > seconds + BOARD_POST_MARGIN) return held;
     const thread = await this.client.open({ ttl: Math.min(3600, Math.max(seconds + 60, 900)), allow: ["*"] });
     this.client.boardInbox = thread;
     return thread;
@@ -927,7 +934,7 @@ class Board {
     // an address on the board is always an address that still works. At the top
     // of the range the inbox cannot be opened for longer than the post asked
     // for, so the post gives way, not the promise.
-    const life = Math.min(ttl, thread.expireAt - Math.floor(Date.now() / 1000));
+    const life = Math.min(ttl, thread.expireAt - Math.floor(Date.now() / 1000) - BOARD_POST_MARGIN);
     const fields = { kind, title, text, w: thread.w, ttl: life };
     if (tags.length) fields.tags = tags;
     if (lang) fields.lang = lang;

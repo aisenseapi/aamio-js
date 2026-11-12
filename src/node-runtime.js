@@ -2,7 +2,7 @@ import { open, readFile, rename, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Aamio, AamioError, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
+import { Aamio, AamioError, BOARD_POST_MARGIN, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
 import { DEFAULT_POLICY, appendRecord, archiveName, archiveNames, archiveStatus, archivedRecords, isSafeLabel, pruneArchive, readPolicy } from "./node-archive.js";
 import { readKeys } from "./node-identity.js";
 import { takeHome } from "./node-lock.js";
@@ -2018,7 +2018,8 @@ export class NodeRuntime {
     // Before the inbox is opened, so a name that is not here costs nothing.
     const held = scope !== null && scope !== undefined ? this.scopeNamed(scope) : null;
     const life = Math.floor(Number(ttl) || BOARD_TTL);
-    const channel = await this.ensureBoardInbox(life);
+    // An inbox that outlives the post by the margin the library leaves for the work and the round trip.
+    const channel = await this.ensureBoardInbox(life + BOARD_POST_MARGIN);
     let made;
     try {
       // The address goes inside the signed body, so nobody can post the same bytes without it.

@@ -49,6 +49,7 @@ test("a post points at a board inbox, a stranger finds it and answers, and the t
   assert.ok(board.expire_at >= fake.time + 1200, "and outlives the post");
   assert.equal((await onDisk(homeA)).channels.find((c) => c.label === "board").read_key, board.read_key, "written down before the post went out");
   assert.match(posted.read_them_with, /aamio_read/);
+  assert.equal(posted.post.expire_at, fake.time + 1200, "a post well inside its inbox keeps the lifetime it asked for");
   // The fields aamio-python and aamio-php answer with, in their order, and until when the inbox is open.
   assert.deepEqual(Object.keys(posted), ["post", "inbox", "inbox_expires_at", "answers_arrive_on", "read_them_with"]);
   assert.equal(posted.inbox_expires_at, board.expire_at);
@@ -190,4 +191,17 @@ test("over MCP the board tools post, find, answer, list tags and withdraw, and r
     assert.equal((await call(a, "aamio_board_post", args)).error?.code, -32602, why);
   }
   assert.equal(fake.posts.size, 0, "nothing refused by the schema reached the board");
+});
+
+test("a post asked for as long as an inbox lives leaves the inbox room for the work and the round trip", async (t) => {
+  // The library counts the inbox's time on the machine's clock, so the stand-in keeps the machine's time.
+  const fake = new FakeAamio({ now: Math.floor(Date.now() / 1000) });
+  const { a: homeA, open } = await fixture(t, fake, "a");
+  const a = await open(homeA);
+  const posted = await a.boardPost({ kind: "need", title: "a whole hour", text: "as long as it may", ttl: 3600 });
+  const inbox = a.channel("board");
+  assert.equal(inbox.expire_at, fake.time + 3600, "the inbox lives the hour, and no longer");
+  const life = posted.post.expire_at - fake.time;
+  assert.ok(life >= 3600 - 32 && life <= 3600 - 30, `the post gives way by the margin, not the promise: ${life}`);
+  assert.ok(posted.inbox_expires_at - posted.post.expire_at >= 30);
 });

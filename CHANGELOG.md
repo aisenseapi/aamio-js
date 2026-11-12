@@ -58,6 +58,10 @@ not what moved in the source.
   handed over, a send that was delivered or a post that was made into a
   failure: it is said in `attention` as `archive_failed`, or as `archive_error`
   on the answer.
+- A post asked for as long as an inbox lives, `--ttl 3600`, leaves its inbox
+  30 seconds for the work the board advises and the round trip, as
+  aamio-python and aamio-php do from the same release. It left none, and the
+  board took it only when the work and the post took less than a second.
 - A channel whose address the service turned away, or a gate stopped, is
   answered with what to do about it: nobody has the address, so close the
   channel and open a new one. The advice was to send the corrected message as
