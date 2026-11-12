@@ -70,7 +70,14 @@ not what moved in the source.
   channel's address goes sealed and signed to who is to write there, through
   the outbox. A channel that cannot be written down is closed again and handed
   to nobody. When the address does not get through, the answer says that the
-  channel is open, in `opened`. `channel close` takes the channel out of the
+  channel is open, in `opened`, and what is known of the message that carried
+  it: only one the service turned away is said not to have gone. One that left
+  with no answer, or with an answer that settles nothing, may have arrived,
+  and the answer says so and that a new attempt is the same message under the
+  same `message_id`, not another channel. An opening the service did not
+  answer is not called nothing: the service may hold a thread this home does
+  not, which nobody reads and nobody has the address of, and opening again is
+  safe. `channel close` takes the channel out of the
   home when the service says the thread is gone, and keeps it, still read,
   when the service does not answer. A label is made of what a file's name may
   hold, since it names the channel's file in the archive.

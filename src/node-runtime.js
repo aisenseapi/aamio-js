@@ -210,7 +210,7 @@ export function stopFields(error) {
   // Whether the same stored bytes are worth sending again: true, false, or null when it cannot be told.
   if (error?.retryable !== undefined) said.retryable = error.retryable;
   if (error?.earlier_attempt) said.earlier_attempt = error.earlier_attempt;
-  // A channel that is open although the message carrying its address did not go.
+  // A channel that is open although the message carrying its address was stopped, or left and has no settled outcome.
   if (isObject(error?.opened)) said.opened = error.opened;
   return said;
 }
@@ -1675,7 +1675,19 @@ export class NodeRuntime {
       thread = await this.client.open({ ttl, allow: keys.length ? keys : undefined, gate: gate ?? undefined });
     } catch (error) {
       const said = isObject(error.body) ? error.body : {};
-      throw runtimeError("channel_unavailable", `could not open channel: ${error.status ?? 0} ${said.error ?? JSON.stringify(error.body ?? error.message)}. Nothing was opened.`, { status: error.status ?? 0, ...(said.fix ? { fix: said.fix } : {}) });
+      const status = Number.isInteger(error.status) ? error.status : 0;
+      // Only a refusal says nothing was opened. With no answer, or one that
+      // does not say, the service may hold a thread: its read key was made for
+      // this request and is kept nowhere, so nobody reads there, nobody was
+      // given its address, and it goes when its time is out. "Nothing was
+      // opened" was said of a thread the service held (a check of 12 November
+      // 2026).
+      const refused = status >= 400 && status < 500;
+      const after = refused
+        ? "Nothing was opened."
+        : `${status === 0 ? "No answer came back, so it is not known" : "That answer does not say"} whether the service opened a thread. This home holds no channel called ${label}, and nobody was given an address: a thread opened there is read by nobody and goes when its time is out.`;
+      const fix = said.fix ?? (refused ? null : "Opening it again is safe: that makes a new address, and the one that may be there is known to nobody.");
+      throw runtimeError("channel_unavailable", `could not open channel: ${status} ${said.error ?? JSON.stringify(error.body ?? error.message)}. ${after}`, { status, ...(fix ? { fix } : {}) });
     }
     const channel = { label, read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: keys, after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [], seen_from: [] };
     this.state.channels.push(channel);
@@ -1804,11 +1816,19 @@ export class NodeRuntime {
    * id, and what could not be recorded of it here.
    *
    * Whatever stops it, the channel is open by now, and the failure says so,
-   * with the channel, and says whether anything left this machine.
+   * with the channel, and says whether anything left this machine and, of
+   * what left, whether it is known not to have arrived.
    */
   async handOver(channel, key, replyTo, note = null, advice = null) {
     const opened = { label: channel.label, w: channel.w, expire_at: channel.expire_at };
-    const still = `The channel ${channel.label} is open and listed by channel list, aamio_channels over MCP: only the message carrying its address did not go. `;
+    const listed = `The channel ${channel.label} is open and listed by channel list, aamio_channels over MCP`;
+    // Said of a message the service turned away or a gate stopped: it is known not to be there.
+    const still = `${listed}: only the message carrying its address did not go. `;
+    // Said of one that left and has no answer that settles it. It may be with
+    // them already, and "did not go" read as leave to open another channel and
+    // invite again, which the one who has the first reads as two (a check of
+    // 12 November 2026).
+    const unsettled = `${listed}, and the message carrying its address may have arrived: its outcome is not known. Do not open another channel for this: a new attempt is the same message, under the same message_id. `;
     let entry = null;
     let answer;
     try {
@@ -1828,9 +1848,12 @@ export class NodeRuntime {
       });
     }
     if (answer.status !== 201) {
-      const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
-      throw runtimeError("send_failed", `the channel ${channel.label} is open, and the message carrying its address did not land: send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, {
-        outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, opened, retryable, fix: still + fix,
+      const outcome = outboxOutcome(entry);
+      const [retryable, fix] = sendAdvice(outcome, answer.status);
+      // Only a refusal says the message is not there.
+      const refused = outcome === "refused";
+      throw runtimeError("send_failed", `the channel ${channel.label} is open, and the message carrying its address ${refused ? "did not land" : "may have arrived"}: send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, {
+        outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, opened, retryable, fix: (refused ? still : unsettled) + fix,
       });
     }
     const told = { message_id: entry.id };

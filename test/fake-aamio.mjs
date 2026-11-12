@@ -43,9 +43,12 @@ export class FakeAamio {
     // scope names as the scope it read: the address when nothing is set, nothing at all for false, or what a test
     // says. boardKnowsNoScopes plays a board from before scopes, and boardFailures answers the next finds as told.
     this.finds = [];
-    // Gates a test sets for an address, what the next closings answer, and a service that takes no gate.
+    // Gates a test sets for an address, what the next closings and the next openings answer, and a service that
+    // takes no gate. An opening answers as told: "network" opens nothing and never answers, "lost" opens the thread
+    // and the answer never arrives, and a number is that status with nothing opened.
     this.gates = new Map();
     this.closeFailures = [];
+    this.openFailures = [];
     this.refuseGate = false;
     this.boardPage = 200;
     this.boardScopeEcho = undefined;
@@ -113,6 +116,9 @@ export class FakeAamio {
     if (parts[0] === "p") return this.presenceAnswer(method, parts, body, init);
     const w = parts[0];
     if (method === "PUT" && parts.length === 1) {
+      const opening = this.openFailures.shift();
+      if (opening === "network") throw new TypeError("fetch failed");
+      if (opening && opening !== "lost") return this.reply(opening, { error: `the test asked for ${opening}` });
       const id = this.header(init, "X-Read");
       if (!id || deriveAddress(id) !== w) return this.reply(400, { error: "X-Read does not derive this address", fix: "Make w from the read key." });
       const allow = (this.header(init, "X-Allow") || "").split(",").map((key) => key.trim()).filter(Boolean);
@@ -123,6 +129,7 @@ export class FakeAamio {
         if (this.refuseGate) return this.threads.delete(w) && this.reply(400, { error: "the gate asks for what this service does not take", fix: "See the board descriptor for what a gate may hold." });
         thread.gate = asked.gate;
       }
+      if (opening === "lost") throw new TypeError("fetch failed");
       return this.reply(201, { w, expire_at: thread.expire_at, allow: thread.allow, instance: thread.instance, ...(thread.gate ? { gate: thread.gate } : {}) });
     }
     // The gate of the thread that is there, or of a test's choosing for an address, as the service serves it.

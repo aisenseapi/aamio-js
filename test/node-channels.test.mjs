@@ -213,6 +213,45 @@ test("a gate is set when the channel is opened, in the same request, and one the
   assert.equal(labels(owner).join(), before);
 });
 
+test("an opening that got no answer is not called nothing: the service may hold a thread this home does not", async (t) => {
+  const fake = new FakeAamio();
+  const { owner, guest } = await pair(t, fake);
+  const threads = fake.threads.size;
+  const held = "This home holds no channel called tender, and nobody was given an address: a thread opened there is read by nobody and goes when its time is out.";
+
+  // The service opened the thread, and its answer never arrived.
+  fake.openFailures.push("lost");
+  const before = sends(fake);
+  const lost = await failed(() => owner.channelOpen("tender", { ttl: 600, to: "guest" }));
+  assert.deepEqual([lost.code, lost.status], ["channel_unavailable", 0]);
+  assert.equal(fake.threads.size, threads + 1, "the thread is there at the service");
+  assert.equal(lost.message, `could not open channel: 0 "fetch failed". No answer came back, so it is not known whether the service opened a thread. ${held}`);
+  assert.equal(lost.fix, "Opening it again is safe: that makes a new address, and the one that may be there is known to nobody.");
+  assert.equal(lost.message.includes("Nothing was opened"), false);
+  assert.deepEqual([labels(owner), Object.keys(owner.outbox), sends(fake)], [["inbox"], [], before], "no channel is held here, and no address went anywhere");
+  assert.deepEqual(await guest.read(), []);
+
+  // Nothing opened and no answer: this side cannot tell that from the one above, and says the same.
+  fake.openFailures.push("network");
+  const dropped = await failed(() => owner.channelOpen("tender", { ttl: 600 }));
+  assert.deepEqual([dropped.message, fake.threads.size], [lost.message, threads + 1]);
+
+  // An answer that does not say: a 500 is the service failing, not the service saying no.
+  fake.openFailures.push(500);
+  const failing = await failed(() => owner.channelOpen("tender", { ttl: 600 }));
+  assert.deepEqual([failing.code, failing.status], ["channel_unavailable", 500]);
+  assert.equal(failing.message, `could not open channel: 500 the test asked for 500. That answer does not say whether the service opened a thread. ${held}`);
+
+  // A refusal is the service saying no, and then nothing was opened.
+  fake.openFailures.push(429);
+  const refused = await failed(() => owner.channelOpen("tender", { ttl: 600 }));
+  assert.deepEqual([refused.status, refused.message, refused.fix], [429, "could not open channel: 429 the test asked for 429. Nothing was opened.", undefined]);
+
+  // The label is free all along, and opening again makes a new address.
+  const again = await owner.channelOpen("tender", { ttl: 600 });
+  assert.deepEqual([again.label, labels(owner), fake.threads.size], ["tender", ["inbox", "tender"], threads + 2]);
+});
+
 // ------------------------------------------------------------------ handed over
 
 test("with to, the address goes sealed and signed to who is to write there, and their runtime can then send to it", async (t) => {
@@ -313,24 +352,36 @@ test("when the address does not get through, the channel is open all the same an
   const { owner, guest } = await pair(t, fake);
   const inbox = guest.channel("inbox").w;
 
-  // Stored, and the answer lost: it may have arrived. The same bytes go again from the outbox.
+  // Stored, and the answer lost: it may have arrived, and nothing here says it did not. What goes again is the
+  // same message, from the outbox.
   fake.failNext("lost");
   const lost = await failed(() => owner.channelOpen("lost", { ttl: 600, to: "guest" }));
   assert.deepEqual([lost.code, lost.outcome, lost.status, lost.retryable], ["send_failed", "unknown", 0, null]);
   assert.deepEqual(Object.keys(lost.opened), ["label", "w", "expire_at"]);
   assert.deepEqual([lost.opened.label, labels(owner).includes("lost"), fake.threads.has(lost.opened.w)], ["lost", true, true]);
-  assert.match(lost.message, /^the channel lost is open, and the message carrying its address did not land: send unknown \(http 0\)/);
-  assert.match(lost.fix, /^The channel lost is open and listed by channel list, aamio_channels over MCP: only the message carrying its address did not go\. No answer came back, so this message may already have been delivered\./);
+  assert.match(lost.message, /^the channel lost is open, and the message carrying its address may have arrived: send unknown \(http 0\)/);
+  assert.match(lost.fix, /^The channel lost is open and listed by channel list, aamio_channels over MCP, and the message carrying its address may have arrived: its outcome is not known\. Do not open another channel for this: a new attempt is the same message, under the same message_id\. No answer came back, so this message may already have been delivered\./);
+  assert.equal(/did not (go|land)/.test(lost.message + lost.fix), false, "it is with them, so nothing says it is not");
   assert.deepEqual(stopFields(lost).opened, lost.opened);
+  // It was there all along: the guest reads the address before anything is sent again.
+  assert.deepEqual((await guest.read()).map((m) => [m.body.channel, m.replay]), [[lost.opened.w, false]], "the address arrived with the first attempt");
   const [row] = await owner.outboxRetry(lost.message_id);
   assert.deepEqual([row.status, row.http], ["delivered", 201]);
-  assert.deepEqual((await guest.read()).map((m) => [m.body.channel, m.replay]), [[lost.opened.w, false], [lost.opened.w, true]], "the address arrived once, and the copy is marked");
+  assert.deepEqual((await guest.read()).map((m) => [m.body.channel, m.replay]), [[lost.opened.w, true]], "and the same message sent again is marked a copy");
 
   // Turned away: nothing was stored, and the answer says that this refusal will be repeated.
   fake.failNext(403);
   const refused = await failed(() => owner.channelOpen("refused", { ttl: 600, to: "guest" }));
   assert.deepEqual([refused.outcome, refused.status, refused.retryable, refused.opened.label], ["refused", 403, false, "refused"]);
+  assert.match(refused.message, /^the channel refused is open, and the message carrying its address did not land: send refused \(http 403\)/);
   assert.match(refused.fix, /only the message carrying its address did not go\. aamio refused this and will refuse the same bytes again/);
+
+  // An answer that settles nothing: a 503 does not say the message was not stored, so it is not said either.
+  fake.failNext(503);
+  const busy = await failed(() => owner.channelOpen("busy", { ttl: 600, to: "guest" }));
+  assert.deepEqual([busy.outcome, busy.status, busy.retryable, busy.opened.label], ["attempted", 503, true, "busy"]);
+  assert.match(busy.message, /^the channel busy is open, and the message carrying its address may have arrived: send attempted \(http 503\)/);
+  assert.match(busy.fix, /may have arrived: its outcome is not known\. Do not open another channel for this: a new attempt is the same message, under the same message_id\. aamio declined this for now/);
 
   // Not written to the outbox: nothing left this machine, and nobody has the address.
   const before = sends(fake);
@@ -353,8 +404,8 @@ test("when the address does not get through, the channel is open all the same an
   assert.match(gated.fix, /^The channel gated is open and listed by channel list, aamio_channels over MCP: only the message carrying its address did not go\. Ask the owner for a longer inbox\.$/);
 
   // Every one of them is there to be closed, or handed over again by another way.
-  assert.deepEqual(labels(owner), ["inbox", "lost", "refused", "unsent", "gated"]);
-  for (const label of ["lost", "refused", "unsent", "gated"]) assert.equal((await owner.channelClose(label)).closed_here, true);
+  assert.deepEqual(labels(owner), ["inbox", "lost", "refused", "busy", "unsent", "gated"]);
+  for (const label of ["lost", "refused", "busy", "unsent", "gated"]) assert.equal((await owner.channelClose(label)).closed_here, true);
 });
 
 test("a channel leaves this home when the service says its thread is gone, and stays when it does not say", async (t) => {
@@ -550,4 +601,50 @@ test("the tool says what a close does not do: the address is not closed", () => 
   const line = source.split("\n").find((text) => text.includes('description: "Close a channel before it expires.'));
   assert.ok(line.includes("The address is not closed: whoever still holds it can write there afterwards, which opens a new thread with no list and no gate, the writer is answered that it was stored, and nobody reads it."));
   assert.equal(line.includes("gone for everyone"), false);
+});
+
+test("an invitation whose answer was lost says it may have arrived, on the command line and over MCP", async (t) => {
+  const fake = new FakeAamio({ now: Math.floor(Date.now() / 1000) });
+  const { owner, guest, homeA, homeB } = await pair(t, fake);
+  const inbox = guest.channel("inbox").w;
+  const key = guest.keys.public;
+  const may = /and the message carrying its address may have arrived: its outcome is not known\. Do not open another channel for this: a new attempt is the same message, under the same message_id\. No answer came back, so this message may already have been delivered\./;
+
+  // Over MCP, with the runtime that holds the home.
+  fake.failNext("lost");
+  const told = await call(owner, "aamio_open_channel", { label: "over-mcp", ttl: 600, to: "guest" });
+  assert.equal(told.isError, true);
+  const said = told.structuredContent;
+  assert.deepEqual([said.error_code, said.operation, said.outcome, said.status, said.retryable, said.opened.label], ["send_failed", "open_channel", "unknown", 0, null, "over-mcp"]);
+  assert.match(said.error, /^the channel over-mcp is open, and the message carrying its address may have arrived: send unknown \(http 0\)/);
+  assert.match(said.fix, may);
+  assert.equal(/did not (go|land)/.test(JSON.stringify(said)), false);
+  assert.deepEqual((await guest.read()).map((m) => m.body.channel), [said.opened.w], "and it had arrived");
+
+  // On the command line, each command a process of its own.
+  await owner.close();
+  await guest.close();
+  const { cli } = await serveFake(t, fake);
+  fake.failNext("lost");
+  const run = await cli(homeA, "board", "channel", key, "--reply-to", inbox);
+  assert.equal(run.status, 1, run.stderr);
+  const line = JSON.parse(run.stdout);
+  assert.deepEqual([line.error_code, line.outcome, line.status, line.retryable, typeof line.message_id, Object.keys(line.opened)], ["send_failed", "unknown", 0, null, "string", ["label", "w", "expire_at"]]);
+  assert.match(line.error, /^the channel with-[0-9a-f]{8} is open, and the message carrying its address may have arrived: send unknown \(http 0\)/);
+  assert.match(line.fix, may);
+  assert.equal(/did not (go|land)/.test(run.stdout), false);
+  const read = JSON.parse((await cli(homeB, "read")).stdout);
+  assert.deepEqual(read.messages.map((m) => [m.body.channel, m.replay]), [[line.opened.w, false]], "the guest has the address from the first attempt");
+  // The same message goes again under its id, and arrives marked as the copy it is.
+  const again = JSON.parse((await cli(homeA, "outbox", "retry", "--id", line.message_id)).stdout);
+  assert.deepEqual(again.retried.map((entry) => [entry.id, entry.status]), [[line.message_id, "delivered"]]);
+  assert.deepEqual(JSON.parse((await cli(homeB, "read")).stdout).messages.map((m) => [m.body.channel, m.replay]), [[line.opened.w, true]]);
+});
+
+test("the README starts this version over MCP, not an older one", () => {
+  const version = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const named = [...readme.matchAll(/aamio@(\d+\.\d+\.\d+)/g)].map((found) => found[1]);
+  assert.ok(named.length > 0, "the example that pins a version is there");
+  assert.deepEqual([...new Set(named)], [version], "every version the README pins is this package's");
 });

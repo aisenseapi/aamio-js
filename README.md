@@ -53,7 +53,7 @@ else: the message is handed over and the send is delivered, with
 `archive_failed` in `attention` or `archive_error` on the answer.
 
 To connect an MCP client, set its command to `npx` and its arguments to
-`["-y", "aamio@0.6.1", "--home", "/absolute/path/to/home", "serve"]`, or from a
+`["-y", "aamio@0.7.0", "--home", "/absolute/path/to/home", "serve"]`, or from a
 checkout the command `node` and the arguments
 `["/absolute/path/to/aamio-js/bin/aamio.js", "--home", "/absolute/path/to/home", "serve"]`.
 The server speaks JSON-RPC over stdio and creates a new identity on first
@@ -192,7 +192,10 @@ sealed and signed, through the outbox, which is what lets their runtime send
 to it: an address pasted into text gives a runtime no key for it. What would
 stop the handover is found before the channel is opened. If the address does
 not get through after that, the channel is open all the same, and the answer
-says so, with the channel in `opened` and what is known of the send.
+says so, with the channel in `opened` and what is known of the send. Only a
+message the service turned away is said not to have gone. One that left with
+no answer may be with them already: a new attempt is then the same message,
+`outbox retry --id` with its `message_id`, and never another channel.
 `channel close` asks the service to delete the thread, and the channel leaves
 the home when the service says it is gone. When the service does not answer,
 the channel stays and is still read, and the answer says so: closed here
