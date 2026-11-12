@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { pastMark } from "./node-archive.js";
+import { homeText } from "./node-archive.js";
 import { holdFile } from "./node-lock.js";
 
 /*
@@ -357,7 +357,7 @@ export async function enabledNames(home) {
   const path = enabledFile(home);
   let data;
   try {
-    data = JSON.parse(pastMark(await readFile(path, "utf8")));
+    data = JSON.parse(await homeText(path));
   } catch (error) {
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
     throw new AddonError(`${path} could not be read: ${error.code || error.message}. Fix or remove the file; it lists the add-ons enabled here, one name each under "enabled".`);

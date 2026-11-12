@@ -572,3 +572,25 @@ test("a policy file with a mark in front is still the choice that was made: noth
   await writeFile(join(homeA, "config.json"), Buffer.concat([MARK, Buffer.from("{ nope")]));
   assert.equal((await readPolicy(homeA)).mode, "keep");
 });
+
+test("a file of the home that is not UTF-8 is not read as if it were: the policy, and the archive's lines", async (t) => {
+  const fake = new FakeAamio();
+  const { receiver, homeA } = await pair(t, fake);
+  await receiver.archiveSet(parsePolicy("off"));
+  await receiver.close();
+  // A policy file with one byte that is not UTF-8 holds no choice anyone can read, as aamio-python and aamio-php read it.
+  await writeFile(join(homeA, "config.json"), Buffer.concat([Buffer.from('{"archive":{"mode":"off","days":null,"max_mb":null},"note":"caf'), Buffer.from([0xe9]), Buffer.from('"}')]));
+  assert.equal((await readPolicy(homeA)).mode, "keep");
+
+  // A line that is not UTF-8 is no record when the archive is read, and is kept byte for byte when it is pruned.
+  const folder = join(homeA, "archive");
+  await mkdir(folder, { recursive: true });
+  const odd = Buffer.concat([Buffer.from('{"kind":"received","at":1,"body":{"text":"caf'), Buffer.from([0xe9]), Buffer.from('"}}\n')]);
+  const old = Buffer.from('{"kind":"received","at":1,"body":{"text":"old"}}\n');
+  const fresh = Buffer.from(JSON.stringify({ kind: "received", at: fake.time, body: { text: "fresh" } }) + "\n");
+  await writeFile(join(folder, "test.jsonl"), Buffer.concat([odd, old, fresh]));
+  assert.deepEqual((await archivedRecords(homeA, "test", "received")).map((record) => record.body.text), ["old", "fresh"]);
+  const gone = await pruneArchive(homeA, { mode: "days", days: 1, max_mb: null }, { now: fake.time + 10 });
+  assert.equal(gone.removed, 1, "the old record goes");
+  assert.ok((await readFile(join(folder, "test.jsonl"))).equals(Buffer.concat([odd, fresh])), "and the line that is not UTF-8 is kept as it was, not written back changed");
+});

@@ -63,11 +63,44 @@ export function archiveName(label) {
  */
 export const pastMark = (text) => (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
 
+/**
+ * A file of the home as text, past one byte order mark, or an error when it
+ * is not UTF-8. Read with replacement characters, a policy file with one
+ * stray byte was a choice here and no choice in the other two runtimes, and
+ * a record written back by a prune came back changed (a check of 12 November
+ * 2026). The decoder drops one mark itself.
+ */
+export async function homeText(path) {
+  return new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path));
+}
+
+/** The lines of a file as bytes, the first one past a byte order mark, each with the text it holds when that is UTF-8. */
+async function rawLines(path) {
+  let bytes = await readFile(path);
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) bytes = bytes.subarray(3);
+  const lines = [];
+  let start = 0;
+  while (start < bytes.length) {
+    let end = bytes.indexOf(0x0a, start);
+    if (end === -1) end = bytes.length;
+    const raw = bytes.subarray(start, end);
+    let text = null;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw);
+    } catch {
+      text = null;
+    }
+    lines.push({ raw, text });
+    start = end + 1;
+  }
+  return lines;
+}
+
 /** The archive policy of a home. No file, or one that says nothing usable, means keep, which is what every version did. */
 export async function readPolicy(home) {
   let stored = null;
   try {
-    const config = JSON.parse(pastMark(await readFile(join(home, "config.json"), "utf8")));
+    const config = JSON.parse(await homeText(join(home, "config.json")));
     stored = isObject(config) ? config.archive : null;
   } catch {
     stored = null;
@@ -159,19 +192,25 @@ export async function appendRecord(home, name, record) {
   }
 }
 
-/** The lines of a file as text, each with the time its record gives, or null when it gives none. */
+/**
+ * The lines of a file as they are, each with the time its record gives, or
+ * null when it gives none. A line that is not UTF-8 gives none, and is kept
+ * byte for byte: what cannot be told old is not thrown away as old, and not
+ * written back changed either.
+ */
 async function linesOf(path) {
   const found = [];
-  for (const line of pastMark(await readFile(path, "utf8")).split("\n")) {
-    if (!line.trim()) continue;
+  for (const { raw, text } of await rawLines(path)) {
+    if (text !== null && !text.trim()) continue;
+    if (text === null && !raw.length) continue;
     let at = null;
     try {
-      const record = JSON.parse(line);
+      const record = text === null ? null : JSON.parse(text);
       if (isObject(record) && typeof record.at === "number" && Number.isFinite(record.at)) at = record.at;
     } catch {
       at = null;
     }
-    found.push({ at, line: line + "\n" });
+    found.push({ at, line: Buffer.concat([raw, Buffer.from("\n")]) });
   }
   return found;
 }
@@ -194,18 +233,19 @@ export async function archiveNames(home) {
  * or has read nothing yet. A line that is no record is passed over.
  */
 export async function archivedRecords(home, name, kind) {
-  let text;
+  let lines;
   try {
-    text = pastMark(await readFile(join(home, "archive", name + ".jsonl"), "utf8"));
+    lines = await rawLines(join(home, "archive", name + ".jsonl"));
   } catch (error) {
     if (error.code === "ENOENT" || error.code === "EISDIR") return [];
     throw error;
   }
   const found = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
+  for (const { text } of lines) {
+    // A line that is not UTF-8 is no record, as one cut short by a crash is not.
+    if (text === null || !text.trim()) continue;
     try {
-      const record = JSON.parse(line);
+      const record = JSON.parse(text);
       if (isObject(record) && record.kind === kind) found.push(record);
     } catch {
       // A line cut short by a crash, or not written by a runtime: it is no record.
@@ -251,7 +291,7 @@ export async function pruneArchive(home, policy, { now = Date.now() / 1000, ever
     const oldest = [];
     for (const [name, records] of kept) {
       for (const [index, record] of records.entries()) {
-        const size = Buffer.byteLength(record.line, "utf8");
+        const size = record.line.length;
         total += size;
         oldest.push({ at: record.at ?? now, name, index, size });
       }
@@ -269,15 +309,15 @@ export async function pruneArchive(home, policy, { now = Date.now() / 1000, ever
   }
   let left = 0;
   for (const [name, records] of kept) {
-    const text = records.map((record) => record.line).join("");
-    left += Buffer.byteLength(text, "utf8");
+    const text = Buffer.concat(records.map((record) => record.line));
+    left += text.length;
     if (records.length === before.get(name)) continue;
     const path = join(folder, name + ".jsonl");
     const temporary = join(folder, `${name}.jsonl.${randomUUID()}.tmp`);
     const handle = await open(temporary, "wx", 0o600);
     try {
       try {
-        await handle.writeFile(text, "utf8");
+        await handle.writeFile(text);
         await handle.sync();
       } finally {
         await handle.close();

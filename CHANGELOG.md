@@ -58,6 +58,23 @@ not what moved in the source.
   handed over, a send that was delivered or a post that was made into a
   failure: it is said in `attention` as `archive_failed`, or as `archive_error`
   on the answer.
+- A channel whose address the service turned away, or a gate stopped, is
+  answered with what to do about it: nobody has the address, so close the
+  channel and open a new one. The advice was to send the corrected message as
+  a new one, which needs the address. A send answered 401 or 409 is settled
+  as refused, since the service answers both before it stores anything:
+  `outbox retry` no longer sends it again, and a channel's handover no longer
+  says the address may have arrived.
+- `partner remove` takes a partner's key as well as its name, as `send` does.
+  `partner add` and `partner remove` answer `not_saved` when `partners.json`
+  cannot be written.
+- `config.json`, the archive's files and `addons.json` are read as UTF-8 or
+  not at all. With one stray byte, `config.json` was read as a choice here
+  and as no choice in aamio-python and aamio-php, and a prune wrote a line of
+  the archive back with replacement characters. Such a line is no record now,
+  and a prune keeps it byte for byte.
+- The library keeps a byte order mark in front of a sealed text, as the
+  runtime does, so it is text and not JSON.
 - `partner remove NAME` on the command line, as aamio-python and aamio-php
   have it: the partner leaves the address book, the inbox that named its key
   is read no more, and a new one opens without it. The name finds the

@@ -374,7 +374,7 @@ test("when the address does not get through, the channel is open all the same an
   const refused = await failed(() => owner.channelOpen("refused", { ttl: 600, to: "guest" }));
   assert.deepEqual([refused.outcome, refused.status, refused.retryable, refused.opened.label], ["refused", 403, false, "refused"]);
   assert.match(refused.message, /^the channel refused is open, and the message carrying its address did not land: send refused \(http 403\)/);
-  assert.match(refused.fix, /only the message carrying its address did not go\. aamio refused this and will refuse the same bytes again/);
+  assert.match(refused.fix, /only the message carrying its address did not go\. aamio refused it, so nobody has been given the address of refused\. Close it with channel close refused, aamio_close_channel over MCP, put right what the error says, and open a new one\.$/);
 
   // An answer that settles nothing: a 503 does not say the message was not stored, so it is not said either.
   fake.failNext(503);
@@ -401,7 +401,7 @@ test("when the address does not get through, the channel is open all the same an
   owner.deliver = realDeliver;
   assert.ok(gated instanceof GateStop);
   assert.deepEqual([gated.opened.label, labels(owner).includes("gated")], ["gated", true]);
-  assert.match(gated.fix, /^The channel gated is open and listed by channel list, aamio_channels over MCP: only the message carrying its address did not go\. Ask the owner for a longer inbox\.$/);
+  assert.match(gated.fix, /^The channel gated is open and listed by channel list, aamio_channels over MCP: only the message carrying its address did not go\. Nothing was sent, so nobody has been given its address: close it with channel close gated, aamio_close_channel over MCP, and open a new one when the inbox's conditions can be met\. Ask the owner for a longer inbox\.$/);
 
   // Every one of them is there to be closed, or handed over again by another way.
   assert.deepEqual(labels(owner), ["inbox", "lost", "refused", "busy", "unsent", "gated"]);
@@ -726,4 +726,41 @@ test("partner remove takes a partner out of the book and out of the inbox, as th
   assert.deepEqual(owner.partnerList().map((p) => p.name), ["Ann", "ANN"], "and nothing was removed");
   assert.deepEqual((await owner.partnerRemove("ANN")).partner, "ANN");
   assert.deepEqual(owner.partnerList().map((p) => [p.name, p.key]), [["Ann", ann]], "the exact name removes that one alone");
+});
+
+test("a 401 or a 409 is the service saying no: a handover answered so did not go, and nothing is sent again", async (t) => {
+  const fake = new FakeAamio();
+  const { owner } = await pair(t, fake);
+  for (const [label, status] of [["full", 409], ["unsigned", 401]]) {
+    fake.failNext(status);
+    const refused = await failed(() => owner.channelOpen(label, { ttl: 600, to: "guest" }));
+    assert.deepEqual([refused.outcome, refused.status, refused.retryable, refused.opened.label], ["refused", status, false, label]);
+    assert.match(refused.message, new RegExp(`^the channel ${label} is open, and the message carrying its address did not land: send refused \\(http ${status}\\)`));
+    assert.match(refused.fix, new RegExp(`only the message carrying its address did not go\\. aamio refused it, so nobody has been given the address of ${label}\\. Close it with channel close ${label}`));
+    assert.equal(refused.fix.includes("may have arrived"), false);
+  }
+  assert.deepEqual(owner.outboxPending(), [], "neither is waiting to be sent again");
+  assert.deepEqual(await owner.outboxRetry(), [], "and a retry of everything sends neither");
+});
+
+test("partner remove takes a key as well as a name, and an address book that cannot be written is said", async (t) => {
+  const fake = new FakeAamio();
+  const { owner } = await pair(t, fake);
+  const friend = Keys.generate().public;
+  await owner.partnerAdd("friend", friend);
+  const byKey = await owner.partnerRemove(friend);
+  assert.deepEqual([byKey.partner, byKey.known], ["friend", true]);
+  assert.deepEqual(owner.partnerList().map((p) => p.name), ["guest"]);
+  assert.equal((await owner.partnerRemove(Keys.generate().public)).known, false, "a key nobody in the book has changes nothing");
+
+  // The book cannot be written: said as not_saved, and the book is as it was, in memory and on disk.
+  failSaving(owner, "partners.json");
+  const stuck = await failed(() => owner.partnerRemove("guest"));
+  assert.equal(stuck.code, "not_saved");
+  assert.match(stuck.message, /^partners\.json could not be written \(ENOSPC\), so the address book is as it was\./);
+  failSaving(owner, "partners.json");
+  const notAdded = await failed(() => owner.partnerAdd("other", Keys.generate().public));
+  assert.equal(notAdded.code, "not_saved");
+  assert.deepEqual(owner.partnerList().map((p) => p.name), ["guest"]);
+  assert.deepEqual((await onDisk(owner.home, "partners.json")).map((p) => p.name), ["guest"]);
 });

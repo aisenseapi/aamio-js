@@ -97,3 +97,14 @@ test("two spellings that actually differ still are", () => {
   assert.equal(m.json.text, "on my way");
   assert.deepEqual(m.conflicting, { message: "cannot make it" });
 });
+
+test("the library keeps a byte order mark in front of a sealed text, so it is text and not JSON, as the runtimes read it", () => {
+  const sender = Keys.generate();
+  const reader = Keys.generate();
+  const client = new Aamio({ keys: reader });
+  const text = JSON.stringify({ channel: "c".repeat(20), text: "write here" });
+  const marked = client.decode({ seq: 1, at: 1800000000, body: sender.seal(reader.public, "\uFEFF" + text), from: sender.public, verified: true, sig: null });
+  assert.deepEqual([marked.encrypted, marked.plain, marked.json], [true, "\uFEFF" + text, undefined]);
+  const plain = client.decode({ seq: 2, at: 1800000000, body: sender.seal(reader.public, text), from: sender.public, verified: true, sig: null });
+  assert.equal(plain.json.channel, "c".repeat(20), "and without the mark the same text is JSON");
+});

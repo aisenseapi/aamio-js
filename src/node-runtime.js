@@ -43,7 +43,12 @@ const MAX_BYTES_HEADER = 99_999_999;
 const RECEIPT_KEEP = 120;
 // Answers that prove a message was not stored: refusals the service will give
 // again, and a rate window, which it decides before it reads the body.
-const SEND_DETERMINISTIC = [400, 403, 410, 413, 415, 422, 428, 501];
+// 401 and 409 are among them: a signature that does not verify over these
+// bytes, a thread that is full, a key that has used up the gate's per_key. The
+// service answers each before it stores anything. Left out, a handover
+// answered so said the address may have arrived, and retry sent the same
+// bytes to the same refusal (a check of 12 November 2026).
+const SEND_DETERMINISTIC = [400, 401, 403, 409, 410, 413, 415, 422, 428, 501];
 const SEND_NOT_STORED = [...SEND_DETERMINISTIC, 429];
 // Nothing about the message is wrong, only the moment: a rate window, or a
 // service that is busy. 503 is not among the answers that prove nothing was
@@ -802,8 +807,7 @@ export class NodeRuntime {
     // release check of 9 November 2026).
     const next = this.partnersFile.filter((p) => !(isObject(p) && (p.name === name || p.key === key)));
     next.push({ name, key });
-    await this.saveJson("partners.json", next);
-    this.partnersFile = next;
+    await this.savePartners(next);
     return this.inboxAfterChange(`partner ${name} was added`, { partner: name, key });
   }
 
@@ -819,13 +823,29 @@ export class NodeRuntime {
    * one is so named.
    */
   async partnerRemove(name) {
-    const known = this.partnerByName(name);
+    // A key or a name, as a send takes them: the refusal of an ambiguous name
+    // says to give the key, and partner remove did not take one.
+    const known = isKey(String(name)) ? this.partnerByKey(String(name)) : this.partnerByName(name);
     if (known === null) return { partner: String(name), known: false, inbox: this.channel("inbox")?.w ?? null };
     // The book counts only once partners.json holds it, as with partnerAdd.
     const next = this.partnersFile.filter((p) => !(isObject(p) && p.name === known.name));
-    await this.saveJson("partners.json", next);
-    this.partnersFile = next;
+    await this.savePartners(next);
     return this.inboxAfterChange(`partner ${known.name} was removed`, { partner: known.name, known: true });
+  }
+
+  /**
+   * Writes the address book, and only then holds it. One that cannot be
+   * written is said as not_saved, with the book as it was: the command line
+   * said only that it could not complete the command.
+   */
+  async savePartners(next) {
+    try {
+      await this.saveJson("partners.json", next);
+    } catch (error) {
+      if (error?.code === "runtime_closed") throw error;
+      throw runtimeError("not_saved", `partners.json could not be written (${error.code || error.message}), so the address book is as it was. Free the disk, or give this user write access to ${this.home}, then do it again.`);
+    }
+    this.partnersFile = next;
   }
 
   // ------------------------------------------------------------ scopes --
@@ -1861,7 +1881,9 @@ export class NodeRuntime {
     } catch (error) {
       if (error instanceof GateStop) {
         error.opened = opened;
-        error.fix = still + (error.fix ?? "");
+        // Nothing was sent, so nobody has the address, and the channel is one
+        // nobody will write to: closed, and opened anew when it can be handed over.
+        error.fix = still + `Nothing was sent, so nobody has been given its address: close it with channel close ${channel.label}, aamio_close_channel over MCP, and open a new one when the inbox's conditions can be met. ` + (error.fix ?? "");
         throw error;
       }
       // Stopped before a byte left: the outbox could not be written, or the message could not be made.
@@ -1872,9 +1894,15 @@ export class NodeRuntime {
     }
     if (answer.status !== 201) {
       const outcome = outboxOutcome(entry);
-      const [retryable, fix] = sendAdvice(outcome, answer.status);
+      const [retryable, advice] = sendAdvice(outcome, answer.status);
       // Only a refusal says the message is not there.
       const refused = outcome === "refused";
+      // And then nobody has the address. Sending a corrected message, as a
+      // refused send is told, would need the address, and an address goes
+      // only with a channel: this one is closed, and a new one opened.
+      const fix = refused && !SEND_TRY_LATER.includes(answer.status)
+        ? `aamio refused it, so nobody has been given the address of ${channel.label}. Close it with channel close ${channel.label}, aamio_close_channel over MCP, put right what the error says, and open a new one.`
+        : advice;
       throw runtimeError("send_failed", `the channel ${channel.label} is open, and the message carrying its address ${refused ? "did not land" : "may have arrived"}: send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, {
         outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, opened, retryable, fix: (refused ? still : unsettled) + fix,
       });

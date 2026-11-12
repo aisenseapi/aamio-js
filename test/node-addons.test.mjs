@@ -283,6 +283,9 @@ test("what addons.json says and cannot say, and a list of packages that cannot b
     await refusedWith(() => enable(home, "demo2", { ...core, probe }), words);
     assert.equal(await readFile(join(home, "addons.json"), "utf8"), text, "and it is left as it was");
   }
+  // Bytes that are not UTF-8 are no list, as in aamio-python and aamio-php.
+  await writeFile(join(home, "addons.json"), Buffer.concat([Buffer.from('{"enabled": ["npm:demo2-pkg", "caf'), Buffer.from([0xe9]), Buffer.from('"]}')]));
+  await refusedWith(() => enabledNames(home), /addons\.json could not be read/);
   await rm(join(home, "addons.json"));
   await enable(home, "demo2", { ...core, probe });
   // The home's list with a byte order mark in front, as an editor may save it, is read past the mark.

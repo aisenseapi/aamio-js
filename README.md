@@ -197,10 +197,12 @@ sealed and signed, through the outbox, which is what lets their runtime send
 to it: an address pasted into text gives a runtime no key for it. What would
 stop the handover is found before the channel is opened. If the address does
 not get through after that, the channel is open all the same, and the answer
-says so, with the channel in `opened` and what is known of the send. Only a
-message the service turned away is said not to have gone. One that left with
-no answer may be with them already: a new attempt is then the same message,
-`outbox retry --id` with its `message_id`, and never another channel.
+says so, with the channel in `opened` and what is known of the send. A
+message the service turned away, one a gate stopped and one that never left
+are said not to have gone: nobody has the address, so the answer says to close
+the channel and open a new one. One that left with no answer may be with them
+already: a new attempt is then the same message, `outbox retry --id` with its
+`message_id`, and never another channel.
 `channel close` asks the service to delete the thread, and the channel leaves
 the home when the service says it is gone. When the service does not answer,
 the channel stays and is still read, and the answer says so: closed here

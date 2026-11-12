@@ -1401,7 +1401,9 @@ export class Aamio {
       else if (!message.from || !message.verified) out.error = "encrypted message without a verified sender";
       else {
         try {
-          out.plain = textDecoder.decode(this.keys.open(message.from, message.body));
+          // The mark is kept, so a sealed text with a byte order mark in front
+          // is text here as in the runtimes, and not read as JSON.
+          out.plain = new TextDecoder("utf-8", { ignoreBOM: true }).decode(this.keys.open(message.from, message.body));
         } catch {
           out.error = "envelope does not open with these keys";
         }

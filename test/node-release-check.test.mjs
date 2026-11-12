@@ -103,7 +103,9 @@ test("P1: a partner change the address book could not take is not added, in this
     const { added, partners } = await addOverMcp(a, name, key);
     assert.equal(added.isError, true);
     assert.equal(added.structuredContent.added, false, `${name}: not added`);
-    assert.equal(added.structuredContent.error_code, "ENOSPC");
+    // Said as what it is, with the book as it was: the code of the file system is in the words.
+    assert.equal(added.structuredContent.error_code, "not_saved");
+    assert.match(added.structuredContent.error, /^partners\.json could not be written \(ENOSPC\), so the address book is as it was\./);
     assert.deepEqual(partners.map((p) => [p.name, p.key]), [["bob", first.public]], `${name}: this server still has the book the file has`);
   }
   disk.failing = false;
