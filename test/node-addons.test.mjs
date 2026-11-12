@@ -173,6 +173,7 @@ test("enable refuses what cannot be used, records nothing, and the list says wha
     [{ manifest: { ...manifestFor("demo2"), aamio_addon: 3 } }, /is written for contract 3 of aamio's add-ons, and this aamio \(.* for Node\) knows 2/, true, 0],
     [{ manifest: { ...manifestFor("demo2"), aamio_addon: undefined } }, /is written for contract null of aamio's add-ons/, true, 0],
     [{ manifest: manifestFor("list") }, /cannot be called list: that is a command of aamio addon itself/, true, 0],
+    [{ manifest: manifestFor("nul") }, /its manifest's name, nul, is one Windows keeps for a device, and it names the add-on's files in the home/, true, 0],
     [{ declared: "../../../outside.json" }, /the manifest its package\.json names under aamioAddon .* is (?:outside the package|not there)/, true, 0],
     [{ declared: 7 }, /the manifest its package\.json names under aamioAddon is not a path inside the package/, true, 0],
     [{ manifest: { ...manifestFor("demo2"), process: { node: "../../outside.js" } } }, /the script its manifest names under process\.node .* is (?:outside the package|not there)/, true, 0],

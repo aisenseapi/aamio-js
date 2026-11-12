@@ -58,6 +58,9 @@ export const LOCK_WAIT = 10;
 export const RESTART = "A local MCP server already running keeps the tools it started with: start it again to see the change.";
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// Names Windows takes for a device. An add-on's short name is the name of its
+// list of websites and of its own directory in the home.
+const DEVICE = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/;
 const COMMAND = /^[a-z][a-z0-9-]{0,31}$/;
 const POSITIONAL = /^[a-z][a-z0-9_-]{0,31}$/;
 const OPTION = /^--[a-z][a-z0-9-]{0,31}$/;
@@ -210,6 +213,8 @@ export class Manifest {
   validate() {
     if (typeof this.NAME !== "string" || !NAME.test(this.NAME)) this.wrong("its manifest has no name of 1 to 32 characters of a-z, 0-9, dash and underscore");
     if (RESERVED.includes(this.NAME)) throw new AddonError(`${this.distribution} cannot be called ${this.NAME}: that is a command of aamio addon itself. To go on without it: ${this.fix}.`);
+    // On Windows a file of that name is the device: a list of websites written to nul.hosts.json is written nowhere.
+    if (DEVICE.test(this.NAME)) this.wrong(`its manifest's name, ${this.NAME}, is one Windows keeps for a device, and it names the add-on's files in the home`);
     if (typeof this.version !== "string" || !this.version) this.wrong("its manifest has no version");
     if (typeof this.script !== "string" || !SCRIPT.test(this.script)) this.wrong("its manifest names no JavaScript file to run under process.node");
     if (!Number.isInteger(this.deadline) || this.deadline < 1 || this.deadline > DEADLINE_MAX) this.wrong(`deadline_seconds in its manifest is not a whole number from 1 to ${DEADLINE_MAX}`);
