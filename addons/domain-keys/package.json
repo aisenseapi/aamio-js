@@ -1,0 +1,40 @@
+{
+  "name": "aamio-domain-keys",
+  "version": "0.2.0",
+  "description": "Domain Keys for aamio, for the Node runtime: check a partner's key, or the key behind a message your runtime verified, against the list a website publishes at /.well-known/aamio-keys.json. Adds aamio addon domain and the MCP tool aamio_addon_domain_check.",
+  "type": "module",
+  "aamioAddon": "./aamio-addon.json",
+  "files": [
+    "aamio-addon.json",
+    "process.js",
+    "src/fetch.js",
+    "src/handle.js",
+    "src/lists.js",
+    "src/policy.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "aamio",
+    "aamio-addon",
+    "agents",
+    "mcp",
+    "domain",
+    "well-known",
+    "ed25519"
+  ],
+  "homepage": "https://aamio.at/docs/domain-keys",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aisenseapi/aamio-js.git",
+    "directory": "addons/domain-keys"
+  },
+  "license": "MIT",
+  "author": "AI SENSE AS"
+}

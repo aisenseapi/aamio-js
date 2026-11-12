@@ -288,6 +288,73 @@ choose a separate `--home DIR`. The operating system releases the lock if
 the owner exits or crashes. Linux requires the `flock` command from util-linux.
 `whoami` can read the public identity while another client owns the home.
 
+### Add-ons
+
+What a runtime can do beyond the core is an add-on: an npm package of its own,
+installed one by one and enabled by name, as in aamio-python and aamio-php.
+Domain Keys, Earshot and QRCast are add-ons, and
+[examples/hello](https://github.com/aisenseapi/aamio-js/tree/main/examples/hello)
+is the smallest one, for anyone who writes their own. How one is written is at
+[aamio.at/docs/addons](https://aamio.at/docs/addons).
+
+```sh
+npx aamio init                                        # a home has its identity before anything is installed in it
+npm install --prefix ~/.aamio/addon-packages/npm --ignore-scripts aamio-domain-keys
+npx aamio addon list                                  # what is installed in this home, and which of it runs here
+npx aamio addon enable domain                         # installed is not enabled: this lets it run here
+npx aamio addon domain --help                         # its commands, from its manifest
+npx aamio addon disable domain
+```
+
+An add-on is installed in a folder of the home's own, `addon-packages/npm`, so
+what is installed does not depend on the folder a command is run in or on the
+cache `npx` started aamio from, and each home has its own. `addon list` reads
+`package.json` and the add-on's manifest, `aamio-addon.json`, and runs nothing
+of the add-on; on a home that is not there it makes nothing. It shows the
+package, the short name, the version, the environment variables the add-on
+asks for by name, and whether it is enabled. `addon enable` starts the add-on's
+process once, to see that it answers as its manifest says, and records the
+choice in `addons.json` in the home, as `npm:<package>`, beside the entries
+aamio-python and aamio-php keep there: a package on npm and a distribution on
+PyPI that share a name are two choices. An identity is made only in a folder
+that is not there yet, so run `aamio init` before the first install; `enable`
+says so when a home got its add-on first.
+
+Each call of an add-on is a process of its own: one JSON request on its
+standard input, one JSON answer on its standard output, the deadline its
+manifest names, from 1 to 120 seconds, at most a megabyte of answer and 64 KiB
+of standard error, at most two calls of one add-on at once and twenty a minute.
+A process that hangs, crashes or floods is stopped and becomes an answer that
+says so, and the runtime and the MCP server go on. The process gets its
+arguments, a key aamio resolved for it, the runtime's public key where a
+command asks for it, a directory of its own, `addons/NAME` in the home, and a
+short list of environment variables: the path, a temporary directory, the
+locale, TLS roots and the proxy variables, which can carry credentials of
+their own, and what its manifest asks for by name. It never gets the home's
+key, `AAMIO_HOME` or the rest of your environment, and nothing it answers
+changes state in aamio. It is not a sandbox: the process runs with your own
+file permissions, so enable add-ons you trust.
+
+What an add-on may be given is the core's to settle. A name is resolved to a
+key from the address book, or from a message this process read and verified
+itself, never from the conversation. A website an add-on would read has to be
+on the home's list for that add-on, `aamio addon NAME allow HOST`, kept in
+`addons/NAME.hosts.json`; over MCP, for a website that is not on it, the user
+is asked in a form of their app to type the domain themselves, and one typed
+differently stops the call. The form does not show the domain the agent asked
+for.
+
+The server offers the tools of the add-ons enabled in its home when it starts,
+as `aamio_addon_NAME_*`, beside its own twenty-four. A server already running
+keeps the tools it started with. An add-on that cannot be read stops the start
+and says why, and `aamio addon disable` takes it out; one that is enabled and
+no longer installed is said on standard error. This runtime runs add-ons on
+contract 2 alone, a process per call, and loads nothing of an add-on into its
+own process. `AAMIO_ADDONS`, which names a checkout to the other two runtimes,
+is not read here: what runs is what is installed in the home and enabled.
+On Windows another client that changes `addons.json` in the same instant is
+told the list could not be locked, and changes nothing.
+
 ## Two agents
 
 ```js

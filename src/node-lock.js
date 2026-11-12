@@ -97,8 +97,17 @@ async function holdWithFlock(home, path, command) {
 }
 
 /** The operating system's lock on owner.lock. The holder, or null when another process holds it. */
-export async function holdOwnerLock(home, { flock = "flock", platform = process.platform } = {}) {
-  const path = join(home, OWNER_LOCK);
+export async function holdOwnerLock(home, options = {}) {
+  return holdFile(home, join(home, OWNER_LOCK), options);
+}
+
+/**
+ * The operating system's lock on one file of a home, taken the way owner.lock
+ * is taken: the holder, or null when another process holds it. The list of
+ * enabled add-ons has such a lock beside it, addons.json.lock, which
+ * aamio-python and aamio-php take as they take owner.lock.
+ */
+export async function holdFile(home, path, { flock = "flock", platform = process.platform } = {}) {
   if (platform === "win32") return holdWithOpen(home, path, WINDOWS_NO_SHARING, ["EBUSY"]);
   if (BSD.includes(platform)) return holdWithOpen(home, path, BSD_EXLOCK | constants.O_NONBLOCK, ["EAGAIN", "EWOULDBLOCK"]);
   if (platform === "linux") return holdWithFlock(home, path, flock);

@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 import { GateStop, isKey } from "./aamio.js";
 import { readIdentity } from "./node-identity.js";
 import { OUTBOX_NOTES, SEND_STOPS, checkGate, outboxOutcome, stopFields } from "./node-runtime.js";
+import { toolsOf } from "./node-addons.js";
+import { HOST_QUESTION, callTool } from "./node-addon-process.js";
 
 // Keep the wire shapes in step with the Python and Composer stdio servers.
 const MODERN = "2026-07-28";
@@ -194,6 +196,9 @@ const RUNTIME_TOOLS = [
 ];
 
 /** An answer that is an error and is still an answer: what was asked for was not done, and this says why. */
+/** The names of the core's tools, which no add-on's tool may take. */
+export const RUNTIME_TOOL_NAMES = RUNTIME_TOOLS.map((tool) => tool.name);
+
 class ToolRefusal extends Error {
   constructor(data) {
     super("refused");
@@ -253,7 +258,8 @@ async function handle(message, session) {
     case "ping":
       return complete({});
     case "tools/list":
-      return complete({ tools: session.runtime ? RUNTIME_TOOLS : [WHOAMI] }, true);
+      // The core's tools, and those of the add-ons enabled in this home when the server started.
+      return complete({ tools: session.runtime ? session.tools : [WHOAMI] }, true);
     case "resources/list":
       return complete({ resources: [] }, true);
     case "resources/templates/list":
@@ -369,14 +375,16 @@ function asker(params, session, version, callId) {
   if (!canAskTheUser(params, session, version)) return null;
   const form = (question) => (version === "2025-11-25" || version === MODERN ? { mode: "form", ...question } : question);
   if (version === MODERN) {
-    return async (question, about, held, { again = false } = {}) => {
-      const asking = { resultType: "input_required", inputRequests: { [PARTNER_QUESTION]: { method: "elicitation/create", params: form(question) } }, requestState: sealState(about, held) };
+    // tool and key say whose question it is: the address book's by default,
+    // and an add-on's tool asks about a website under a name of its own.
+    return async (question, about, held, { again = false, tool = "aamio_partner_add", key = PARTNER_QUESTION } = {}) => {
+      const asking = { resultType: "input_required", inputRequests: { [key]: { method: "elicitation/create", params: form(question) } }, requestState: sealState(about, held, tool) };
       const state = params.requestState;
       const responses = params.inputResponses;
       if (again || (state === undefined && responses === undefined)) throw new InputRequired(asking);
-      const said = takeState(state, about);
+      const said = takeState(state, about, tool);
       if (!said) throw new NoDialog(`the answer did not come with a question this server asked, in the last ${CONFIRM_SECONDS / 60} minutes, about ${about}`);
-      const answer = object(responses) ? responses[PARTNER_QUESTION] : undefined;
+      const answer = object(responses) ? responses[key] : undefined;
       // The answer itself is missing: asked again, as the revision says, rather than refused.
       if (!object(answer)) throw new InputRequired(asking);
       return { answer, held: said.held };
@@ -519,11 +527,38 @@ function wrongArguments(tool, args) {
   return null;
 }
 
+/**
+ * One tool of an add-on enabled in this home. The core settles what is the
+ * core's, in turn with everything else that uses the home: the key behind a
+ * name, and the user's consent to a website, asked in a form when it is not
+ * on their list. The add-on's process runs outside that turn, so presence is
+ * still published while it works, and whatever it does, hang, crash or flood,
+ * comes back as an answer and the server goes on.
+ */
+async function callAddonTool(id, params, session, version, reply, complete, manifest) {
+  if (params.arguments !== undefined && !object(params.arguments)) return rpcError(id, -32602, "arguments must be an object");
+  const runtime = session.runtime;
+  const asking = asker(params, session, version, id);
+  const ask = asking === null ? null : async (question, about) => (await asking(question, about, null, { tool: params.name, key: HOST_QUESTION })).answer;
+  try {
+    const [data, isError] = await callTool(manifest, runtime, params.name, params.arguments ?? {}, { ask, NoDialog, serial: (act) => runtime.serial(async () => act()) });
+    return complete(toolResult(object(data) ? data : { result: data }, isError));
+  } catch (failure) {
+    if (failure instanceof InputRequired) return reply(failure.result);
+    // The call was cancelled while the user was being asked: it is answered with nothing.
+    if (failure instanceof Cancelled) return undefined;
+    throw failure;
+  }
+}
+
 /** One tool of the runtime. A call and the presence timer take turns with the home. */
 async function callRuntimeTool(id, params, session, version, reply, complete) {
   const runtime = session.runtime;
   const tool = RUNTIME_TOOLS.find((t) => t.name === params.name);
-  if (!tool) return rpcError(id, -32602, "Unknown tool");
+  if (!tool) {
+    const manifest = session.addons.find((held) => held.tools.some((offered) => offered.name === params.name));
+    return manifest ? callAddonTool(id, params, session, version, reply, complete, manifest) : rpcError(id, -32602, "Unknown tool");
+  }
   if (tool.name === "aamio_partner_add") {
     // Extra arguments are refused in the answer, with where keys come from, not as a protocol error.
     if (params.arguments !== undefined && !object(params.arguments)) return rpcError(id, -32602, "arguments must be an object");
@@ -657,8 +692,10 @@ async function* lines(input) {
  * never sent, is passed over and not kept, so it cannot stop a later call
  * that uses the same id.
  */
-export async function serveMcp({ home, version, runtime = null, input = process.stdin, output = process.stdout }) {
-  const session = { home, runtime, packageVersion: version, protocolVersion: "2025-03-26", capabilities: null, asked: 0, waiting: new Map() };
+export async function serveMcp({ home, version, runtime = null, addons = [], input = process.stdin, output = process.stdout }) {
+  // addons: the manifests of the add-ons enabled in this home, read before the
+  // server started. Their tools stand beside the core's for as long as it runs.
+  const session = { home, runtime, addons, tools: [...RUNTIME_TOOLS, ...toolsOf(RUNTIME_TOOLS, addons)], packageVersion: version, protocolVersion: "2025-03-26", capabilities: null, asked: 0, waiting: new Map() };
   const queue = [];
   // Ids of the calls queued or being served, and those of them the client has cancelled.
   const open = new Map();

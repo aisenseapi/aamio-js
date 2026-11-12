@@ -19,6 +19,8 @@
     "bin/aamio.js",
     "src/aamio.js",
     "src/aamio.d.ts",
+    "src/node-addon-process.js",
+    "src/node-addons.js",
     "src/node-archive.js",
     "src/node-identity.js",
     "src/node-lock.js",

@@ -1,0 +1,17 @@
+{
+  "name": "aamio-addon-hello",
+  "version": "0.1.0",
+  "description": "An example add-on to aamio: one command and one tool that answer with a greeting, in a process of their own.",
+  "type": "module",
+  "private": true,
+  "aamioAddon": "./aamio-addon.json",
+  "files": [
+    "aamio-addon.json",
+    "process.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "AI SENSE AS"
+}

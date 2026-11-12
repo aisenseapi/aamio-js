@@ -744,6 +744,24 @@ export class NodeRuntime {
   }
 
   /**
+   * The keys that signed a message this process read and verified, by its
+   * hash. The same bytes may carry more than one. What this process checked
+   * lives in its memory and not in state.json, so a message read by an
+   * earlier process is not here. An observation the channel's allowlist kept
+   * out is: a signature that checked is not a permission. An add-on is given
+   * the key behind a message this way, and never a key from the conversation.
+   */
+  verifiedSigners(sha256) {
+    const keys = [];
+    for (const held of this.observed.values()) {
+      for (const row of held.rows.values()) {
+        if (row.sha256 === sha256 && row.verified === true && !keys.includes(row.from_key)) keys.push(row.from_key);
+      }
+    }
+    return keys;
+  }
+
+  /**
    * The partner with this name: the one so named exactly, or the only one so
    * named apart from upper and lower case. Two of those, and no exact one, is
    * an error, never a guess: a guess seals the message to the wrong key.

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { GateStop } from "../src/aamio.js";
 import { initIdentity, readIdentity } from "../src/node-identity.js";
-import { serveMcp } from "../src/node-mcp.js";
+import { RUNTIME_TOOL_NAMES, serveMcp } from "../src/node-mcp.js";
+import { AddonError, describe, disable, enable, enabledButMissing, installWords, loaded } from "../src/node-addons.js";
+import { parseCommand, probe, runCommand, usageOf } from "../src/node-addon-process.js";
 import { archiveStatus, parsePolicy, readPolicy } from "../src/node-archive.js";
 import { CHANNEL_TTL, NodeRuntime, SEND_STOPS, checkChannelTtl, checkGate, checkLabel, checkPartner, checkRe, stopFields } from "../src/node-runtime.js";
 import { checkAccess, checkScopeAdd, checkScopeName } from "../src/node-scopes.js";
@@ -54,8 +56,13 @@ const help = `Usage: aamio [--home DIR] [--no-archive] <command>
   scope share NAME PARTNER --access read|write
                                Hand a scope to a partner, sealed: read gives the key, write the address
   scope remove NAME            Forget a scope on this machine
+  addon list                   The add-ons installed in this home, and which of them run here
+  addon enable NAME            Let an installed add-on run here; addon disable NAME takes it out again
+  addon NAME COMMAND ...       An add-on's own commands: aamio addon NAME --help lists them
   serve                        Start the local MCP server on standard input and output
 
+An add-on is an npm package of its own, installed in the home's folder for
+add-ons, addon-packages/npm, and run in a process of its own for each call.
 The default home is AAMIO_HOME or ~/.aamio. A new home needs an existing
 parent directory. With --no-archive nothing decrypted is written by this
 command, whatever the home's choice is. Run with --version to print the npm
@@ -121,6 +128,8 @@ function parse(argv) {
     return { command: "help" };
   }
   if (args.length === 1 && args[0] === "--version") return { command: "version" };
+  // An add-on's commands are its manifest's to say, so the words after addon are read later, against it.
+  if (args[0] === "addon") return { command: "addon", home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), words: args.slice(1), archive };
   const command = GROUPS.includes(args[0]) ? `${args[0]} ${args[1] ?? ""}`.trim() : args[0];
   const spec = SPEC[command];
   if (!spec) throw new Error(`Expected one of: ${Object.keys(SPEC).join(", ")}. Run aamio --help for usage.`);
@@ -362,6 +371,96 @@ function plan(command, positional, options) {
   }
 }
 
+const ADDON_HELP = `Usage: aamio [--home DIR] addon <command>
+
+  list                 The add-ons installed in this home's folder for add-ons, and which of them run here
+  enable NAME          Let an installed add-on run here, by its short name or its package
+  disable NAME         Take an add-on out again
+  NAME COMMAND ...     A command of an add-on that runs here: aamio addon NAME --help lists them
+
+An add-on is installed with npm in addon-packages/npm under the home. Listing
+runs nothing of it. enable starts its process once, to see that it answers as
+its manifest says, and records the choice in addons.json in the home.
+`;
+
+/**
+ * aamio addon ...: the exit code. list, enable and disable read the home's
+ * folders and files and open no runtime: a list of a home that is not there
+ * leaves it not there. An add-on's own command runs in a process of the
+ * add-on's, with the home open for it unless its manifest says it needs none.
+ */
+async function addon(home, words, archive) {
+  const [first, ...rest] = words;
+  const say = (value) => process.stdout.write(JSON.stringify(value) + "\n");
+  const refuse = (message, code) => {
+    process.stderr.write(`aamio: ${message}\n`);
+    return code;
+  };
+  if (first === undefined || ["--help", "-h", "help"].includes(first)) {
+    (first === undefined ? process.stderr : process.stdout).write(ADDON_HELP);
+    return first === undefined ? 2 : 0;
+  }
+  const core = { coreTools: RUNTIME_TOOL_NAMES };
+  try {
+    if (first === "list") {
+      if (rest.length) return refuse("addon list takes no arguments.", 2);
+      const answer = await describe(home, core);
+      say(answer);
+      // What is broken is in the list, with the command that takes it out.
+      return answer.error ? 1 : 0;
+    }
+    if (first === "enable" || first === "disable") {
+      if (rest.length !== 1 || rest[0].startsWith("-")) return refuse(`addon ${first} takes one add-on, by its short name or its package.`, 2);
+      // An identity is made only in a folder that is not there yet, so a home
+      // that got its add-on first can never get one as it is. Said here, where
+      // the user can still put it right, and not by the first command that
+      // needs the key, which could only say that the key is missing.
+      if (first === "enable" && existsSync(home) && !existsSync(join(home, "key"))) {
+        return refuse(`${home} has no identity yet, and aamio makes one only in a folder that is not there. Nothing was enabled. Move ${home} aside, run aamio --home "${home}" init, ` +
+          "move addon-packages from the folder you moved into the new home, and enable the add-on again.", 2);
+      }
+      try {
+        say(first === "enable" ? await enable(home, rest[0], { ...core, probe }) : await disable(home, rest[0], core));
+      } catch (failure) {
+        if (!(failure instanceof AddonError)) throw failure;
+        return refuse(failure.message, 2);
+      }
+      return 0;
+    }
+    const manifest = (await loaded(home, core)).find((held) => held.NAME === first);
+    if (!manifest) {
+      const there = (await describe(home, core)).addons.some((row) => row.name === first || row.distribution === first);
+      return refuse(there ? `the add-on ${first} is installed and not enabled. aamio addon enable ${first} lets it run here.`
+        : `no add-on called ${first} runs here. aamio addon list says which are installed in this home.`, 2);
+    }
+    const parsed = parseCommand(manifest, rest);
+    if (parsed.help) {
+      (parsed.asked ? process.stdout : process.stderr).write(usageOf(manifest));
+      return parsed.asked ? 0 : 2;
+    }
+    const options = { stderr: (text) => process.stderr.write(text) };
+    let done;
+    if (!parsed.needsRuntime) {
+      done = await runCommand(manifest, parsed, null, options);
+    } else {
+      await initIdentity(home);
+      const runtime = await NodeRuntime.open({ home, archive });
+      try {
+        done = await runCommand(manifest, parsed, runtime, options);
+      } finally {
+        await runtime.close();
+      }
+    }
+    // The bytes as they are, for a command that answers with a file.
+    if (done.raw !== undefined) process.stdout.write(done.raw);
+    else if (done.out !== undefined) say(done.out);
+    return done.code;
+  } catch (failure) {
+    if (failure instanceof AddonError) return refuse(failure.message, 1);
+    throw failure;
+  }
+}
+
 async function main() {
   let options;
   try {
@@ -373,7 +472,25 @@ async function main() {
   const { command, home, archive } = options;
   if (command === "help") process.stdout.write(help);
   else if (command === "version") process.stdout.write(version + "\n");
+  else if (command === "addon") return addon(home, options.words, archive);
   else if (command === "serve") {
+    // The add-ons enabled in this home, read before the home is taken: one
+    // that cannot be used stops the start and says so, a quiet absence would
+    // be a tool the user enabled and the model never sees.
+    let addons;
+    try {
+      addons = await loaded(home, { coreTools: RUNTIME_TOOL_NAMES });
+      // Enabled here and not installed any more: the server starts without
+      // it, and says so on standard error, where the app that started it
+      // keeps its log. Standard output is the protocol's alone.
+      for (const gone of await enabledButMissing(home)) {
+        process.stderr.write(`aamio: the add-on ${gone} is enabled in this home and not installed there any more, so its tools are not offered. Install it again with ${installWords(home, gone)}, or take it out with aamio addon disable ${gone}.\n`);
+      }
+    } catch (failure) {
+      if (!(failure instanceof AddonError)) throw failure;
+      process.stderr.write(`aamio: ${failure.message}\n`);
+      return 1;
+    }
     await initIdentity(home);
     // One live runtime per home, Node, Python or PHP: serve holds the home,
     // owner.lock and all, for as long as it runs, as the other servers do.
@@ -390,7 +507,7 @@ async function main() {
     }, 30_000);
     keepalive.unref();
     try {
-      await serveMcp({ home, version, runtime });
+      await serveMcp({ home, version, runtime, addons });
     } finally {
       clearInterval(keepalive);
       await runtime.serial(() => runtime.close());

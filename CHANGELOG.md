@@ -77,6 +77,21 @@ not what moved in the source.
 - Channels past their time leave the home. Every inbox a home ever had stayed
   in `state.json`, which was written again at each save.
 - The local server has twenty-four tools.
+- Add-ons run in the Node runtime, on contract 2 of aamio's add-ons, the one
+  aamio-python and aamio-php speak. An add-on is an npm package of its own
+  with a manifest, installed in the home's own folder, `addon-packages/npm`,
+  listed by `addon list` with nothing of it run, and enabled by name with
+  `addon enable`, which starts its process once and records the choice in
+  `addons.json` as `npm:<package>`, beside the other clients' entries. Its
+  commands are under `aamio addon NAME`, and its tools, `aamio_addon_NAME_*`,
+  are offered by the server that starts in that home. Each call is a process
+  of the add-on's own, with a deadline, a ceiling on what it may write, a
+  short list of environment variables and never the home's key. The core
+  resolves a name to a key and keeps the user's list of websites an add-on
+  may read, asking the user in a form over MCP. A home has its identity
+  before an add-on is installed in it. `examples/hello` is the smallest
+  add-on, and Domain Keys, Earshot and QRCast are packages of their own:
+  `aamio-domain-keys`, `aamio-earshot` and `aamio-qrcast`.
 
 ## 0.6.3 - 2026-11-11
 
