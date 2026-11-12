@@ -469,8 +469,8 @@ test("only the environment the manifest declares is passed, and none of it to th
   const [manifest] = await loaded(home, core);
   const answer = (await run(manifest, "command", "ping", {})).result;
   assert.deepEqual([answer.passthru, answer.secret, answer.home_env, answer.addons_env, answer.addon_env], ["declared", null, null, null, "2"]);
-  const env = childEnvironment(manifest, true, { Path: "p", HTTPS_PROXY: "http://user:word@proxy", https_proxy: "x", NODE_OPTIONS: "--inspect", GITHUB_TOKEN: "t", AAMIO_HOME: home, AAMIO_TEST_PASSTHRU: "d", LANG: "nb_NO.UTF-8" });
-  assert.deepEqual(env, { Path: "p", HTTPS_PROXY: "http://user:word@proxy", https_proxy: "x", AAMIO_TEST_PASSTHRU: "d", LANG: "nb_NO.UTF-8", AAMIO_ADDON: "2" });
+  const env = childEnvironment(manifest, true, { Path: "p", HTTPS_PROXY: "http://user:word@proxy", https_proxy: "x", NODE_USE_ENV_PROXY: "1", NODE_OPTIONS: "--inspect", GITHUB_TOKEN: "t", AAMIO_HOME: home, AAMIO_TEST_PASSTHRU: "d", LANG: "nb_NO.UTF-8" });
+  assert.deepEqual(env, { Path: "p", HTTPS_PROXY: "http://user:word@proxy", https_proxy: "x", NODE_USE_ENV_PROXY: "1", AAMIO_TEST_PASSTHRU: "d", LANG: "nb_NO.UTF-8", AAMIO_ADDON: "2" });
   assert.deepEqual(Object.keys(childEnvironment(manifest, false, { AAMIO_TEST_PASSTHRU: "d", AAMIO_ADDON: "9" })), ["AAMIO_ADDON"]);
 });
 

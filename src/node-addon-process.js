@@ -41,7 +41,9 @@ export const ENVIRONMENT = new Set([
   "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
   "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ",
   "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
-  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+  // Node goes through the proxy these name only when NODE_USE_ENV_PROXY says
+  // so: the user's own word about the same proxy, and it goes with them.
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY",
 ]);
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
