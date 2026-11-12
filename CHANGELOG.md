@@ -33,7 +33,19 @@ not what moved in the source.
 - The note about a folder that could not be synced says that what was read
   would be read again only of `state.json`, the file that holds the cursor. It
   said so of every file.
-- The local server has sixteen tools.
+- Scopes in the Node runtime. `scope new`, `scope add`, `scope list`,
+  `scope key`, `scope share` and `scope remove` on the command line, `--scope`
+  on `board post`, `board find` and `board answer`, and over the local server
+  `aamio_scopes`, `aamio_scope_new`, `aamio_scope_add`, `aamio_scope_share` and
+  `aamio_scope_remove`, with `scope` on the three board tools. A scope has a
+  name here and its key stays in `scopes.json`, the file aamio-python and
+  aamio-php keep, so a home's scopes read the same in all three. A scope a
+  partner shares, sealed, is kept under the partner's name and the scope's, and
+  its key is taken out of the message before anything reads it: the server has
+  no tool that shows a key. A removed scope stays removed when its invitation
+  is read again. A share that arrived here was said to be not kept, since Node
+  kept no scopes; it is kept now.
+- The local server has twenty-one tools.
 
 ## 0.6.3 - 2026-11-11
 

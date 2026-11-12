@@ -2,7 +2,7 @@
 // signatures, presence, and the board at BOARD. Enough of the wire contract (https://aamio.at/api.md) for the
 // runtime's tests, and no more: the real service is what code/php/tools/check-node-exchange.py runs against.
 import { randomBytes } from "node:crypto";
-import { boardDeleteSigningInput, boardSigningInput, deriveAddress, isEnvelope, keyHash, presenceSigningInput, sha256hex, threadSigningInput, verify } from "../src/aamio.js";
+import { boardDeleteSigningInput, boardSigningInput, deriveAddress, isEnvelope, keyHash, presenceSigningInput, scopeAddress, sha256hex, threadSigningInput, verify } from "../src/aamio.js";
 
 export const BOARD = "https://fake.board";
 // Verifyum's MCP endpoint in memory: each anchoring is counted in anchors, and answered with a proof.
@@ -37,6 +37,16 @@ export class FakeAamio {
     this.boardSeq = 0;
     // What the board's descriptor advises posts to carry.
     this.boardBits = 0;
+    // Scopes on the board (func_aamio_board.php): a post that carries a scope's address is unlisted, and only a find
+    // with the key that address was derived from returns it. finds keeps the body of every find, so a test can see
+    // where a key went. A page holds boardPage posts, the oldest of what is new. boardScopeEcho is what a find of a
+    // scope names as the scope it read: the address when nothing is set, nothing at all for false, or what a test
+    // says. boardKnowsNoScopes plays a board from before scopes, and boardFailures answers the next finds as told.
+    this.finds = [];
+    this.boardPage = 200;
+    this.boardScopeEcho = undefined;
+    this.boardKnowsNoScopes = false;
+    this.boardFailures = [];
     // Presence answers its matches in this order, or the other way round.
     this.reverseLookup = false;
     // The arguments of every anchoring Verifyum was asked for, and what the receipt route hands out, changed if a test says so.
@@ -225,22 +235,45 @@ export class FakeAamio {
       if (!thread || thread.expire_at < this.time + fields.ttl || !(thread.allow.length === 0 || thread.allow.includes("*"))) {
         return this.reply(409, { error: "a post whose address is dead reaches nobody", field: "w", fix: "Open the inbox with X-Allow: * for longer than the post." });
       }
+      if ("scope" in fields && (this.boardKnowsNoScopes || typeof fields.scope !== "string" || !/^[a-z2-7]{20}$/.test(fields.scope))) {
+        return this.reply(400, { error: "scope is the 20 character address of a scope", field: "scope", fix: "Derive the address from the key, and leave the field out for a public post." });
+      }
       const id = sha256hex(key + body).slice(0, 20);
       const post = { id, key, kind: fields.kind, title: fields.title, text: fields.text, w: fields.w, tags: fields.tags ?? [], lang: fields.lang ?? null, seq: ++this.boardSeq, created_at: this.time, expire_at: this.time + fields.ttl, work_bits: this.header(init, "X-Work") ? this.boardBits : 0 };
+      // Only on a post in a scope, and only ever seen by a find with that scope's key.
+      if (fields.scope) post.scope = fields.scope;
       this.posts.set(id, post);
       return this.reply(201, { ...post });
     }
     if (method === "POST" && path === "/find") {
       const filter = body ? JSON.parse(body) : {};
+      this.finds.push(filter);
+      const failure = this.boardFailures.shift();
+      if (failure) return this.reply(failure.status, typeof failure.body === "function" ? failure.body(filter) : failure.body);
+      if ("scope" in filter) return this.reply(400, { error: "Reading a scope takes scope_key, not scope", fix: "Send the scope key the address was derived from as scope_key." });
+      let scope = null;
+      if ("scope_key" in filter) {
+        if (this.boardKnowsNoScopes) return this.reply(400, { error: "Unknown field scope_key. The form is kind, tags, lang, key, after, wait, min_work_bits", fix: "Leave the field out." });
+        if (typeof filter.scope_key !== "string" || !/^[a-z0-9]{26,64}$/.test(filter.scope_key)) return this.reply(400, { error: "scope_key must be 26 to 64 characters of a-z and 0-9", fix: "Send the scope key itself, and not the 20 character address that goes on a post." });
+        // The key only ever becomes the address here.
+        scope = scopeAddress(filter.scope_key);
+      }
       const covers = (tag) => (filter.tags ?? []).some((wanted) => tag === wanted || tag.startsWith(wanted + "."));
-      const matching = live.filter((post) => (!filter.kind || post.kind === filter.kind) && (!filter.tags?.length || post.tags.some(covers))
+      // One part of the board: the public one, or one scope. Never both.
+      const matching = live.filter((post) => (post.scope ?? null) === scope && (!filter.kind || post.kind === filter.kind) && (!filter.tags?.length || post.tags.some(covers))
         && (!filter.lang || post.lang === filter.lang) && post.work_bits >= (filter.min_work_bits ?? 0));
-      const posts = matching.filter((post) => post.seq > (filter.after ?? 0)).reverse();
-      return this.reply(200, { count: posts.length, live: matching.length, next: posts.length ? posts[0].seq : filter.after ?? 0, more: false, posts });
+      // Newest first, and a page holds the oldest of what is new, so a caller that follows next steps over nothing.
+      const fresh = matching.filter((post) => post.seq > (filter.after ?? 0)).reverse();
+      const more = fresh.length > this.boardPage;
+      const posts = more ? fresh.slice(-this.boardPage) : fresh;
+      const answer = { count: posts.length, live: matching.length, next: posts.reduce((highest, post) => Math.max(highest, post.seq), filter.after ?? 0), more, posts };
+      // The answer names the scope it read.
+      if (scope !== null && this.boardScopeEcho !== false) answer.scope = this.boardScopeEcho ?? scope;
+      return this.reply(200, answer);
     }
     if (method === "GET" && path === "/tags") {
       const tags = {};
-      for (const post of live) for (const tag of post.tags) {
+      for (const post of live.filter((p) => !p.scope)) for (const tag of post.tags) {
         tags[tag] ??= { tag, needs: 0, offers: 0 };
         tags[tag][post.kind === "need" ? "needs" : "offers"]++;
       }
@@ -248,7 +281,8 @@ export class FakeAamio {
     }
     const id = decodeURIComponent(path.slice(1));
     const post = live.find((p) => p.id === id);
-    if (method === "GET") return post ? this.reply(200, { ...post }) : this.reply(404, { error: "no live post with that id", id });
+    // A post in a scope is never served by its id: only a find with the scope's key returns it.
+    if (method === "GET") return post && !post.scope ? this.reply(200, { ...post }) : this.reply(404, { error: "no live post with that id", id });
     if (method === "DELETE") {
       if (!post) return this.reply(404, { error: "no live post with that id", id });
       if (!verify(post.key, boardDeleteSigningInput(id, body), this.header(init, "X-Sig") || "")) return this.reply(403, { error: "only the key that posted can withdraw", fix: "Sign with that key." });

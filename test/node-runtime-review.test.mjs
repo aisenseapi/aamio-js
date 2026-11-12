@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { PassThrough, Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { threadSigningInput } from "../src/aamio.js";
+import { scopeAddress, threadSigningInput } from "../src/aamio.js";
 import { initIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
 import { NodeRuntime } from "../src/node-runtime.js";
@@ -73,7 +73,7 @@ test("finding 1: names that differ only in case are never a guess, and a key giv
   await assert.rejects(one.partnerAdd("S", two.keys.public), { code: "ambiguous_partner" }, "a new name that differs only in case is refused");
 });
 
-test("finding 2: a scope share comes out of the message before the reader sees it, over the command line's runtime and over MCP", async (t) => {
+test("finding 2: the key of a scope share comes out of the message before the reader sees it, over the command line's runtime and over MCP", async (t) => {
   const fake = new FakeAamio();
   const { a: homeA, b: homeB, open } = await fixture(t, fake, "a", "b");
   const a = await open(homeA);
@@ -92,10 +92,13 @@ test("finding 2: a scope share comes out of the message before the reader sees i
   await serveMcp({ home: homeA, version: "test", runtime: a, input: Readable.from([JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "aamio_read", arguments: {} } }) + "\n"]), output });
   assert.ok(!text.includes(CANARY), "neither the structured result nor its text carries the key");
   const read = JSON.parse(text).result.structuredContent;
-  assert.deepEqual(read.messages[0].body.data.aamio_scope, { shared_as: "review", can_read: true, kept: false, note: read.messages[0].body.data.aamio_scope.note });
-  assert.match(read.messages[0].body.data.aamio_scope.note, /share it again/);
+  // Sealed, from a partner: the scope is kept under the partner's name, and the message says so without the key.
+  assert.deepEqual(read.messages[0].body.data.aamio_scope, { shared_as: "review", can_read: true, kept: true, name: "b.review", address: scopeAddress(CANARY) });
   assert.deepEqual(read.messages[1].body.aamio_scope, { kept: false, note: "not kept: a scope is shared in data.aamio_scope" });
-  assert.ok(!(await readFile(join(homeA, "state.json"), "utf8")).includes(CANARY), "and the home keeps no copy of it");
+  // The key is in scopes.json, where a scope's key is kept, and in no other file of the home.
+  assert.ok(!(await readFile(join(homeA, "state.json"), "utf8")).includes(CANARY), "the state keeps no copy of it");
+  assert.ok(!(await readFile(join(homeA, "trace.json"), "utf8")).includes(CANARY), "and neither does the trace");
+  assert.deepEqual(JSON.parse(await readFile(join(homeA, "scopes.json"), "utf8")).map((scope) => [scope.name, scope.key]), [["b.review", CANARY]]);
 });
 
 test("finding 3: a read that cannot be written down hands nothing over, and the next read hands it over", async (t) => {

@@ -2,9 +2,10 @@ import { open, readFile, rename, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Aamio, AamioError, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, sha256hex, threadSigningInput } from "./aamio.js";
+import { Aamio, AamioError, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
 import { readKeys } from "./node-identity.js";
 import { takeHome } from "./node-lock.js";
+import { SCOPE_NOT_SAVED, checkAccess, checkScopeName, longerForm, removedShares, scopeAddPlan, scopeCalled, scopeRemovePlan, scopeView, sharedScopeName, takenFrom, usableScopes, withoutScopeKey } from "./node-scopes.js";
 import { TRACE_KEEP, TRACE_KEYS, TRACE_READ_FIELDS, TRACE_RECEIVED_FIELDS, TRACE_SENT_FIELDS, isMessageHash, normalizeTraces, traceRow, traceView } from "./node-trace.js";
 
 /*
@@ -13,10 +14,10 @@ import { TRACE_KEEP, TRACE_KEYS, TRACE_READ_FIELDS, TRACE_RECEIVED_FIELDS, TRACE
  * outbox before they go, and reads checked here before anything is handed on.
  *
  * A home is shared with aamio-python and aamio-php, so the files are theirs:
- * partners.json, state.json, outbox.json and trace.json in the same shape,
- * written the same way. A home one of them made opens here, and one this makes
- * opens there. What Python keeps that this does not touch yet, scopes, effects
- * and the archive, is left as it is.
+ * partners.json, scopes.json, state.json, outbox.json and trace.json in the
+ * same shape, written the same way. A home one of them made opens here, and
+ * one this makes opens there. What Python keeps that this does not touch yet,
+ * effects and the archive, is left as it is.
  */
 
 export const INBOX_TTL = 3600;
@@ -31,7 +32,7 @@ export const ANSWER_MARGIN = 600;
 // Files this runtime writes back. One that is there and cannot be read stops
 // the runtime before anything is saved over it: a save is how a broken file
 // becomes a lost one.
-const KEPT_FILES = ["partners.json", "state.json", "outbox.json"];
+const KEPT_FILES = ["partners.json", "scopes.json", "state.json", "outbox.json"];
 // The largest X-Max-Bytes the service takes: one to eight digits.
 const MAX_BYTES_HEADER = 99_999_999;
 // How long after a thread expires what this process read of it is kept for its
@@ -320,6 +321,10 @@ export class NodeRuntime {
     // What was sent to each counterpart and what came back, as hashes and
     // shapes: trace.json, a book per public key.
     this.traces = {};
+    // The scopes this home holds, and the entries of scopes.json that are not
+    // scopes this runtime can use, which go back into the file as they were.
+    this.scopes = [];
+    this.scopesAside = [];
   }
 
   /**
@@ -368,6 +373,10 @@ export class NodeRuntime {
 
   async load() {
     this.partnersFile = await this.loadJson("partners.json", [], Array.isArray);
+    const scopes = usableScopes(await this.loadJson("scopes.json", [], Array.isArray));
+    this.scopes = scopes.usable;
+    this.scopesAside = scopes.aside;
+    if (scopes.unusable) this.note("scopes", "scopes_unusable", `scopes.json: ${scopes.unusable} entries are not scopes this runtime can use, and stay in the file as they are`);
     this.state = await this.loadJson("state.json", {}, isObject);
     this.outbox = await this.loadJson("outbox.json", {}, isObject);
     if (!Array.isArray(this.state.tags)) this.state.tags = [];
@@ -594,6 +603,199 @@ export class NodeRuntime {
     await this.saveJson("partners.json", next);
     this.partnersFile = next;
     return this.inboxAfterChange(`partner ${name} was added`, { partner: name, key });
+  }
+
+  // ------------------------------------------------------------ scopes --
+  //
+  // A scope keeps board posts unlisted for a group. Each has a name here, and
+  // the name is all a caller passes or sees. The key stays in scopes.json, and
+  // scopeShare hands it to a partner sealed. Unlisted is not private.
+
+  /** Writes the scopes, and only then holds them: a save that fails changes nothing. */
+  async saveScopes(scopes, aside = this.scopesAside) {
+    await this.saveJson("scopes.json", [...scopes, ...aside]);
+    this.scopes = scopes;
+    this.scopesAside = aside;
+  }
+
+  /** The same for a caller that asked for the change: what went wrong, and that nothing changed. */
+  async keepScopes(scopes, aside, unchanged) {
+    try {
+      await this.saveScopes(scopes, aside);
+    } catch (error) {
+      if (error?.code === "runtime_closed") throw error;
+      throw runtimeError("not_saved", `scopes.json could not be written (${error.code || error.message}), so ${unchanged}. Free the disk, then do it again.`);
+    }
+  }
+
+  /** The scope with this name, apart from upper and lower case. Throws unknown_scope. */
+  scopeNamed(name) {
+    const entry = scopeCalled(this.scopes, name);
+    if (entry === null) throw runtimeError("unknown_scope", `no scope called ${name} here. The scope list shows the ones this runtime holds`);
+    return entry;
+  }
+
+  scopeList() {
+    return this.scopes.map(scopeView);
+  }
+
+  /** A new scope, its key from the system's secure generator. The key stays here. */
+  async scopeNew(name) {
+    checkScopeName(name);
+    if (scopeCalled(this.scopes, name) !== null) throw runtimeError("scope_exists", `there is a scope called ${name} already`);
+    const key = newScopeKey();
+    const entry = { name, key, address: scopeAddress(key) };
+    await this.keepScopes([...this.scopes, entry], undefined, `scope ${name} was not made`);
+    return scopeView(entry);
+  }
+
+  /** A scope made elsewhere: the key, to read and post, or the address, to post only. */
+  async scopeAdd(name, { key = null, address = null } = {}) {
+    const [held, keep] = scopeAddPlan(this.scopes, name, key ?? null, address ?? null);
+    if (keep !== null) await this.keepScopes(keep, undefined, `scope ${name} was not kept`);
+    return scopeView(held);
+  }
+
+  /**
+   * Removes a scope, and remembers the invitations it came from in the same
+   * write. The cursor and the hashes of what was read live in state.json and
+   * the scope in scopes.json: an invitation that comes again as a message
+   * never seen, after a state.json that could not be written, would bring a
+   * removed scope back. Remembered here, the same one read again keeps
+   * nothing. A new invitation is another message, and is taken.
+   */
+  async scopeRemove(name) {
+    const entry = this.scopeNamed(name);
+    const [scopes, aside] = scopeRemovePlan(this.scopes, this.scopesAside, entry);
+    await this.keepScopes(scopes, aside, `scope ${entry.name} is still held`);
+    return { removed: entry.name };
+  }
+
+  /** The key itself, for a person to pass on by hand. The local server never calls this. */
+  scopeKey(name) {
+    const entry = this.scopeNamed(name);
+    if (!entry.key) throw runtimeError("scope_write_only", `scope ${entry.name} is held to post only, so there is no key here`);
+    return { name: entry.name, key: entry.key, address: entry.address };
+  }
+
+  /**
+   * Hands a scope to a partner in a sealed message. read gives the key, write
+   * only the address. Only to a partner in the address book, by name or key:
+   * an address is learned from the board and from messages, so it can be
+   * anyone's, and the key would be sealed to whoever it was learned from. A
+   * post asking for a scope would get it.
+   */
+  async scopeShare(name, to, access) {
+    const entry = this.scopeNamed(name);
+    checkAccess(access);
+    if (access === "read" && !entry.key) throw runtimeError("scope_write_only", `scope ${entry.name} is held to post only, so it can only be shared with access write`);
+    const partner = isKey(String(to)) ? this.partnerByKey(to) : this.partnerByName(to);
+    if (!partner) throw runtimeError("unknown_partner", "a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone's");
+    const share = access === "read" ? { name: entry.name, key: entry.key } : { name: entry.name, address: entry.address };
+    // By the key, so the partner chosen stays chosen. The envelope is sealed
+    // to it, and the outbox and the trace keep the envelope and the names of
+    // the fields: the scope's key is in neither in the clear.
+    const sent = await this.send(partner.key, { text: `Scope ${entry.name}, shared to ${access === "read" ? "read and post" : "post only"}.`, data: { aamio_scope: share } });
+    return { ...sent, scope: entry.name, access };
+  }
+
+  /** What an invitation is known by: the hash of its bytes and its signer, as seen_from records it, or null. */
+  shareRecord(entry) {
+    return typeof entry.sha256 === "string" && HASH.test(entry.sha256) ? seenRecord(entry.sha256, entry.from_key) : null;
+  }
+
+  /**
+   * A scope in an incoming message, before the message is weighed, and before
+   * anyone reads it. The key is taken out of the message whatever becomes of
+   * the share, and aamio_scope is replaced wherever it sits and whatever it
+   * holds, so whoever reads the message never sees a key in it.
+   *
+   * A share is taken only when it came sealed and verified from a partner in
+   * the address book, in a message not seen before, and not from an
+   * invitation whose scope was removed since. Nothing is kept here. What
+   * taking it would write is given back, or null when nothing is to be taken,
+   * and the message carries the longer of the two forms the share can end in,
+   * kept or not saved: a message has to be the size it was weighed at.
+   */
+  scopeSharePlan(entry) {
+    const body = entry.body;
+    if (!isObject(body)) return null;
+    if ("aamio_scope" in body) body.aamio_scope = { kept: false, note: "not kept: a scope is shared in data.aamio_scope" };
+    const data = body.data;
+    if (!isObject(data) || !("aamio_scope" in data)) return null;
+    const share = data.aamio_scope;
+    if (!isObject(share)) {
+      data.aamio_scope = { kept: false, note: "not kept: data.aamio_scope is an object with name, and key or address" };
+      return null;
+    }
+    const key = share.key ?? null;
+    const view = { shared_as: typeof share.name === "string" ? share.name : null, can_read: key !== null, kept: false };
+    const partner = entry.from_key ? this.partnerByKey(entry.from_key) : null;
+    const invitation = this.shareRecord(entry);
+    let why = null;
+    if (!(entry.verified && entry.encrypted && entry.known_contact && partner !== null)) {
+      why = "not kept: a scope is only taken when it comes sealed from a partner in your address book";
+    } else if (entry.replay) {
+      why = "not kept again: this message arrived before, and a scope removed since stays removed";
+    } else if (entry.replay_unknown) {
+      why = "not kept: these bytes arrived here before, recorded by an earlier version without who sent them, so this may be that message again, and a scope removed since stays removed";
+    } else if (invitation !== null && removedShares(this.scopesAside).has(invitation)) {
+      why = "not kept again: this invitation was taken here before, and its scope was removed since. A scope removed stays removed: ask for it to be shared again";
+    }
+    if (why !== null) {
+      data.aamio_scope = { ...view, note: why };
+      return null;
+    }
+    let held;
+    let keep;
+    let plain;
+    try {
+      const local = sharedScopeName(partner, share.name);
+      [held, keep] = scopeAddPlan(this.scopes, local, key, key !== null ? null : share.address ?? null);
+      // Held already: nothing but the record of this invitation to write.
+      plain = keep === null;
+      // The invitation goes with the scope, in the same write, so that
+      // removing the scope can remember it.
+      if (invitation !== null && !takenFrom(held).includes(invitation)) {
+        const before = held;
+        held = { ...before, taken_from: [...takenFrom(before), invitation] };
+        keep = (keep ?? this.scopes).map((scope) => (scope === before ? held : scope));
+      }
+    } catch (error) {
+      // This share alone. The rest of the messages are handed over either way.
+      data.aamio_scope = { ...view, note: `not kept: ${error.message}` };
+      return null;
+    }
+    const shown = { ...view, ...scopeView(held), kept: true };
+    const unsaved = { ...view, note: SCOPE_NOT_SAVED };
+    data.aamio_scope = longerForm(shown, unsaved);
+    return { data, held, keep, plain, shown, unsaved, shared: share.name };
+  }
+
+  /**
+   * The share of a message that is taken: scopes.json is written, and the
+   * message says kept, or it could not be, and the message says so in the form
+   * it was weighed at while attention says why. Written before the cursor is:
+   * a process that stops between the two reads the message again and finds
+   * the scope held, where the other order would have passed the message by
+   * with the scope not kept and nothing said.
+   */
+  async scopeShareTake(entry, plan, said) {
+    try {
+      if (plan.keep !== null) await this.saveScopes(plan.keep);
+      plan.data.aamio_scope = plan.shown;
+    } catch (error) {
+      const how = `${error.code || error.name}: ${error.message}`;
+      if (plan.plain) {
+        // Held from before, and shown as it is held: only the record of this
+        // invitation was not written, and that is said where a reader looks.
+        plan.data.aamio_scope = plan.shown;
+        said.push(["scope_share_not_recorded", `message ${entry.seq} shared scope ${plan.shared}, which is held here already as ${plan.held.name}, and the invitation could not be recorded with it in scopes.json: ${how}. The scope stays as it is. Removing it will not remember this invitation, so the same message read again after that would bring the scope back.`]);
+        return;
+      }
+      plan.data.aamio_scope = plan.unsaved;
+      said.push(["scope_not_saved", `message ${entry.seq} shared scope ${plan.shared}, and scopes.json could not be written: ${how}. The scope is not kept.`]);
+    }
   }
 
   // ------------------------------------------------------------- inbox --
@@ -1274,13 +1476,21 @@ export class NodeRuntime {
     return channel;
   }
 
-  /** A need or an offer on the open board, pointing at the board inbox, which outlives it. */
-  async boardPost({ kind, title, text, tags = [], ttl = BOARD_TTL, lang = null, deadline = null } = {}) {
+  /**
+   * A need or an offer on the open board, pointing at the board inbox, which
+   * outlives it. With scope, the name of a scope held here, the post carries
+   * that scope's address and is unlisted: only a find with the scope's key
+   * returns it. Unlisted is not private.
+   */
+  async boardPost({ kind, title, text, tags = [], ttl = BOARD_TTL, lang = null, deadline = null, scope = null } = {}) {
+    // Before the inbox is opened, so a name that is not here costs nothing.
+    const held = scope !== null && scope !== undefined ? this.scopeNamed(scope) : null;
     const life = Math.floor(Number(ttl) || BOARD_TTL);
     const channel = await this.ensureBoardInbox(life);
     let made;
     try {
-      made = await this.client.board.post({ kind, title, text, tags: (tags || []).slice(0, 8), ttl: life, ...(lang ? { lang } : {}), ...(deadline ? { deadline } : {}) }, { inbox: { w: channel.w, expireAt: channel.expire_at } });
+      // The address goes inside the signed body, so nobody can post the same bytes without it.
+      made = await this.client.board.post({ kind, title, text, tags: (tags || []).slice(0, 8), ttl: life, ...(lang ? { lang } : {}), ...(deadline ? { deadline } : {}), ...(held ? { scope: held.address } : {}) }, { inbox: { w: channel.w, expireAt: channel.expire_at } });
     } catch (error) {
       throw boardError("board post", error);
     }
@@ -1288,6 +1498,7 @@ export class NodeRuntime {
     return {
       post: made.post, inbox: channel.w, answers_arrive_on: "board",
       read_them_with: "Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes, the board inbox among them. Each says who signed it and whether it was sealed to you.",
+      ...(held ? { scope: held.name } : {}),
     };
   }
 
@@ -1296,21 +1507,42 @@ export class NodeRuntime {
    * after (the cursor from the last page), wait (up to 25 s for the next one)
    * and min_work_bits. The address on each post is bound to its key, so a send
    * to it is sealed to the poster. An address bound before keeps its key.
+   *
+   * With scope, the name of a scope held here with its key, the find reads
+   * that scope instead of the public board. The key goes to the board in the
+   * body of the find and nowhere else, and is in nothing this gives back.
    */
-  async boardFind({ kind = null, tags = null, lang = null, after = 0, wait = 0, min_work_bits: bits = 0 } = {}) {
+  async boardFind({ kind = null, tags = null, lang = null, after = 0, wait = 0, min_work_bits: bits = 0, scope = null } = {}) {
+    const held = scope !== null && scope !== undefined ? this.scopeNamed(scope) : null;
+    if (held !== null && !held.key) throw runtimeError("scope_write_only", `scope ${held.name} is held to post only. Reading it takes the key, which a partner can share with access read`);
     const filter = { after: Math.max(0, Math.floor(Number(after) || 0)) };
     if (kind) filter.kind = kind;
     if (tags?.length) filter.tags = tags.slice(0, 20);
     if (lang) filter.lang = lang;
     if (wait) filter.wait = Math.min(25, Math.floor(wait));
     if (bits) filter.min_work_bits = Math.floor(bits);
+    const unread = () => runtimeError("board_failed", `the board did not say it read scope ${held.name}, so these posts are not shown`);
     let page;
     try {
-      page = await this.client.board.find(filter);
+      // A board older than scopes answers 400 to the field, so it never reads the public board instead.
+      page = await this.client.board.find(held ? { ...filter, scopeKey: held.key } : filter);
     } catch (error) {
-      throw boardError("board find", error);
+      // The client believes only an answer that names the scope, and says so as an answer of 200 that is not one.
+      if (held && error instanceof AamioError && error.status === 200) throw unread();
+      const failure = boardError("board find", error);
+      if (held) {
+        failure.message = withoutScopeKey(failure.message, held.key);
+        if (failure.fix) failure.fix = withoutScopeKey(String(failure.fix), held.key);
+      }
+      throw failure;
     }
     if (!isObject(page) || !Array.isArray(page.posts)) throw runtimeError("board_failed", "the board answered the find with something that is not a page of posts");
+    if (held) {
+      // The answer names the scope it read. Without that it did not read this one.
+      if (page.scope !== held.address) throw unread();
+      page = withoutScopeKey(page, held.key);
+      page.scope_name = held.name;
+    }
     for (const post of page.posts) {
       if (isObject(post) && typeof post.w === "string" && ADDRESS.test(post.w) && isKey(String(post.key)) && !(post.w in this.state.peers)) this.state.peers[post.w] = post.key;
     }
@@ -1352,9 +1584,15 @@ export class NodeRuntime {
    * unknown rather than failed. The board inbox outlives the post by
    * ANSWER_MARGIN, so the poster can answer back after reading it late.
    */
-  async boardAnswer(postId, { text = null, data = null } = {}) {
-    const post = await this.boardGet(postId);
-    if (post === null) throw runtimeError("unknown_post", `no live post with id ${postId}: it expired or was withdrawn. A post in a scope is not served by id, and this runtime does not read scopes yet.`);
+  async boardAnswer(postId, { text = null, data = null, scope = null } = {}) {
+    const scoped = scope !== null && scope !== undefined;
+    // A post in a scope is never served by id alone, so with scope the post is looked up in that scope.
+    const post = scoped ? await this.scopedPost(scope, postId) : await this.boardGet(postId);
+    if (post === null) {
+      throw runtimeError("unknown_post", scoped
+        ? `no live post with id ${postId} in scope ${scope}: it expired or was withdrawn, or it is in another scope.`
+        : `no live post with id ${postId}: it expired or was withdrawn. A post in a scope is found with the scope's name: board answer --scope NAME, or scope over MCP.`);
+    }
     if (typeof post.w !== "string" || !ADDRESS.test(post.w) || !isKey(String(post.key))) {
       throw runtimeError("board_failed", `post ${postId} came without a write address and a key to seal an answer to, so nothing was sent`);
     }
@@ -1382,6 +1620,24 @@ export class NodeRuntime {
     if (post.key === this.keys.public) done.warning = "You answered your own post. The answer is sealed to your own key, so it reaches nobody but you.";
     if (answer.traceError) done.trace_error = answer.traceError;
     return done;
+  }
+
+  /**
+   * One live post of a scope, by its id, or null. A page holds up to 200 posts
+   * and a scope can hold more: the cursor goes on until the post turns up or
+   * the pages run out.
+   */
+  async scopedPost(scope, postId) {
+    let after = 0;
+    for (let pages = 0; pages < 50; pages++) {
+      const page = await this.boardFind({ scope, after });
+      const post = page.posts.find((found) => isObject(found) && found.id === postId);
+      if (post) return post;
+      const next = Math.floor(Number(page.next) || 0);
+      if (!page.posts.length || next <= after) return null;
+      after = next;
+    }
+    return null;
   }
 
   // -------------------------------------------------------------- read --
@@ -1438,31 +1694,6 @@ export class NodeRuntime {
       const why = "the message could not be checked here: " + (error.name || "Error");
       return { channel: channel.label, w: channel.w, seq, at, verified: false, from_key: null, known_contact: false, sender: "unsigned", sha256: null, replay: false, body: { text: message.body ?? null }, signed: false, encrypted: false, format: "unreadable", error: error.name || "Error", unverified_because: why };
     }
-  }
-
-  /**
-   * A scope in an incoming message, taken out before anyone reads it. Node
-   * keeps no scopes yet, so a share is never kept here, and the key is never
-   * handed on: aamio_scope is replaced, wherever it sits and whatever it holds,
-   * by what aamio-python shows in its place, with why it was not kept.
-   */
-  takeScopeShare(entry) {
-    const body = entry.body;
-    if (!isObject(body)) return;
-    if ("aamio_scope" in body) body.aamio_scope = { kept: false, note: "not kept: a scope is shared in data.aamio_scope" };
-    const data = body.data;
-    if (!isObject(data) || !("aamio_scope" in data)) return;
-    const share = data.aamio_scope;
-    if (!isObject(share)) {
-      data.aamio_scope = { kept: false, note: "not kept: data.aamio_scope is an object with name, and key or address" };
-      return;
-    }
-    data.aamio_scope = {
-      shared_as: typeof share.name === "string" ? share.name : null,
-      can_read: share.key !== undefined && share.key !== null,
-      kept: false,
-      note: "not kept: this Node runtime keeps no scopes yet. Ask the partner to share it again to a home run by aamio-python or aamio-php, which keep it.",
-    };
   }
 
   /**
@@ -1658,8 +1889,11 @@ export class NodeRuntime {
       // it is taken: a conflict added after the weighing let 1146 bytes through a
       // budget of 900 (a review of 10 November 2026).
       const bindings = [];
+      // A scope in the message: its key comes out here, before the message is
+      // weighed, observed or shown, and goes to scopes.json or nowhere.
+      let share = null;
       if (!excluded) {
-        this.takeScopeShare(entry);
+        share = this.scopeSharePlan(entry);
         if (isObject(entry.body) && entry.verified && entry.from_key) {
           for (const field of ["reply_to", "channel"]) {
             const planned = this.bindingFor(field, entry.body[field], entry.from_key);
@@ -1688,6 +1922,7 @@ export class NodeRuntime {
         continue;
       }
       if (entry.sha256 !== null) remember(channel, entry.sha256, entry.from_key);
+      if (share !== null) await this.scopeShareTake(entry, share, said);
       for (const planned of bindings) {
         if (planned.conflict === null) {
           this.state.peers[planned.address] = entry.from_key;

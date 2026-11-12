@@ -665,7 +665,7 @@ test("over MCP: the three tools are there, a retry takes one id, and each refusa
   const fake = new FakeAamio();
   const { sender, receiver } = await pair(t, fake);
   const tools = (await call(sender, "tools/list")).result.tools;
-  assert.equal(tools.length, 16);
+  assert.equal(tools.length, 21);
   for (const name of ["aamio_trace", "aamio_outbox_retry", "aamio_outbox_forget"]) assert.ok(tools.some((tool) => tool.name === name), name);
   assert.deepEqual(tools.find((tool) => tool.name === "aamio_outbox_retry").inputSchema.required, ["id"], "settling one is a decision per message, never a sweep");
   assert.equal((await call(sender, "aamio_outbox_retry", {})).error.code, -32602);

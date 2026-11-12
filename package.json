@@ -23,6 +23,7 @@
     "src/node-lock.js",
     "src/node-mcp.js",
     "src/node-runtime.js",
+    "src/node-scopes.js",
     "src/node-trace.js",
     "README.md",
     "LICENSE"

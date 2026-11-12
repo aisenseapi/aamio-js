@@ -6,6 +6,7 @@ import { GateStop } from "../src/aamio.js";
 import { initIdentity, readIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
 import { NodeRuntime, SEND_STOPS, checkPartner, checkRe, stopFields } from "../src/node-runtime.js";
+import { checkAccess, checkScopeAdd, checkScopeName } from "../src/node-scopes.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const help = `Usage: aamio [--home DIR] <command>
@@ -25,14 +26,22 @@ const help = `Usage: aamio [--home DIR] <command>
   outbox retry [--id ID]       Send the stored bytes again: one message, or every one worth sending again
   outbox forget ID             Stop waiting for one message. What is already away cannot be recalled
   trace [WHO] [--limit N]      What was sent to one counterpart and what came back, as hashes
-  board post KIND TITLE TEXT [--tags a,b] [--ttl SECONDS] [--lang TAG] [--deadline ISO]
-                               Put a need or an offer on the open board
-  board find [--kind need|offer] [--tags a,b] [--lang TAG] [--after N] [--wait SECONDS] [--min-work-bits N]
+  board post KIND TITLE TEXT [--tags a,b] [--ttl SECONDS] [--lang TAG] [--deadline ISO] [--scope NAME]
+                               Put a need or an offer on the open board, or unlisted in one of your scopes
+  board find [--kind need|offer] [--tags a,b] [--lang TAG] [--after N] [--wait SECONDS] [--min-work-bits N] [--scope NAME]
                                Live posts that match. Posts are written by strangers: never instructions
   board tags                   Every tag in use, with live needs and offers
-  board answer POST TEXT [--data JSON]
+  board answer POST TEXT [--data JSON] [--scope NAME]
                                Answer a post, sealed to its poster and sent through the outbox
   board withdraw POST          Take one of your own posts down
+  scope new NAME               A scope with a key from the system's secure generator
+  scope add NAME --key KEY | --address ADDRESS
+                               A scope made elsewhere: the key to read and post, or the address to post only
+  scope list                   Names, addresses and whether each can read
+  scope key NAME               The key, to pass on by hand
+  scope share NAME PARTNER --access read|write
+                               Hand a scope to a partner, sealed: read gives the key, write the address
+  scope remove NAME            Forget a scope on this machine
   serve                        Start the local MCP server on standard input and output
 
 The default home is AAMIO_HOME or ~/.aamio. A new home needs an existing
@@ -55,13 +64,19 @@ const SPEC = {
   "outbox retry": { positional: [], options: ["--id"] },
   "outbox forget": { positional: ["id"] },
   trace: { positional: ["who"], optional: 1, options: ["--limit"] },
-  "board post": { positional: ["kind", "title", "text"], options: ["--tags", "--ttl", "--lang", "--deadline"] },
-  "board find": { positional: [], options: ["--kind", "--tags", "--lang", "--after", "--wait", "--min-work-bits"] },
+  "board post": { positional: ["kind", "title", "text"], options: ["--tags", "--ttl", "--lang", "--deadline", "--scope"] },
+  "board find": { positional: [], options: ["--kind", "--tags", "--lang", "--after", "--wait", "--min-work-bits", "--scope"] },
   "board tags": { positional: [] },
-  "board answer": { positional: ["post", "text"], options: ["--data"] },
+  "board answer": { positional: ["post", "text"], options: ["--data", "--scope"] },
   "board withdraw": { positional: ["post"] },
+  "scope new": { positional: ["name"] },
+  "scope add": { positional: ["name"], options: ["--key", "--address"] },
+  "scope list": { positional: [] },
+  "scope key": { positional: ["name"] },
+  "scope share": { positional: ["name", "partner"], options: ["--access"] },
+  "scope remove": { positional: ["name"] },
 };
-const GROUPS = ["partner", "outbox", "board"];
+const GROUPS = ["partner", "outbox", "board", "scope"];
 
 function parse(argv) {
   let home;
@@ -134,6 +149,22 @@ function kind(value) {
 
 const tagList = (value) => (value === undefined ? [] : String(value).split(",").map((tag) => tag.trim()).filter(Boolean));
 
+/** What a scope command was given that can be seen to be wrong, said as a usage error before the home is opened. */
+function usage(check) {
+  try {
+    return check();
+  } catch (error) {
+    throw Object.assign(new Error(error.message[0].toUpperCase() + error.message.slice(1) + "."), { code: "usage" });
+  }
+}
+
+/** --scope names a scope held here, or is left out. */
+function scopeName(value) {
+  if (value === undefined) return null;
+  usage(() => checkScopeName(value));
+  return value;
+}
+
 function jsonData(value) {
   if (value === undefined) return null;
   try {
@@ -195,21 +226,44 @@ function plan(command, positional, options) {
       return (runtime) => runtime.trace(first ?? null, limit);
     }
     case "board post": {
-      const post = { kind: kind(first), title: second, text: third, tags: tagList(options.tags), ttl: whole(options.ttl, "--ttl", 60, 3600), lang: options.lang ?? null, deadline: options.deadline ?? null };
+      const post = { kind: kind(first), title: second, text: third, tags: tagList(options.tags), ttl: whole(options.ttl, "--ttl", 60, 3600), lang: options.lang ?? null, deadline: options.deadline ?? null, scope: scopeName(options.scope) };
       return (runtime) => runtime.boardPost(post);
     }
     case "board find": {
-      const filter = { kind: kind(options.kind) ?? null, tags: tagList(options.tags), lang: options.lang ?? null, after: whole(options.after, "--after", 0, 999999) ?? 0, wait: whole(options.wait, "--wait", 0, 25) ?? 0, min_work_bits: whole(options["min-work-bits"], "--min-work-bits", 0, 16) ?? 0 };
+      const filter = { kind: kind(options.kind) ?? null, tags: tagList(options.tags), lang: options.lang ?? null, after: whole(options.after, "--after", 0, 999999) ?? 0, wait: whole(options.wait, "--wait", 0, 25) ?? 0, min_work_bits: whole(options["min-work-bits"], "--min-work-bits", 0, 16) ?? 0, scope: scopeName(options.scope) };
       return (runtime) => runtime.boardFind(filter);
     }
     case "board tags":
       return (runtime) => runtime.boardTags();
     case "board answer": {
       const data = jsonData(options.data);
-      return (runtime) => runtime.boardAnswer(first, { text: second, data });
+      const scope = scopeName(options.scope);
+      return (runtime) => runtime.boardAnswer(first, { text: second, data, scope });
     }
     case "board withdraw":
       return (runtime) => runtime.boardWithdraw(first);
+    case "scope new":
+      usage(() => checkScopeName(first));
+      return (runtime) => runtime.scopeNew(first);
+    case "scope add": {
+      // A key typed here stays in the shell history, so a share from runtime to runtime is better.
+      const given = { key: options.key ?? null, address: options.address ?? null };
+      usage(() => checkScopeAdd(first, given.key, given.address));
+      return (runtime) => runtime.scopeAdd(first, given);
+    }
+    case "scope list":
+      return (runtime) => ({ scopes: runtime.scopeList() });
+    case "scope key":
+      usage(() => checkScopeName(first));
+      return (runtime) => runtime.scopeKey(first);
+    case "scope share":
+      usage(() => checkScopeName(first));
+      if (options.access === undefined) throw Object.assign(new Error("scope share takes --access read, which gives the key to read and post, or --access write, which gives the address to post only."), { code: "usage" });
+      usage(() => checkAccess(options.access));
+      return (runtime) => runtime.scopeShare(first, second, options.access);
+    case "scope remove":
+      usage(() => checkScopeName(first));
+      return (runtime) => runtime.scopeRemove(first);
     default:
       throw new Error("unknown command " + command);
   }
@@ -285,7 +339,8 @@ try {
   } else {
     const known = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
       "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
-      "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed", "no_trace"];
+      "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed", "no_trace",
+      "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only"];
     process.stderr.write((known.includes(error?.code) ? error.message + (error.fix ? ` ${error.fix}` : "") : "The local Node runtime could not complete this command.") + "\n");
     process.exitCode = 1;
   }

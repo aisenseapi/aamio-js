@@ -246,7 +246,7 @@ test("over MCP aamio_read asks for one message's worth per channel unless told, 
     return JSON.parse(text.trim());
   };
   const tools = (await call("tools/list")).result.tools;
-  assert.equal(tools.length, 16);
+  assert.equal(tools.length, 21);
   assert.ok(tools.some((tool) => tool.name === "aamio_receipt"));
 
   await sender.send("receiver", { text: "over mcp" });
