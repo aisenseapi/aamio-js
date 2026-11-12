@@ -699,8 +699,9 @@ test("a share is weighed in the longer of the forms it can end in, and one that 
   const first = await measure();
   const whole = await first.receiver.read();
   assert.deepEqual(whole.map((m) => m.body.data?.aamio_scope?.kept), [undefined, true]);
-  const [plain, kept] = whole.map(bytes);
-  const unsaved = bytes({ ...whole[1], body: { ...whole[1].body, data: { aamio_scope: { shared_as: "team", can_read: true, kept: false, note: SCOPE_NOT_SAVED } } } });
+  // As a message is weighed: with the archive's mark at its longer value, false.
+  const [plain, kept] = whole.map((m) => bytes({ ...m, archived: false }));
+  const unsaved = bytes({ ...whole[1], archived: false, body: { ...whole[1].body, data: { aamio_scope: { shared_as: "team", can_read: true, kept: false, note: SCOPE_NOT_SAVED } } } });
   assert.ok(unsaved < kept, "the form that says it could not be saved is the shorter one");
 
   // One byte short of both, on a home where scopes.json cannot be written. Weighed as it would end, the shorter form
@@ -852,7 +853,7 @@ test("over MCP the tools speak in names and never hand out a key", async (t) => 
     return answer.error ? answer : answer.result;
   };
   const tools = (await tool(sender, "tools/list")).tools;
-  assert.equal(tools.length, 21);
+  assert.equal(tools.length, 24);
   for (const name of ["aamio_scopes", "aamio_scope_new", "aamio_scope_add", "aamio_scope_share", "aamio_scope_remove"]) assert.ok(tools.some((entry) => entry.name === name), name);
   assert.ok(!tools.some((entry) => /scope_key|key$/.test(entry.name)), "no tool shows a key: that is the command line's alone");
   for (const name of ["aamio_board_post", "aamio_board_find", "aamio_board_answer"]) assert.equal(tools.find((entry) => entry.name === name).inputSchema.properties.scope.type, "string", name);

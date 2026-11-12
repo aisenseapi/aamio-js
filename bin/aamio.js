@@ -5,13 +5,17 @@ import { join, resolve } from "node:path";
 import { GateStop } from "../src/aamio.js";
 import { initIdentity, readIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
-import { NodeRuntime, SEND_STOPS, checkPartner, checkRe, stopFields } from "../src/node-runtime.js";
+import { archiveStatus, parsePolicy, readPolicy } from "../src/node-archive.js";
+import { CHANNEL_TTL, NodeRuntime, SEND_STOPS, checkChannelTtl, checkGate, checkLabel, checkPartner, checkRe, stopFields } from "../src/node-runtime.js";
 import { checkAccess, checkScopeAdd, checkScopeName } from "../src/node-scopes.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const help = `Usage: aamio [--home DIR] <command>
+const help = `Usage: aamio [--home DIR] [--no-archive] <command>
 
   init                         Create a local identity, or show the existing public identity
+  archive [status|keep|off|days:N|prune] [--max-mb N] [--all]
+                               What is kept on this machine, and for how long: decrypted messages are kept
+                               in archive/ unless this says otherwise
   whoami                       Show the public key, hash and hash prefix
   partner add NAME KEY         Put a partner's public key in the address book
   partner list                 The address book
@@ -26,6 +30,10 @@ const help = `Usage: aamio [--home DIR] <command>
   outbox retry [--id ID]       Send the stored bytes again: one message, or every one worth sending again
   outbox forget ID             Stop waiting for one message. What is already away cannot be recalled
   trace [WHO] [--limit N]      What was sent to one counterpart and what came back, as hashes
+  channel open LABEL [--ttl SECONDS] [--allow a,b] [--gate JSON]
+                               A channel of its own, for the partners named, with conditions for whoever writes
+  channel list                 The channels of this home: address, time left and how far each is read
+  channel close LABEL          Close a channel before it expires
   board post KIND TITLE TEXT [--tags a,b] [--ttl SECONDS] [--lang TAG] [--deadline ISO] [--scope NAME]
                                Put a need or an offer on the open board, or unlisted in one of your scopes
   board find [--kind need|offer] [--tags a,b] [--lang TAG] [--after N] [--wait SECONDS] [--min-work-bits N] [--scope NAME]
@@ -34,6 +42,10 @@ const help = `Usage: aamio [--home DIR] <command>
   board answer POST TEXT [--data JSON] [--scope NAME]
                                Answer a post, sealed to its poster and sent through the outbox
   board withdraw POST          Take one of your own posts down
+  board replies [--post POST] [--wait SECONDS]
+                               Answers to your posts, from this run and from the archive. read shows everything
+  board channel KEY [--ttl SECONDS] [--reply-to ADDRESS] [--note TEXT]
+                               A channel only that key may write to, with its address sent to their reply address
   scope new NAME               A scope with a key from the system's secure generator
   scope add NAME --key KEY | --address ADDRESS
                                A scope made elsewhere: the key to read and post, or the address to post only
@@ -45,7 +57,9 @@ const help = `Usage: aamio [--home DIR] <command>
   serve                        Start the local MCP server on standard input and output
 
 The default home is AAMIO_HOME or ~/.aamio. A new home needs an existing
-parent directory. Run with --version to print the npm package version.
+parent directory. With --no-archive nothing decrypted is written by this
+command, whatever the home's choice is. Run with --version to print the npm
+package version.
 `;
 
 // What each command takes. A group is two words: partner add, outbox pending.
@@ -75,11 +89,19 @@ const SPEC = {
   "scope key": { positional: ["name"] },
   "scope share": { positional: ["name", "partner"], options: ["--access"] },
   "scope remove": { positional: ["name"] },
+  "channel open": { positional: ["label"], options: ["--ttl", "--allow", "--gate"] },
+  "channel list": { positional: [] },
+  "channel close": { positional: ["label"] },
+  "board replies": { positional: [], options: ["--post", "--wait"] },
+  "board channel": { positional: ["key"], options: ["--ttl", "--reply-to", "--note"] },
+  archive: { positional: ["policy"], optional: 1, options: ["--max-mb"], switches: ["--all"] },
 };
-const GROUPS = ["partner", "outbox", "board", "scope"];
+const GROUPS = ["partner", "outbox", "board", "scope", "channel"];
 
 function parse(argv) {
   let home;
+  // null is the home's own choice, from config.json. --no-archive turns the archive off for this command.
+  let archive = null;
   const args = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -89,6 +111,8 @@ function parse(argv) {
         throw new Error("Supply --home once with a directory path.");
       }
       home = value;
+    } else if (arg === "--no-archive") {
+      archive = false;
     } else {
       args.push(arg);
     }
@@ -128,7 +152,7 @@ function parse(argv) {
     const named = spec.positional.map((p, i) => (i < fewest ? p.toUpperCase() : `[${p.toUpperCase()}]`)).join(" ");
     throw new Error(`${command} takes ${spec.positional.length ? named : "no arguments"}. Run aamio --help for usage.`);
   }
-  return { command, home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), positional, options };
+  return { command, home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), positional, options, archive };
 }
 
 function whole(value, name, low, high = null) {
@@ -154,9 +178,11 @@ function usage(check) {
   try {
     return check();
   } catch (error) {
-    throw Object.assign(new Error(error.message[0].toUpperCase() + error.message.slice(1) + "."), { code: "usage" });
+    throw Object.assign(new Error(error.message[0].toUpperCase() + error.message.slice(1) + (error.message.endsWith(".") ? "" : ".")), { code: "usage" });
   }
 }
+
+const wrong = (message) => Object.assign(new Error(message), { code: "usage" });
 
 /** --scope names a scope held here, or is left out. */
 function scopeName(value) {
@@ -242,6 +268,73 @@ function plan(command, positional, options) {
     }
     case "board withdraw":
       return (runtime) => runtime.boardWithdraw(first);
+    case "board replies": {
+      const wait = whole(options.wait, "--wait", 0, 25) ?? 0;
+      const post = options.post ?? null;
+      if (post !== null && !post) throw wrong("--post names one post by its id, as board post answered it.");
+      return async (runtime) => {
+        // Always, and the board inboxes only: the inbox's cursor stands.
+        await runtime.boardPoll(wait);
+        const replies = await runtime.boardReplies(post);
+        // How many messages this left out, every time and not only when it
+        // found nothing: an answer that names no post is still somebody
+        // answering.
+        const leftOut = runtime.boardRepliesLeftOut;
+        // The address comes with the answers. An empty list means one of two
+        // very different things, and only this tells them apart.
+        const answer = { replies, left_out: leftOut, reply_address: runtime.boardReplyAddress() };
+        if (leftOut) answer.note = `${leftOut} message(s) on your inboxes are not listed here, because they name no post of yours and did not arrive on a board inbox. aamio read shows every message.`;
+        // What else is on the board inbox, so an empty list for one post is never read as an empty inbox.
+        if (post !== null) answer.others_on_the_board_inbox = (await runtime.boardReplies()).length - replies.length;
+        // Last, so it carries what both calls above had to say.
+        answer.attention = await runtime.attentionTaken();
+        return answer;
+      };
+    }
+    case "board channel": {
+      const ttl = whole(options.ttl, "--ttl", 30, 3600) ?? 900;
+      const replyTo = options["reply-to"] ?? null;
+      const note = options.note ?? null;
+      if (replyTo !== null && !/^[a-z2-7]{20}$/.test(replyTo)) throw wrong("--reply-to is a write address: 20 characters of a-z and 2-7, as a verified answer gives it in reply_to.");
+      if (note !== null && replyTo === null) throw wrong("--note travels with the address to the inbox --reply-to names, so without --reply-to there is nothing to carry it.");
+      if (!first) throw wrong("board channel takes a key, or a partner's name.");
+      return (runtime) => runtime.channelOpenWith(first, { ttl, replyTo, note });
+    }
+    case "channel open": {
+      usage(() => checkLabel(first));
+      const ttl = usage(() => checkChannelTtl(whole(options.ttl, "--ttl", 30, 3600) ?? CHANNEL_TTL));
+      const allow = options.allow === undefined ? null : tagList(options.allow);
+      let gate = null;
+      if (options.gate !== undefined) {
+        // A shell eats quotes, so a gate that will not parse is named by the
+        // argument that was typed rather than by a decoder nobody sees.
+        try {
+          gate = JSON.parse(options.gate);
+        } catch {
+          throw wrong("--gate is not JSON. Quote it as one argument, as in --gate '{\"require\": {\"pow\": {\"bits\": 20}}}'.");
+        }
+        usage(() => checkGate(gate));
+      }
+      return (runtime) => runtime.channelOpen(first, { ttl, allow, gate });
+    }
+    case "channel list":
+      return (runtime) => ({ channels: runtime.channelList() });
+    case "channel close":
+      if (!first) throw wrong("channel close takes the label of one channel, as channel list shows it.");
+      return (runtime) => runtime.channelClose(first);
+    case "archive": {
+      const policy = first ?? "status";
+      const size = options["max-mb"];
+      if (size !== undefined && (!/^[0-9]{1,9}(?:\.[0-9]{1,6})?$/.test(size) || !(Number(size) > 0))) throw wrong("--max-mb is a size in megabytes above zero.");
+      if (policy === "status" || policy === "prune") {
+        if (size !== undefined) throw wrong("--max-mb goes with a choice: archive keep, archive off or archive days:N.");
+        if (options.all === true && policy !== "prune") throw wrong("--all goes with archive prune, and removes the whole archive.");
+        return policy === "prune" ? (runtime) => runtime.archivePrune({ everything: options.all === true }) : (runtime) => runtime.archiveStatus();
+      }
+      if (options.all === true) throw wrong("--all goes with archive prune, and removes the whole archive.");
+      const chosen = usage(() => parsePolicy(policy, size === undefined ? null : Number(size)));
+      return (runtime) => runtime.archiveSet(chosen);
+    }
     case "scope new":
       usage(() => checkScopeName(first));
       return (runtime) => runtime.scopeNew(first);
@@ -277,14 +370,14 @@ async function main() {
     process.stderr.write(error.message + "\n");
     return 2;
   }
-  const { command, home } = options;
+  const { command, home, archive } = options;
   if (command === "help") process.stdout.write(help);
   else if (command === "version") process.stdout.write(version + "\n");
   else if (command === "serve") {
     await initIdentity(home);
     // One live runtime per home, Node, Python or PHP: serve holds the home,
     // owner.lock and all, for as long as it runs, as the other servers do.
-    const runtime = await NodeRuntime.open({ home });
+    const runtime = await NodeRuntime.open({ home, archive });
     // Presence lives two minutes. Once a read or a send has opened the inbox,
     // it is published again every minute and the inbox renewed before it runs
     // out, so partners keep finding this server. Nothing goes out before that.
@@ -304,11 +397,14 @@ async function main() {
     }
   } else if (command === "init" || command === "whoami") {
     const identity = command === "init" ? await initIdentity(home) : await readIdentity(home);
+    // Said once, where a person sets the runtime up: the service forgets,
+    // and this folder does not unless it is told to.
+    if (command === "init") identity.local_storage = { ...(await archiveStatus(home, await readPolicy(home))), home };
     process.stdout.write(JSON.stringify(identity) + "\n");
   } else {
     const act = plan(command, options.positional, options.options);
     await initIdentity(home);
-    const runtime = await NodeRuntime.open({ home });
+    const runtime = await NodeRuntime.open({ home, archive });
     let result;
     try {
       result = await act(runtime);
@@ -340,7 +436,8 @@ try {
     const known = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
       "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
       "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed", "no_trace",
-      "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only"];
+      "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only",
+      "invalid_label", "invalid_gate", "invalid_ttl", "invalid_note", "invalid_address", "invalid_archive", "channel_exists", "channel_unavailable", "binding_conflict"];
     process.stderr.write((known.includes(error?.code) ? error.message + (error.fix ? ` ${error.fix}` : "") : "The local Node runtime could not complete this command.") + "\n");
     process.exitCode = 1;
   }

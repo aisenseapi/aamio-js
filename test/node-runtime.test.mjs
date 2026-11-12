@@ -169,7 +169,8 @@ test("over MCP a server that holds the home offers its tools, and a message goes
     return JSON.parse(text.trim());
   };
   const list = await call(a, "tools/list");
-  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["aamio_whoami", "aamio_partners", "aamio_partner_add", "aamio_presence_lookup", "aamio_send", "aamio_trace", "aamio_read", "aamio_board_post", "aamio_board_find", "aamio_board_answer", "aamio_board_withdraw", "aamio_board_tags", "aamio_receipt", "aamio_pending", "aamio_outbox_retry", "aamio_outbox_forget", "aamio_scopes", "aamio_scope_new", "aamio_scope_add", "aamio_scope_share", "aamio_scope_remove"]);
+  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["aamio_whoami", "aamio_partners", "aamio_partner_add", "aamio_presence_lookup", "aamio_send", "aamio_trace", "aamio_read", "aamio_board_post", "aamio_board_find", "aamio_board_answer", "aamio_board_withdraw", "aamio_board_tags", "aamio_receipt", "aamio_open_channel", "aamio_channels", "aamio_close_channel", "aamio_pending", "aamio_outbox_retry", "aamio_outbox_forget", "aamio_scopes", "aamio_scope_new", "aamio_scope_add",
+    "aamio_scope_share", "aamio_scope_remove"]);
   assert.equal((await call(a, "aamio_read", {})).result.isError, false, "the first read opens the inbox and publishes it");
   const sent = await call(b, "aamio_send", { to: "a", text: "over mcp" });
   assert.equal(sent.result.isError, false, JSON.stringify(sent));

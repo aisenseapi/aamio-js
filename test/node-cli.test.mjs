@@ -59,7 +59,15 @@ test("serve creates an identity in the chosen home and emits only protocol messa
   for (const command of ["whoami", "init"]) {
     const result = cli(home, [command]);
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout), identity);
+    // init says once, where a person sets the home up, what the home keeps: the service forgets, and this folder
+    // does not unless it is told to.
+    const { local_storage: kept, ...shown } = JSON.parse(result.stdout);
+    assert.deepEqual(shown, identity);
+    if (command === "whoami") assert.equal(kept, undefined);
+    else {
+      assert.deepEqual([kept.policy, kept.files, kept.bytes, kept.oldest_at, kept.home], [{ mode: "keep", days: null, max_mb: null }, 0, 0, null, home]);
+      assert.match(kept.means, /^Decrypted messages and receipts are kept in archive\/ until you remove them\..*`aamio archive off` stops it\.$/);
+    }
   }
   assert.equal(existsSync(unusedHome), false);
 });

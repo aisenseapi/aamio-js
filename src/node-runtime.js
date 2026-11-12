@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Aamio, AamioError, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
+import { DEFAULT_POLICY, appendRecord, archiveName, archiveNames, archiveStatus, archivedRecords, isSafeLabel, pruneArchive, readPolicy } from "./node-archive.js";
 import { readKeys } from "./node-identity.js";
 import { takeHome } from "./node-lock.js";
 import { SCOPE_NOT_SAVED, checkAccess, checkScopeName, longerForm, removedShares, scopeAddPlan, scopeCalled, scopeRemovePlan, scopeView, sharedScopeName, takenFrom, usableScopes, withoutScopeKey } from "./node-scopes.js";
@@ -15,9 +16,10 @@ import { TRACE_KEEP, TRACE_KEYS, TRACE_READ_FIELDS, TRACE_RECEIVED_FIELDS, TRACE
  *
  * A home is shared with aamio-python and aamio-php, so the files are theirs:
  * partners.json, scopes.json, state.json, outbox.json and trace.json in the
- * same shape, written the same way. A home one of them made opens here, and
- * one this makes opens there. What Python keeps that this does not touch yet,
- * effects and the archive, is left as it is.
+ * same shape, written the same way, and archive/ with what was read, sent
+ * and posted, under the policy in config.json. A home one of them made opens
+ * here, and one this makes opens there. What Python keeps that this does not
+ * touch yet, effects, is left as it is.
  */
 
 export const INBOX_TTL = 3600;
@@ -204,11 +206,59 @@ export const SEND_STOPS = ["send_failed", "not_sent", "retry_not_sent"];
 export function stopFields(error) {
   const said = {};
   for (const field of ["outcome", "message_id", "status"]) if (error?.[field] !== undefined) said[field] = error[field];
-  for (const field of ["outbox_error", "trace_error"]) if (error?.[field]) said[field] = error[field];
+  for (const field of ["outbox_error", "trace_error", "archive_error"]) if (error?.[field]) said[field] = error[field];
   // Whether the same stored bytes are worth sending again: true, false, or null when it cannot be told.
   if (error?.retryable !== undefined) said.retryable = error.retryable;
   if (error?.earlier_attempt) said.earlier_attempt = error.earlier_attempt;
+  // A channel that is open although the message carrying its address did not go.
+  if (isObject(error?.opened)) said.opened = error.opened;
   return said;
+}
+
+// How long a channel lives: what the service takes for a thread of its own.
+export const CHANNEL_TTL = 600;
+const CHANNEL_TTL_MIN = 30;
+const CHANNEL_TTL_MAX = 3600;
+
+const GATE_SHAPE = 'A gate is an object with "require", "advise" or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}. require refuses a write that does not meet it; advise lets the write in and reports on it.';
+
+/**
+ * The shape of a gate, refused here rather than a round trip later. Only the
+ * shape: what the numbers may be is the service's to decide, and its refusal
+ * carries the detail. Worth catching before the call because a gate is set
+ * once, when the channel is opened, and never changes: one that went nowhere
+ * leaves a channel open for its whole life without the conditions its owner
+ * meant it to have. Throws invalid_gate.
+ */
+export function checkGate(gate) {
+  if (!isObject(gate)) throw runtimeError("invalid_gate", `a gate must be an object, not ${Array.isArray(gate) ? "a list" : gate === null ? "null" : typeof gate}. ${GATE_SHAPE}`);
+  const unknown = Object.keys(gate).filter((key) => key !== "require" && key !== "advise").sort();
+  if (unknown.length) throw runtimeError("invalid_gate", `a gate has no field ${unknown.join(", ")}. ${GATE_SHAPE}`);
+  if (!Object.keys(gate).length) throw runtimeError("invalid_gate", `an empty gate asks for nothing; leave the gate out instead. ${GATE_SHAPE}`);
+  for (const key of ["require", "advise"]) {
+    if (key in gate && !isObject(gate[key])) throw runtimeError("invalid_gate", `gate.${key} must be an object. ${GATE_SHAPE}`);
+  }
+  return gate;
+}
+
+/**
+ * A label for a channel of the caller's own. It names the channel in every
+ * answer and its file in the archive, so it is made of what a file's name may
+ * hold and nothing else: a label with a path in it put what was read on the
+ * channel outside the home. The labels that start with inbox or board are
+ * the runtime's own channels. Throws invalid_label.
+ */
+export function checkLabel(label) {
+  if (!isSafeLabel(label)) {
+    throw runtimeError("invalid_label", "a channel's label is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit, and not a name the system keeps for a device: it names the channel's file in the archive");
+  }
+  if (/^(?:inbox|board)/i.test(label)) throw runtimeError("invalid_label", `the label ${label} is the runtime's own: a label that starts with inbox or board names an inbox or a board inbox. Choose another`);
+}
+
+/** How long a channel is to live, as a whole number of seconds the service takes. Throws invalid_ttl. */
+export function checkChannelTtl(ttl) {
+  if (!Number.isInteger(ttl) || ttl < CHANNEL_TTL_MIN || ttl > CHANNEL_TTL_MAX) throw runtimeError("invalid_ttl", `a channel lives a whole number of seconds from ${CHANNEL_TTL_MIN} to ${CHANNEL_TTL_MAX}`);
+  return ttl;
 }
 
 /** A partner's name and key as partnerAdd takes them, checked where nothing has been opened yet. Throws invalid_name or invalid_key. */
@@ -283,10 +333,10 @@ function messageShape(body, envelope) {
 
 export class NodeRuntime {
   /** Takes the home, reads its key and its files. Close it to let go. */
-  static async open({ home, host = process.env.AAMIO_HOST || DEFAULT_BASE, board = process.env.AAMIO_BOARD || DEFAULT_BOARD, verifyum = process.env.AAMIO_VERIFYUM || VERIFYUM_MCP, fetch = globalThis.fetch, clock = () => Date.now() / 1000 } = {}) {
+  static async open({ home, host = process.env.AAMIO_HOST || DEFAULT_BASE, board = process.env.AAMIO_BOARD || DEFAULT_BOARD, verifyum = process.env.AAMIO_VERIFYUM || VERIFYUM_MCP, fetch = globalThis.fetch, clock = () => Date.now() / 1000, archive = null } = {}) {
     const owner = await takeHome(home, { host });
     try {
-      const runtime = new NodeRuntime({ home, host, board, verifyum, keys: await readKeys(home), owner, fetch, clock });
+      const runtime = new NodeRuntime({ home, host, board, verifyum, keys: await readKeys(home), owner, fetch, clock, archive });
       await runtime.load();
       return runtime;
     } catch (error) {
@@ -295,8 +345,23 @@ export class NodeRuntime {
     }
   }
 
-  constructor({ home, host, board = DEFAULT_BOARD, verifyum = VERIFYUM_MCP, keys, owner, fetch, clock }) {
+  constructor({ home, host, board = DEFAULT_BOARD, verifyum = VERIFYUM_MCP, keys, owner, fetch, clock, archive = null }) {
     this.home = home;
+    // The archive is the home's own choice, kept in config.json: keep, off or
+    // so many days. archive false turns it off for this process, which is
+    // what --no-archive does, and true turns it on whatever the home says.
+    this.archiveAsked = archive;
+    this.archivePolicy = { ...DEFAULT_POLICY };
+    this.archiveEnabled = false;
+    this.prunedAt = 0;
+    // What this process read on each channel, by write address, as it was
+    // handed over, with the thread's instance and the archive's mark: what
+    // board replies lists beside the archive. In memory only, and gone with
+    // the channel.
+    this.received = new Map();
+    // Messages the archive holds from a read whose cursor could not be
+    // written: read again, they are not written down a second time.
+    this.writtenDown = new Set();
     this.host = host.replace(/\/+$/, "");
     // Where a receipt's root is anchored, as aamio-python reads it: AAMIO_VERIFYUM.
     this.verifyum = String(verifyum).replace(/\/+$/, "");
@@ -390,7 +455,124 @@ export class NodeRuntime {
       if (!Number.isInteger(channel.after)) channel.after = 0;
     }
     this.traces = normalizeTraces(await this.loadTrace(), TRACE_KEEP, TRACE_KEYS);
+    this.dropExpired();
+    this.archivePolicy = await readPolicy(this.home);
+    this.archiveEnabled = this.archiveAsked === null || this.archiveAsked === undefined ? this.archivePolicy.mode !== "off" : Boolean(this.archiveAsked);
+    await this.prune();
     await this.settleInterrupted();
+  }
+
+  /**
+   * Channels past their time leave the home. The thread is gone at the
+   * service with everything on it, and what was read of it is kept for its
+   * receipt for as long as the receipt can be taken. The inbox and the board
+   * inbox stay until a new one takes their place, so a command can say that
+   * the address closed, and when. Left in state.json, every inbox this home
+   * ever had was written again at each save. In memory: the file follows at
+   * the next save.
+   */
+  dropExpired() {
+    const now = this.now();
+    const gone = (channel) => isObject(channel) && channel.label !== "inbox" && channel.label !== "board" && Number(channel.expire_at) + RECEIPT_KEEP <= now;
+    for (const channel of this.state.channels.filter(gone)) {
+      this.received.delete(channel.w);
+      // And what was written down of it at a read that could not be saved: it will not be read again.
+      for (const delivery of this.writtenDown) if (delivery.startsWith(channel.w + "\u0000")) this.writtenDown.delete(delivery);
+    }
+    this.state.channels = this.state.channels.filter((channel) => !gone(channel));
+  }
+
+  // ----------------------------------------------------------- archive --
+  //
+  // What was read, sent and posted, decrypted, in archive/: one file per
+  // channel, one record per line, as aamio-python and aamio-php keep it. It
+  // is a record of what happened and never the thing itself: a write that
+  // fails costs the record, and is said, and the message, the send or the
+  // post it is about stands.
+
+  /** Removes what the policy no longer keeps. A failure is said, since the archive then keeps growing in plain text. */
+  async prune() {
+    const policy = this.archivePolicy;
+    if (!this.archiveEnabled || !(policy.days || policy.max_mb)) return;
+    this.prunedAt = this.now();
+    try {
+      await pruneArchive(this.home, policy, { now: this.now() });
+    } catch (error) {
+      this.note("archive", "unpruned", `the archive was not pruned: ${error.code || error.name}: ${error.message}. It keeps growing, and what is in it stays readable to whoever can read this folder.`);
+    }
+  }
+
+  /**
+   * Writes one record, and says whether it wrote one. A home that keeps
+   * nothing is not a failure, and it is not a write either. Throws when the
+   * write fails: the caller knows what the record was about.
+   */
+  async archive(label, record) {
+    if (!this.archiveEnabled || this.closed) return false;
+    await appendRecord(this.home, archiveName(label), record);
+    if (this.now() - this.prunedAt > 3600) await this.prune();
+    return true;
+  }
+
+  /** The same for a record of something that is done already: what went wrong is given back, said in attention, and never thrown. */
+  async archiveSafely(label, record, what) {
+    try {
+      await this.archive(label, record);
+      return null;
+    } catch (error) {
+      const how = `${error.code || error.name}: ${error.message}`;
+      this.note("archive", "archive_failed", `${what} could not be written to the archive: ${how}. The archive does not have it.`);
+      return how;
+    }
+  }
+
+  /** One message of one thread, as this process knows a row it wrote down: the address, the thread's instance where the service names one, the seq and the hash. */
+  deliveryOf(channel, entry) {
+    return entry.sha256 === null || entry.sha256 === undefined ? null : [channel.w, typeof channel.instance === "string" ? channel.instance : "-", entry.seq, entry.sha256].join("\u0000");
+  }
+
+  /**
+   * What the archive holds now and what its policy means. Off stops the
+   * writing and removes nothing: what was kept before is still there, in the
+   * clear, and the words for off say nothing of it, so this does.
+   */
+  async archiveStatus() {
+    const status = await archiveStatus(this.home, this.archivePolicy);
+    if (this.archivePolicy.mode === "off" && status.files > 0) {
+      status.note = `Nothing more is written. What was kept before the archive was turned off is still in archive/: ${status.files} file(s), ${status.bytes} bytes. aamio archive prune --all removes it.`;
+    }
+    return status;
+  }
+
+  /** Removes what the policy no longer keeps, or with everything the whole archive, and says how much went. */
+  async archivePrune({ everything = false } = {}) {
+    const gone = await pruneArchive(this.home, this.archivePolicy, { now: this.now(), everything });
+    return { ...(await this.archiveStatus()), removed: gone.removed };
+  }
+
+  /**
+   * The home's own choice, written where the next process finds it, in any of
+   * the three runtimes. What config.json holds beside it stays. The choice
+   * counts once the file holds it.
+   */
+  async archiveSet(policy) {
+    let config = {};
+    try {
+      config = await this.loadJson("config.json", {}, isObject);
+    } catch {
+      // A config.json that cannot be read holds no choice anyone can use: it is replaced by this one.
+      config = {};
+    }
+    try {
+      await this.saveJson("config.json", { ...config, archive: policy });
+    } catch (error) {
+      if (error?.code === "runtime_closed") throw error;
+      throw runtimeError("not_saved", `config.json could not be written (${error.code || error.message}), so the archive's policy is as it was. Free the disk, then set it again.`);
+    }
+    this.archivePolicy = policy;
+    this.archiveEnabled = policy.mode !== "off";
+    await this.prune();
+    return this.archiveStatus();
   }
 
   /**
@@ -695,7 +877,7 @@ export class NodeRuntime {
     // By the key, so the partner chosen stays chosen. The envelope is sealed
     // to it, and the outbox and the trace keep the envelope and the names of
     // the fields: the scope's key is in neither in the clear.
-    const sent = await this.send(partner.key, { text: `Scope ${entry.name}, shared to ${access === "read" ? "read and post" : "post only"}.`, data: { aamio_scope: share } });
+    const sent = await this.send(partner.key, { text: `Scope ${entry.name}, shared to ${access === "read" ? "read and post" : "post only"}.`, data: { aamio_scope: share }, archivedData: { aamio_scope: { name: entry.name, access } } });
     return { ...sent, scope: entry.name, access };
   }
 
@@ -1033,7 +1215,7 @@ export class NodeRuntime {
   // -------------------------------------------------------------- send --
 
   /** One message, signed and sealed to the recipient, written to the outbox before it goes. */
-  async send(to, { text = null, data = null, re = null } = {}) {
+  async send(to, { text = null, data = null, re = null, archivedData = null } = {}) {
     checkRe(re);
     const { w, key, partner } = await this.recipient(to);
     // What the inbox asks of writers is read before anything is stored: a
@@ -1059,11 +1241,19 @@ export class NodeRuntime {
       entry = await this.outboxAdd(w2, partner.key, this.keys.seal(partner.key, plaintext), body, entry.id);
       answer = await this.deliver(entry, advice);
     }
+    // The archive is a record of the send, not the send. archivedData stands
+    // in for data there, for a message that carries what no file should: the
+    // archive says which scope was shared and with whom, never its key.
+    const stored = answer.status === 201 && isObject(answer.result) ? answer.result : {};
+    const archiveError = await this.archiveSafely("sent", {
+      kind: "sent", at: this.now(), to: this.nameForKey(entry.to_key) ?? entry.to_key, w: entry.w, status: answer.status, message_id: entry.id, outcome: entry.status,
+      seq: stored.seq ?? null, sha256: stored.sha256 ?? null, body: archivedData === null || archivedData === undefined ? body : { ...body, data: archivedData },
+    }, `the send ${entry.id}`);
     if (answer.status !== 201) {
       const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
       // The trace that could not be written is said with the failure too: a
       // command that sends once and exits never fetches attention.
-      throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, retryable, fix });
+      throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, archive_error: archiveError, retryable, fix });
     }
     // A 201 is a delivery even when the answer carries no receipt: read field
     // by field, a missing one threw after the message was stored, and the
@@ -1084,6 +1274,8 @@ export class NodeRuntime {
     if (said.length) sent.note = said.join(" ") + " Do not send this message again.";
     // The trace that could not be written, beside the delivery it is about.
     if (answer.traceError) sent.trace_error = answer.traceError;
+    // And the archive: delivered, and only the record of it here is missing.
+    if (archiveError !== null) sent.archive_error = archiveError;
     return sent;
   }
 
@@ -1439,6 +1631,254 @@ export class NodeRuntime {
     };
   }
 
+  // ---------------------------------------------------------- channels --
+  //
+  // A channel is a thread of its own beside the inbox: its own lifetime, its
+  // own list of who may write, and with a gate its own conditions. Its
+  // address reaches whoever is to write there in a sealed and signed message,
+  // which is what lets their runtime send to it: an address pasted into text
+  // binds nothing.
+
+  /** The channel a label names, apart from upper and lower case: two labels that differ only so are one file in the archive where the file system says so. */
+  channelCalled(label) {
+    const wanted = String(label).toLowerCase();
+    return this.state.channels.find((channel) => isObject(channel) && String(channel.label).toLowerCase() === wanted) ?? null;
+  }
+
+  /**
+   * A thread opened for these keys and held as a channel under this label,
+   * used only once state.json holds it. One that cannot be written down is
+   * closed again at the service, as far as that can be done, and its address
+   * is given to nobody: after a restart this home could not read there.
+   */
+  async openChannelThread(label, keys, ttl, gate = null) {
+    let thread;
+    try {
+      thread = await this.client.open({ ttl, allow: keys.length ? keys : undefined, gate: gate ?? undefined });
+    } catch (error) {
+      const said = isObject(error.body) ? error.body : {};
+      throw runtimeError("channel_unavailable", `could not open channel: ${error.status ?? 0} ${said.error ?? JSON.stringify(error.body ?? error.message)}. Nothing was opened.`, { status: error.status ?? 0, ...(said.fix ? { fix: said.fix } : {}) });
+    }
+    const channel = { label, read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: keys, after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [], seen_from: [] };
+    this.state.channels.push(channel);
+    try {
+      await this.saveState();
+    } catch (error) {
+      this.state.channels = this.state.channels.filter((held) => held !== channel);
+      const closed = await this.client.close({ w: thread.w, id: thread.id }).then(() => true, () => false);
+      throw runtimeError("not_saved", `the channel could not be written down (${error.code || error.message}), so it is not used and its address was given to nobody. ${closed ? "It was closed again at the service." : `It could not be closed at the service either, and stays there, unread, until ${thread.expireAt}.`}`);
+    }
+    return channel;
+  }
+
+  /**
+   * A channel with its own lifetime and, with to, its address handed to
+   * whoever is to write there. to is a partner's name or key, or a write
+   * address a verified message gave as reply_to or channel. That key goes on
+   * the list beside the partners in allow, and the address goes to it sealed
+   * and signed. Where the address goes, whose key seals it, whether the inbox
+   * there takes it and whether the message fits are settled before anything
+   * is opened: what stops there leaves no channel behind.
+   */
+  async channelOpen(label, { ttl = CHANNEL_TTL, allow = null, gate = null, to = null, note = null } = {}) {
+    checkLabel(label);
+    checkChannelTtl(ttl);
+    if (this.channelCalled(label) !== null) throw runtimeError("channel_exists", `there is a channel called ${this.channelCalled(label).label} already. Close it or choose another label`);
+    const handing = to !== null && to !== undefined;
+    if (note !== null && note !== undefined && !handing) throw runtimeError("invalid_note", "note travels with the address to whoever to names, so without to there is nothing to carry it");
+    const keys = [];
+    for (const name of allow ?? []) {
+      const partner = this.partnerByName(name);
+      if (partner === null) throw runtimeError("unknown_partner", `unknown partner: ${name}`);
+      if (!keys.includes(partner.key)) keys.push(partner.key);
+    }
+    if (gate !== null && gate !== undefined) checkGate(gate);
+    let handover = null;
+    if (handing) {
+      const { w: replyTo, key } = await this.recipient(to);
+      // The gate of the inbox the address goes to, read as a send reads it.
+      const advice = await this.client.planFor(replyTo);
+      this.handoverFits(key, ttl, note);
+      if (!keys.includes(key)) keys.push(key);
+      handover = { replyTo, key, advice };
+    }
+    const channel = await this.openChannelThread(label, keys, ttl, gate ?? null);
+    // The gate is in the answer whether or not there is one. It is not kept
+    // here: the thread holds it and GET /{w}/gate serves it, and a second copy
+    // on this machine could only disagree with the first.
+    const opened = { label, w: channel.w, expire_at: channel.expire_at, allow: keys.map((key) => this.nameForKey(key) ?? key), gate: gate ?? null };
+    if (handover === null) return opened;
+    const told = await this.handOver(channel, handover.key, handover.replyTo, note, handover.advice);
+    return { ...opened, handed_to: this.nameForKey(handover.key) ?? handover.key, address_sent_to: handover.replyTo, ...told };
+  }
+
+  /**
+   * A private channel only that key may write to, with its address handed
+   * over when replyTo says where. This is how a conversation leaves the open
+   * board inbox: one answer there, then everything else in a thread nobody
+   * else can write to. key is a key, or a partner's name.
+   */
+  async channelOpenWith(key, { ttl = 900, label = null, replyTo = null, note = null } = {}) {
+    checkChannelTtl(ttl);
+    let theirs = String(key);
+    if (!isKey(theirs)) {
+      const partner = this.partnerByName(theirs);
+      if (partner === null) throw runtimeError("unknown_partner", `not a key and not a known partner: ${key}`);
+      theirs = partner.key;
+    }
+    const handing = replyTo !== null && replyTo !== undefined;
+    if (handing && !(typeof replyTo === "string" && ADDRESS.test(replyTo))) throw runtimeError("invalid_address", "reply-to is a write address, 20 characters of a-z and 2-7, as a verified message gives it in reply_to");
+    if (note !== null && note !== undefined && !handing) throw runtimeError("invalid_note", "note travels with the address to the inbox reply-to names, so without reply-to there is nothing to carry it");
+    // An address this home knows as another key's is not the place to send this one's channel.
+    const bound = handing ? this.state.peers[replyTo] : undefined;
+    if (bound !== undefined && bound !== theirs) {
+      throw runtimeError("binding_conflict", `the address ${replyTo} is bound to ${this.nameForKey(bound) ?? bound}, and this channel is for another key, so its address would be sealed to a key that does not read there. Nothing was opened.`);
+    }
+    let name = label;
+    if (name !== null && name !== undefined) {
+      checkLabel(name);
+      if (this.channelCalled(name) !== null) throw runtimeError("channel_exists", `there is a channel called ${this.channelCalled(name).label} already. Close it or choose another label`);
+    } else {
+      name = `with-${keyHash(theirs).slice(0, 8)}`;
+      if (this.channelCalled(name) !== null) name = this.freeLabel(`${name}-${Math.floor(this.now())}`);
+    }
+    let advice = null;
+    if (handing) {
+      advice = await this.client.planFor(replyTo);
+      this.handoverFits(theirs, ttl, note);
+    }
+    const channel = await this.openChannelThread(name, [theirs], ttl);
+    const opened = { label: name, w: channel.w, expire_at: channel.expire_at, with: this.nameForKey(theirs) ?? theirs, address_sent_to: handing ? replyTo : null };
+    if (!handing) return opened;
+    return { ...opened, ...(await this.handOver(channel, theirs, replyTo, note, advice)) };
+  }
+
+  /** The body that carries a channel's address, and the envelope it is sealed in. */
+  invitation(key, w, expireAt, note = null) {
+    const body = { channel: w, expire_at: expireAt };
+    if (note !== null && note !== undefined && note !== "") body.text = String(note);
+    Object.assign(body, this.conversation(key));
+    return [body, this.keys.seal(key, JSON.stringify(body))];
+  }
+
+  /**
+   * Whether the message that will carry a channel's address fits in one
+   * message, asked before the channel is opened. The address and the expiry
+   * are not known yet. Both have a fixed length, so a stand-in of the same
+   * length seals to the same size. A note too long for it would open the
+   * channel first, and the message carrying the address would then be refused.
+   */
+  handoverFits(key, ttl, note = null) {
+    const [body] = this.invitation(key, "a".repeat(20), Math.floor(this.now()) + ttl, note);
+    // seen can appear before the handover, if a message from this key is read
+    // meanwhile, and it is always 64 characters: counted as there already.
+    if (!("seen" in body)) body.seen = "0".repeat(64);
+    const size = Buffer.byteLength(this.keys.seal(key, JSON.stringify(body)), "utf8");
+    if (size > MESSAGE_MAX_BYTES) {
+      throw runtimeError("too_large", `with this note the message carrying the address would be ${size} bytes, and a message is at most ${MESSAGE_MAX_BYTES}, so no channel was opened. Shorten the note, and send the rest on the channel once it is open.`);
+    }
+  }
+
+  /**
+   * The channel's address sent to replyTo, sealed to key and signed, through
+   * the outbox like any send, so its outcome is kept and the same bytes can
+   * go again. Gives what the caller's answer carries besides: the message's
+   * id, and what could not be recorded of it here.
+   *
+   * Whatever stops it, the channel is open by now, and the failure says so,
+   * with the channel, and says whether anything left this machine.
+   */
+  async handOver(channel, key, replyTo, note = null, advice = null) {
+    const opened = { label: channel.label, w: channel.w, expire_at: channel.expire_at };
+    const still = `The channel ${channel.label} is open and listed by channel list, aamio_channels over MCP: only the message carrying its address did not go. `;
+    let entry = null;
+    let answer;
+    try {
+      const [body, envelope] = this.invitation(key, channel.w, channel.expire_at, note);
+      entry = await this.outboxAdd(replyTo, key, envelope, body);
+      answer = await this.deliver(entry, advice ?? await this.client.planFor(replyTo));
+    } catch (error) {
+      if (error instanceof GateStop) {
+        error.opened = opened;
+        error.fix = still + (error.fix ?? "");
+        throw error;
+      }
+      // Stopped before a byte left: the outbox could not be written, or the message could not be made.
+      throw runtimeError("send_failed", `the channel ${channel.label} is open, and the message carrying its address was not sent: ${error.message}`, {
+        outcome: "never_sent", message_id: entry?.id ?? error.message_id ?? null, status: 0, opened, retryable: false,
+        fix: `Nothing left this machine, so nobody has been given the address of ${channel.label}. Close it with channel close ${channel.label}, aamio_close_channel over MCP, put right what the error says, and open a new one.`,
+      });
+    }
+    if (answer.status !== 201) {
+      const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
+      throw runtimeError("send_failed", `the channel ${channel.label} is open, and the message carrying its address did not land: send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, {
+        outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, opened, retryable, fix: still + fix,
+      });
+    }
+    const told = { message_id: entry.id };
+    if (answer.notes?.length) told.notes = answer.notes;
+    if (answer.outboxError) {
+      told.outbox_error = answer.outboxError;
+      told.note = "Delivered: aamio stored the message carrying the address. The outbox on this machine could not record that, so it may say sending until the next start, which calls it unknown. Do not hand the address over again.";
+    }
+    if (answer.traceError) told.trace_error = answer.traceError;
+    return told;
+  }
+
+  /** The channels of this home: the public address, how long each has left, and how far it is read. Never a read key. */
+  channelList() {
+    const now = this.now();
+    return this.state.channels.filter(isObject).map((channel) => ({
+      label: channel.label, w: channel.w, expire_at: channel.expire_at, seconds_left: Math.max(0, Math.floor(Number(channel.expire_at) - now)), expired: Number(channel.expire_at) <= now,
+      allow: (channel.allow || []).map((key) => this.nameForKey(key) ?? key),
+      // What this process read here, and where the cursor stands: what a command of its own, which has read nothing, can still say.
+      received: (this.received.get(channel.w) ?? []).length, read_to: Number.isInteger(channel.after) ? channel.after : 0, gone: channel.gone === true, muted: channel.muted === true,
+    }));
+  }
+
+  /**
+   * Closes a channel before it expires. The thread is asked gone at the
+   * service first, and the channel leaves this home when the service says it
+   * is gone: deleted now, or not there any more. When the service does not
+   * say so, the channel stays and is still read: taken out of this home while
+   * the thread lived on, whoever wrote there would write where nobody reads.
+   * The answer says which of the two happened, here and at the service.
+   */
+  async channelClose(label) {
+    const channel = this.channel(String(label));
+    if (!isObject(channel)) {
+      const labels = this.state.channels.filter(isObject).map((held) => held.label);
+      throw runtimeError("unknown_channel", `no channel called ${label} in this home. It has ${labels.length ? labels.join(", ") : "none"}.`);
+    }
+    let status = 200;
+    try {
+      await this.client.close({ w: channel.w, id: channel.read_key });
+    } catch (error) {
+      status = error instanceof AamioError ? error.status : 0;
+    }
+    const gone = status === 200 || status === 404 || status === 410;
+    if (!gone) {
+      return {
+        label: channel.label, w: channel.w, status, deleted: false, closed_here: false,
+        note: `${status === 0 ? "The service did not answer" : `The service answered ${status}`}, so the thread may still be there, and the channel is kept and still read. Close it again, or let it expire at ${channel.expire_at}.`,
+      };
+    }
+    const before = this.state.channels;
+    this.state.channels = before.filter((held) => held !== channel);
+    try {
+      await this.saveState();
+    } catch (error) {
+      this.state.channels = before;
+      throw runtimeError("not_saved", `${status === 200 ? "the thread is deleted at the service" : "there is no thread at the service any more"}, and state.json could not be written (${error.code || error.message}), so this home still lists ${channel.label}. Close it again once the disk takes writes.`, { status, deleted: status === 200 });
+    }
+    this.received.delete(channel.w);
+    this.observed.delete(channel.w);
+    return {
+      label: channel.label, w: channel.w, status, deleted: status === 200, closed_here: true,
+      ...(status === 200 ? {} : { note: "There was no thread at this address any more: it had expired, or was closed before. The channel is taken out of this home." }),
+    };
+  }
+
   // ------------------------------------------------------------- board --
   //
   // The open board, where agents that have not met find each other. Posts are
@@ -1494,11 +1934,16 @@ export class NodeRuntime {
     } catch (error) {
       throw boardError("board post", error);
     }
+    // The post is made. A record of it that cannot be written is said beside
+    // it, and is no reason to tell the caller the post failed: it would be
+    // made again.
+    const archiveError = await this.archiveSafely("board", { kind: "posted", at: this.now(), post: made.post }, `the post ${isObject(made.post) ? made.post.id : ""}`);
     // Where the answers go and how to read them, in the answer itself.
     return {
       post: made.post, inbox: channel.w, answers_arrive_on: "board",
-      read_them_with: "Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes, the board inbox among them. Each says who signed it and whether it was sealed to you.",
+      read_them_with: "Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes, the board inbox among them. board replies on the command line lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.",
       ...(held ? { scope: held.name } : {}),
+      ...(archiveError !== null ? { archive_error: archiveError } : {}),
     };
   }
 
@@ -1570,11 +2015,14 @@ export class NodeRuntime {
 
   /** A post of this home's taken down before it expires, signed by the key that posted it. */
   async boardWithdraw(id) {
+    let done;
     try {
-      return await this.client.board.withdraw(String(id));
+      done = await this.client.board.withdraw(String(id));
     } catch (error) {
       throw boardError("withdraw", error);
     }
+    const archiveError = await this.archiveSafely("board", { kind: "withdrawn", at: this.now(), id: String(id) }, `the withdrawal of post ${id}`);
+    return archiveError !== null && isObject(done) ? { ...done, archive_error: archiveError } : done;
   }
 
   /**
@@ -1606,9 +2054,10 @@ export class NodeRuntime {
     Object.assign(body, this.conversation(post.key));
     const entry = await this.outboxAdd(post.w, post.key, this.keys.seal(post.key, JSON.stringify(body)), body);
     const answer = await this.deliver(entry, advice);
+    const archiveError = await this.archiveSafely("board", { kind: "answered", at: this.now(), post: post.id, w: post.w, status: answer.status, message_id: entry.id, outcome: entry.status, body }, `the answer ${entry.id}`);
     if (answer.status !== 201) {
       const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
-      throw runtimeError("send_failed", `answer ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, retryable, fix });
+      throw runtimeError("send_failed", `answer ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, archive_error: archiveError, retryable, fix });
     }
     const receipt = isObject(answer.result) ? answer.result : {};
     const done = { post: post.id, w: post.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, replies_arrive_on: "board", reply_to: channel.w };
@@ -1619,7 +2068,145 @@ export class NodeRuntime {
     }
     if (post.key === this.keys.public) done.warning = "You answered your own post. The answer is sealed to your own key, so it reaches nobody but you.";
     if (answer.traceError) done.trace_error = answer.traceError;
+    if (archiveError !== null) done.archive_error = archiveError;
     return done;
+  }
+
+  /**
+   * Reads the board inboxes, and only those: the one posts point at now and
+   * the older ones still open. What waits on the other channels is left where
+   * it is, for read, and the inbox's cursor stands. With wait, the newest
+   * board inbox is waited on, and the others are asked once.
+   */
+  async boardPoll(wait = 0) {
+    this.dropExpired();
+    const now = this.now();
+    const boards = this.state.channels.filter((channel) => isObject(channel) && (channel.label === "board" || String(channel.label).startsWith("board-")) && !channel.muted && Number(channel.expire_at) > now)
+      .sort((a, b) => (a.label === "board" ? -1 : b.label === "board" ? 1 : 0));
+    const collected = [];
+    for (const [index, channel] of boards.entries()) collected.push(...(await this.poll(channel, index === 0 ? Math.min(25, Math.max(0, wait)) : 0, null, null)));
+    return collected;
+  }
+
+  /**
+   * Answers to this home's posts, decrypted and verified, oldest first: what
+   * this process read, and what the archive holds from before. A command is a
+   * process of its own, so without the archive a run would show only what
+   * arrived inside its own wait, though the rest was read and written down.
+   * With postId, the answers that name that post, wherever they arrived.
+   * Without it, everything that arrived on a board inbox and everything that
+   * names a post. How many messages were left out is kept in
+   * boardRepliesLeftOut.
+   *
+   * One delivery is one row. A row with its thread's instance is one
+   * delivery by its address, instance and seq, and the first of its copies
+   * stands, as it was first handed over: the one the archive has from before,
+   * when it has one this process did not write. Any other row is told by all
+   * it shows, and two such rows that show the same are both kept: nothing
+   * says they are one. The rule is aamio-python's, row for row.
+   */
+  async boardReplies(postId = null) {
+    const one = (entry) => (typeof entry.instance === "string" ? [entry.w, entry.instance, entry.seq].join("\u0000") : null);
+    const shown = (entry) => JSON.stringify([entry.w ?? null, entry.seq ?? null, entry.at ?? null, entry.sha256 ?? null, entry.from_key ?? null]);
+    const wanted = (entry) => {
+      const body = entry.body;
+      if (postId !== null && postId !== undefined) return isObject(body) && body.post === postId;
+      // An answer names the post it answers, and most do. One that does not is
+      // still an answer if it arrived on the address a post gave out.
+      if (String(entry.channel ?? "").startsWith("board")) return true;
+      return isObject(body) && typeof body.post === "string";
+    };
+    const count = (keys) => {
+      const counted = new Map();
+      for (const key of keys) if (key !== null) counted.set(key, (counted.get(key) ?? 0) + 1);
+      return counted;
+    };
+    // Every channel, not only the ones named board: an answer can arrive on a
+    // private channel opened for the conversation.
+    const held = [];
+    for (const channel of this.state.channels) if (isObject(channel)) held.push(...(this.received.get(channel.w) ?? []));
+    // And every file of the archive: a board inbox is renewed while the old
+    // one still holds answers, and the old one keeps its own label and its own
+    // file after its channel has left this home. What an earlier run wrote is
+    // read whether the archive is on or off now: it stays the record of what
+    // arrived until it is pruned.
+    const rows = [];
+    let names = [];
+    try {
+      names = await archiveNames(this.home);
+    } catch (error) {
+      this.note("archive", "unread", `the archive could not be listed (${error.code || error.name}), so answers written down earlier are not in this result`);
+    }
+    for (const name of names) {
+      try {
+        rows.push(...(await archivedRecords(this.home, name, "received")));
+      } catch (error) {
+        this.note("archive", "unread", `the archive ${name}.jsonl could not be read (${error.code || error.name}), so answers written down earlier are not in this result`);
+      }
+    }
+    // A delivery the archive has more rows of than this process wrote was
+    // written down before this process read it: that row is its first copy,
+    // and the copies held here are later readings of it.
+    const stored = count(rows.map(one));
+    const written = count(held.filter((entry) => entry.archived !== false).map(one));
+    const earlier = new Set([...stored].filter(([delivery, rowsOfIt]) => rowsOfIt > (written.get(delivery) ?? 0)).map(([delivery]) => delivery));
+    const out = [];
+    const skipped = [];
+    const named = new Set();
+    for (const entry of held) {
+      const delivery = one(entry);
+      if (delivery !== null) {
+        if (named.has(delivery) || earlier.has(delivery)) continue;
+        named.add(delivery);
+      }
+      (wanted(entry) ? out : skipped).push(entry);
+    }
+    // A copy in memory without the instance, from a service that names none,
+    // has its row in the archive as well when it was written down, and stands
+    // for one row there that shows the same. One that was not written down
+    // has no row there and stands for none.
+    const onDisk = count(held.filter((entry) => one(entry) === null && entry.archived !== false).map(shown));
+    for (const entry of rows) {
+      const delivery = one(entry);
+      if (delivery !== null) {
+        if (named.has(delivery)) continue;
+        named.add(delivery);
+      } else if ((onDisk.get(shown(entry)) ?? 0) > 0) {
+        onDisk.set(shown(entry), onDisk.get(shown(entry)) - 1);
+        continue;
+      }
+      if (wanted(entry)) out.push({ ...entry, from_archive: true });
+      else skipped.push(entry);
+    }
+    out.sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0) || (Number(a.seq) || 0) - (Number(b.seq) || 0));
+    this.boardRepliesLeftOut = skipped.length;
+    // An empty list is easily read as an empty inbox, and the reader goes
+    // looking for the fault at the other end. Whatever this passed over is
+    // still a message, so it says how many there are and where.
+    if (skipped.length && !out.length) {
+      const unopened = skipped.filter((entry) => !entry.verified).length;
+      const unread = unopened ? `, and ${unopened} of them arrived unsigned, so the body was never opened` : "";
+      this.note("board replies", "filtered", postId !== null && postId !== undefined
+        ? `Nothing here answers post ${postId}, but ${skipped.length} other message(s) are on your channels${unread}. Run board replies without a post, or read, to see them.`
+        : `${skipped.length} message(s) are here and none of them looks like a board answer, because they name no post and did not arrive on a board inbox${unread}. Run read to see them.`);
+    }
+    return out;
+  }
+
+  /**
+   * Where answers to this home's posts and answers arrive, and whether it is
+   * still open. A board inbox that has expired is the difference between
+   * nobody replied and nobody could.
+   */
+  boardReplyAddress() {
+    const channel = this.channel("board");
+    if (channel === null) return { w: null, open: false, why: "No board inbox on this machine. One is opened when you answer or post." };
+    const left = Math.floor(Number(channel.expire_at) - this.now());
+    if (left > 0) return { w: channel.w, open: true, expires_at: Math.floor(Number(channel.expire_at)), seconds_left: left };
+    return {
+      w: channel.w, open: false, expires_at: Math.floor(Number(channel.expire_at)),
+      why: `The address you answered from closed ${-left} s ago. Anything sent to it after that was refused at the door, so an empty result here does not mean nobody wrote back.`,
+    };
   }
 
   /**
@@ -1879,6 +2466,10 @@ export class NodeRuntime {
     // replay_unknown for rows it never handed over: count 0 and no messages,
     // with a note on two of them (a review of 11 November 2026).
     const said = [];
+    // What this read wrote to the archive, by delivery: kept in mind when the
+    // cursor cannot be written, so the same rows are not written down again
+    // when this process reads them again.
+    const written = [];
     for (const raw of data.messages) {
       if (limit !== null && entries.length >= limit) break;
       const entry = this.readEntry(channel, raw);
@@ -1902,6 +2493,12 @@ export class NodeRuntime {
           const conflicts = bindings.filter((planned) => planned.conflict !== null).map((planned) => planned.conflict);
           if (conflicts.length) entry.binding_conflicts = conflicts;
         }
+        // The archive's mark is weighed at its longer value, false, and with
+        // archive_off where nothing is kept: a write that fails turns true
+        // into false after the weighing, and a budget has to hold for what is
+        // handed over. One that is written is a byte under.
+        entry.archived = false;
+        if (!this.archiveEnabled) entry.archive_off = true;
         if (maxBytes !== null) {
           const weight = Buffer.byteLength(JSON.stringify(entry), "utf8");
           if (entries.length > 0 && used + weight > maxBytes) {
@@ -1928,6 +2525,31 @@ export class NodeRuntime {
           this.state.peers[planned.address] = entry.from_key;
         } else {
           said.push(["binding_conflict", `message ${entry.seq} names ${planned.address} as ${planned.field}, signed by ${this.nameForKey(entry.from_key) ?? entry.from_key}, and that address is already bound to ${this.nameForKey(planned.conflict.bound_to) ?? planned.conflict.bound_to}. The binding is kept.`]);
+        }
+      }
+      // Received, readable, archived and handled are four different things.
+      // The message is written down as it is handed over, with the thread's
+      // instance and without the archive's own mark, before the cursor is: a
+      // process that stops between the two reads it again, and one that did
+      // it the other way round passed it by with nothing kept. A write that
+      // fails never costs the rest of the batch, and is said in attention,
+      // not on the message, which has to be the size it was weighed at.
+      const { archived: weighedAs, archive_off: off, ...row } = entry;
+      row.kind = "received";
+      if (typeof channel.instance === "string") row.instance = channel.instance;
+      const delivery = this.deliveryOf(channel, entry);
+      if (this.archiveEnabled) {
+        if (delivery !== null && this.writtenDown.has(delivery)) {
+          // Written down at a read whose cursor could not be saved, by this process.
+          entry.archived = true;
+        } else {
+          try {
+            entry.archived = (await this.archive(channel.label, row)) !== false;
+            if (entry.archived && delivery !== null) written.push(delivery);
+          } catch (error) {
+            entry.archived = false;
+            said.push(["archive_failed", `message ${entry.seq} was handed over and could not be written to the archive: ${error.code || error.name}: ${error.message}. The archive does not have it.`]);
+          }
         }
       }
       entries.push(entry);
@@ -1970,8 +2592,24 @@ export class NodeRuntime {
       if (lastSeq !== null) channel.after = lastSeq;
     } else if (Number.isInteger(data.next)) channel.after = data.next;
     else if (lastSeq !== null) channel.after = Math.max(channel.after, lastSeq);
-    await this.saveRead();
+    try {
+      await this.saveRead();
+    } catch (error) {
+      for (const delivery of written) this.writtenDown.add(delivery);
+      throw error;
+    }
     for (const [state, what] of said) this.note(channel.label, state, what, channel.w);
+    // The copies board replies keep, with the archive's mark and the thread's
+    // instance, which the message handed over does not carry: one delivery is
+    // known by its address, instance and seq in memory as it is in the archive.
+    if (entries.length) {
+      const held = this.received.get(channel.w) ?? [];
+      for (const entry of entries) {
+        held.push(typeof channel.instance === "string" ? { ...entry, instance: channel.instance } : { ...entry });
+        this.writtenDown.delete(this.deliveryOf(channel, entry));
+      }
+      this.received.set(channel.w, held);
+    }
     // The trace follows what was handed over: recorded after the read is
     // written down, in attention when it cannot be, and never on the messages,
     // which are the size they were weighed at.
@@ -2075,6 +2713,10 @@ export class NodeRuntime {
         result.anchor = { error: error.status ?? 0, detail: typeof said === "string" ? said : error.body ?? error.message };
       }
     }
+    // Taken, and anchored when that was asked: a record of it that cannot be
+    // written is said beside it.
+    const archiveError = await this.archiveSafely(channel.label, { kind: "receipt", at: this.now(), result }, `the receipt for ${channel.label}`);
+    if (archiveError !== null) result.archive_error = archiveError;
     return result;
   }
 
@@ -2083,6 +2725,7 @@ export class NodeRuntime {
     const noted = this.attention.length;
     await this.ensureInbox();
     await this.publishPresence();
+    this.dropExpired();
     const now = this.now();
     // What was read of a thread is kept for its receipt while the receipt can
     // still be taken, and no longer: a server that ran for days held the rows

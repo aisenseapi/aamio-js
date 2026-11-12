@@ -19,6 +19,7 @@
     "bin/aamio.js",
     "src/aamio.js",
     "src/aamio.d.ts",
+    "src/node-archive.js",
     "src/node-identity.js",
     "src/node-lock.js",
     "src/node-mcp.js",

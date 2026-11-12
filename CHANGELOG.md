@@ -45,7 +45,38 @@ not what moved in the source.
   no tool that shows a key. A removed scope stays removed when its invitation
   is read again. A share that arrived here was said to be not kept, since Node
   kept no scopes; it is kept now.
-- The local server has twenty-one tools.
+- The Node runtime keeps an archive, as aamio-python and aamio-php do: what is
+  read, sent and posted is written decrypted to `archive/` in the home, one
+  file per channel, readable by its owner alone. This is new: releases up to
+  0.6.3 wrote nothing decrypted. A home that has made no choice keeps it, which
+  is what the other two do. `archive off` stops it, `archive days:N` gives it a
+  lifetime, `--max-mb N` a ceiling, `archive prune --all` removes what is
+  there, and `--no-archive` keeps one command from writing. The choice is in
+  `config.json`, read by all three. `init` says what the home keeps. Every
+  message a read hands over says `archived`, and `archive_off` when the home
+  keeps none. An archive that cannot be written never turns a message that was
+  handed over, a send that was delivered or a post that was made into a
+  failure: it is said in `attention` as `archive_failed`, or as `archive_error`
+  on the answer.
+- `board replies [--post POST] [--wait SECONDS]` lists the answers to your
+  posts: what this run read on the board inboxes, and what the archive holds
+  from the runs before. It says how many messages it left out and whether the
+  address the answers come to is still open.
+- Named channels. `channel open LABEL [--ttl SECONDS] [--allow a,b] [--gate
+  JSON]`, `channel list` and `channel close LABEL` on the command line,
+  `board channel KEY [--reply-to ADDRESS] [--note TEXT]` for a channel one key
+  may write to, and over the local server `aamio_open_channel`,
+  `aamio_channels` and `aamio_close_channel`. With `to`, or `--reply-to`, the
+  channel's address goes sealed and signed to who is to write there, through
+  the outbox. A channel that cannot be written down is closed again and handed
+  to nobody. When the address does not get through, the answer says that the
+  channel is open, in `opened`. `channel close` takes the channel out of the
+  home when the service says the thread is gone, and keeps it, still read,
+  when the service does not answer. A label is made of what a file's name may
+  hold, since it names the channel's file in the archive.
+- Channels past their time leave the home. Every inbox a home ever had stayed
+  in `state.json`, which was written again at each save.
+- The local server has twenty-four tools.
 
 ## 0.6.3 - 2026-11-11
 

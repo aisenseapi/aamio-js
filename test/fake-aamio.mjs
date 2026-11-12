@@ -43,6 +43,10 @@ export class FakeAamio {
     // scope names as the scope it read: the address when nothing is set, nothing at all for false, or what a test
     // says. boardKnowsNoScopes plays a board from before scopes, and boardFailures answers the next finds as told.
     this.finds = [];
+    // Gates a test sets for an address, what the next closings answer, and a service that takes no gate.
+    this.gates = new Map();
+    this.closeFailures = [];
+    this.refuseGate = false;
     this.boardPage = 200;
     this.boardScopeEcho = undefined;
     this.boardKnowsNoScopes = false;
@@ -113,9 +117,27 @@ export class FakeAamio {
       if (!id || deriveAddress(id) !== w) return this.reply(400, { error: "X-Read does not derive this address", fix: "Make w from the read key." });
       const allow = (this.header(init, "X-Allow") || "").split(",").map((key) => key.trim()).filter(Boolean);
       const thread = this.thread(w, { id, ttl: Number(this.header(init, "X-TTL") || 600), allow: allow.includes("*") ? ["*"] : allow });
-      return this.reply(201, { w, expire_at: thread.expire_at, allow: thread.allow, instance: thread.instance });
+      // The conditions for whoever writes, in the body of the same request, set once.
+      const asked = body ? JSON.parse(body) : {};
+      if (asked.gate !== undefined) {
+        if (this.refuseGate) return this.threads.delete(w) && this.reply(400, { error: "the gate asks for what this service does not take", fix: "See the board descriptor for what a gate may hold." });
+        thread.gate = asked.gate;
+      }
+      return this.reply(201, { w, expire_at: thread.expire_at, allow: thread.allow, instance: thread.instance, ...(thread.gate ? { gate: thread.gate } : {}) });
     }
-    if (method === "GET" && parts[1] === "gate") return this.reply(200, {});
+    // The gate of the thread that is there, or of a test's choosing for an address, as the service serves it.
+    if (method === "GET" && parts[1] === "gate") return this.reply(200, this.gates.get(w) ?? this.threads.get(w)?.gate ?? {});
+    if (method === "DELETE" && parts.length === 1) {
+      // Closed by its owner: gone for everyone holding its address. A test can have the service not answer, or refuse.
+      const closing = this.closeFailures.shift();
+      if (closing === "network") throw new TypeError("fetch failed");
+      if (closing) return this.reply(closing, { error: `the test asked for ${closing}`, fix: "none" });
+      const thread = this.threads.get(w);
+      if (!thread) return this.reply(404, { error: "no thread at this address", fix: "It expired, or was closed before." });
+      if (thread.id !== null && this.header(init, "X-Read") !== thread.id) return this.reply(403, { error: "wrong read key", fix: "Close with the key the thread was opened with." });
+      this.threads.delete(w);
+      return this.reply(200, { deleted: true });
+    }
     if (method === "POST" && parts.length === 1) {
       const failure = this.failures.shift();
       if (failure === "network") throw new TypeError("fetch failed");
