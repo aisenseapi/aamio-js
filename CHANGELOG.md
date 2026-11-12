@@ -12,13 +12,18 @@ not what moved in the source.
   copy as a replay. `outbox forget ID` and `aamio_outbox_forget` drop one entry
   and say which of five it was. A delivery, and a refusal the service will
   repeat, are never sent again. A send that fails says whether the same bytes
-  are worth sending again, as `retryable`, and what to do, as `fix`.
+  are worth sending again, as `retryable`, and what to do, as `fix`. A retry
+  that stops before anything goes out, on a full disk or at a gate, says that
+  the earlier attempt may have arrived and that the same id is retried: the
+  error is `retry_not_sent`, or the gate's with `earlier_attempt` beside it. An
+  attempt an older client left open stays open when its retry is refused.
 - `trace [WHO]` and `aamio_trace` show what was sent to each counterpart and
   what came back, as hashes and shapes, never content. It is kept in
   `trace.json`, the file aamio-python and aamio-php keep, and every sealed
   message names the last message from its recipient that was read and opened
   here, as `seen`. A trace that cannot be written costs the trace and nothing
-  else: `untraced` in `attention`, and `trace_error` on the send.
+  else: `untraced` in `attention`, and `trace_error` on the send, also on one
+  that was turned away.
   A row keeps at most 32 field names of a message, each of at most 64
   characters: the names are the sender's to choose, and a message made of
   thousands of them would otherwise make the file large.

@@ -2,7 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { GateStop, isKey } from "./aamio.js";
 import { readIdentity } from "./node-identity.js";
-import { OUTBOX_NOTES, outboxOutcome } from "./node-runtime.js";
+import { OUTBOX_NOTES, SEND_STOPS, outboxOutcome, stopFields } from "./node-runtime.js";
 
 // Keep the wire shapes in step with the Python and Composer stdio servers.
 const MODERN = "2026-07-28";
@@ -531,13 +531,8 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
       ? { error: failure.reason ?? failure.message, error_code: "gate", fix: failure.fix ?? null }
       : { error: failure?.code ? failure.message : "the local Node runtime could not complete this call", error_code: failure?.code ?? "internal", ...(failure?.fix ? { fix: failure.fix } : {}) };
     if (failure?.code === "send_failed" && tool.name === "aamio_board_answer") said.operation = "board_answer";
-    if (failure?.code === "send_failed" || failure?.code === "not_sent" || (failure?.code === "not_saved" && failure.message_id)) {
-      Object.assign(said, { outcome: failure.outcome, message_id: failure.message_id });
-      if (failure.status !== undefined) said.status = failure.status;
-      if (failure.outbox_error) said.outbox_error = failure.outbox_error;
-      // Whether the same stored bytes are worth sending again: true, false, or null when it cannot be told.
-      if (failure.retryable !== undefined) said.retryable = failure.retryable;
-    }
+    // The message it is about and what became of it, as the command line says them: one function writes both.
+    if (SEND_STOPS.includes(failure?.code) || failure instanceof GateStop || (failure?.code === "not_saved" && failure.message_id)) Object.assign(said, stopFields(failure));
     return complete(toolResult(said, true));
   }
 }

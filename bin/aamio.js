@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { GateStop } from "../src/aamio.js";
 import { initIdentity, readIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
-import { NodeRuntime, checkPartner, checkRe } from "../src/node-runtime.js";
+import { NodeRuntime, SEND_STOPS, checkPartner, checkRe, stopFields } from "../src/node-runtime.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const help = `Usage: aamio [--home DIR] <command>
@@ -272,13 +272,12 @@ try {
   if (error?.code === "usage") {
     process.stderr.write(error.message + "\n");
     process.exitCode = 2;
-  } else if (error?.code === "send_failed" || error?.code === "not_sent" || error instanceof GateStop) {
+  } else if (SEND_STOPS.includes(error?.code) || error instanceof GateStop) {
     // A script that sends needs the message_id and the outcome on standard
     // output, where it reads answers, to know what not to send again.
     const said = error instanceof GateStop
-      ? { error: error.reason ?? error.message, error_code: "gate", fix: error.fix ?? null }
-      : { error: error.message, error_code: error.code, outcome: error.outcome, message_id: error.message_id, ...(error.status !== undefined ? { status: error.status } : {}), ...(error.outbox_error ? { outbox_error: error.outbox_error } : {}),
-        ...(error.retryable !== undefined ? { retryable: error.retryable } : {}), ...(error.fix ? { fix: error.fix } : {}) };
+      ? { error: error.reason ?? error.message, error_code: "gate", fix: error.fix ?? null, ...stopFields(error) }
+      : { error: error.message, error_code: error.code, ...stopFields(error), ...(error.fix ? { fix: error.fix } : {}) };
     // A retry of several that stopped at one: what was sent again before it is said with the stop.
     if (Array.isArray(error.retried) && error.retried.length) said.retried = error.retried;
     process.stdout.write(JSON.stringify(said) + "\n");

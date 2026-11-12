@@ -91,17 +91,25 @@ command line can ask for. A delivery, and a refusal the service will repeat,
 are not sent again. `outbox forget ID` drops an entry and says which of five it
 was: `never_sent`, `attempted`, `refused`, `delivered` or `unknown`. Only
 `never_sent` lets you compose something else: what is already away cannot be
-recalled.
+recalled. A retry that stops before anything goes out, on a full disk or at a
+gate, speaks of that attempt only: the error is `retry_not_sent`, or the gate's
+with `earlier_attempt` beside it, the outcome stays what the earlier attempt
+left, and the same id is retried. An attempt left open stays open when a later
+one is refused: the refusal says the thread is gone now, not that the first
+attempt never landed.
 
 `trace` shows what was sent to a counterpart and how the service answered, and
 what arrived and whether it opened, as hashes and shapes and never content.
+The names of a message's fields are kept, at most 32 of them, and never their
+values: what a sender writes into a field name is in the trace.
 Every sealed message names the last message from its recipient that was read
 and opened here, as `seen`, and the trace reads theirs the same way: a claim
 covers the one message it names, and a message nothing names is unknown, not
 unread. Use it when a partner says a message did not arrive or arrived empty:
 the sha256 is what the service stored, byte for byte, and theirs should match.
 A trace that cannot be written costs the trace and nothing else: it is said in
-`attention` as `untraced`, and as `trace_error` on the send it belongs to.
+`attention` as `untraced`, and as `trace_error` on the send it belongs to,
+whether that send was delivered or turned away.
 `outbox.json` and `trace.json` are the files aamio-python and aamio-php keep, so
 a send one of them left unknown is settled from here, and the three show one
 trace of a home.

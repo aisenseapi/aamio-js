@@ -10,12 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { Aamio, Keys, sha256hex, threadSigningInput } from "../src/aamio.js";
+import { Aamio, GateStop, Keys, sha256hex, threadSigningInput } from "../src/aamio.js";
 import { initIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
-import { NodeRuntime, OUTBOX_NOTES, outboxOpen, outboxOutcome, outboxRetryable, sendAdvice } from "../src/node-runtime.js";
+import { NodeRuntime, OUTBOX_NOTES, outboxOpen, outboxOutcome, outboxRetryable, sendAdvice, stopFields } from "../src/node-runtime.js";
 import { TRACE_FIELDS, TRACE_FIELD_CHARS, TRACE_KEEP, TRACE_KEYS, normalizeTraces, traceView } from "../src/node-trace.js";
 import { BOARD, FakeAamio } from "./fake-aamio.mjs";
+import { serveFake } from "./serve-fake.mjs";
 
 const HOST = "https://fake.aamio";
 const bin = fileURLToPath(new URL("../bin/aamio.js", import.meta.url));
@@ -206,8 +207,8 @@ test("a sweep that stops at one message says what it sent again before it", asyn
   } catch (error) {
     stopped = error;
   }
-  assert.equal(stopped?.code, "not_sent");
-  assert.equal(stopped.message_id, second.message_id);
+  assert.equal(stopped?.code, "retry_not_sent", "an earlier attempt of it is still open, and the stop is this attempt's");
+  assert.deepEqual([stopped.message_id, stopped.outcome], [second.message_id, "unknown"]);
   assert.deepEqual(stopped.retried.map((row) => [row.id, row.status]), [[first.message_id, "delivered"]], "the one sent again before the stop is not lost from the answer");
 });
 
@@ -738,4 +739,211 @@ test("on the command line: retry, forget and trace answer from the home's files,
     assert.equal(refused.stdout, "");
   }
   assert.equal(existsSync(unused), false);
+});
+
+// ------------------------------------------------------------------ a check of 12 November 2026
+//
+// Three ways a stop was said in words that fit another stop. In the first two the words were those of a message that
+// was never stored, about one that may be with the recipient, which is leave to write it again as a new message.
+
+const failed = async (act) => {
+  try {
+    await act();
+  } catch (error) {
+    return error;
+  }
+  return null;
+};
+
+test("an attempt an older client left open stays open when its retry is refused, through a restart and a forget", async (t) => {
+  // An entry written before ever_open, answered 500 and called refused, is open: the service may have stored the
+  // message before it failed. Its retry was answered 410, and the entry read refused, not stored: gone from pending,
+  // and forget said the message had never been stored.
+  const fake = new FakeAamio();
+  const { sender, homeB, open } = await pair(t, fake);
+  const first = await sender.send("receiver", { text: "answered 500 by an older client" });
+  const second = await sender.send("receiver", { text: "turned away by a rate window" });
+  await sender.close();
+  const file = await onDisk(homeB, "outbox.json");
+  const asOlder = (id, last) => {
+    for (const field of ["ever_open", "posting", "seq"]) delete file[id][field];
+    Object.assign(file[id], { status: "refused", last_status: last, attempts: 1 });
+  };
+  asOlder(first.message_id, 500);
+  asOlder(second.message_id, 429);
+  await writeFile(join(homeB, "outbox.json"), JSON.stringify(file));
+
+  const id = first.message_id;
+  let again = await open(homeB);
+  assert.equal(outboxOutcome(again.outbox[id]), "attempted");
+  assert.deepEqual(again.outboxPending().map((p) => p.message_id), [id]);
+  fake.failNext(410);
+  const [row] = await again.outboxRetry(id);
+  assert.deepEqual([row.status, row.http], ["attempted", 410], "the thread is gone now, which says nothing of the attempt that was answered 500");
+  assert.equal(outboxOutcome(again.outbox[id]), "attempted");
+  assert.deepEqual(again.outboxPending().map((p) => p.message_id), [id], "still open");
+
+  // A rate window proved that nothing was stored, so a refusal of its retry is a refusal: nothing was ever left open.
+  fake.failNext(410);
+  const [other] = await again.outboxRetry(second.message_id);
+  assert.deepEqual([other.status, other.http], ["refused", 410]);
+  assert.equal(outboxOutcome(again.outbox[second.message_id]), "refused");
+  assert.deepEqual(again.outboxPending().map((p) => p.message_id), [id]);
+
+  await again.close();
+  const kept = await onDisk(homeB, "outbox.json");
+  assert.equal(kept[id].ever_open, true, "and the file says it was left open");
+  assert.notEqual(kept[second.message_id].ever_open, true);
+  again = await open(homeB);
+  assert.equal(outboxOutcome(again.outbox[id]), "attempted", "after a restart too");
+  assert.deepEqual(again.outboxPending().map((p) => p.message_id), [id]);
+  const dropped = await again.outboxForget(id);
+  assert.deepEqual([dropped.forgotten, dropped.already_sending, dropped.outcome, dropped.note], [true, true, "attempted", OUTBOX_NOTES.attempted]);
+  const settled = await again.outboxForget(second.message_id);
+  assert.deepEqual([settled.forgotten, settled.outcome], [true, "refused"]);
+});
+
+test("a retry that stops before its post says the earlier attempt may have arrived, and to retry the same id", async (t) => {
+  // The disk was full when a message left unknown was sent again. Nothing went out, and the answer said the message
+  // "was not sent. Free the disk, then send it again", with outcome unknown beside it.
+  const fake = new FakeAamio();
+  const { sender, receiver } = await pair(t, fake);
+  const id = (await lostSend(fake, sender)).message_id;
+  const before = posts(fake);
+  failSaving(sender, "outbox.json");
+  const stopped = await failed(() => sender.outboxRetry(id));
+  assert.equal(stopped?.code, "retry_not_sent");
+  assert.deepEqual([stopped.message_id, stopped.outcome, stopped.retryable], [id, "unknown", null]);
+  assert.equal(stopped.message, `the outbox could not be written (ENOSPC), so this attempt of message ${id} was not sent. An earlier attempt of it left this machine and may have arrived, so its outcome is still unknown.`);
+  assert.match(stopped.fix, /^Free the disk, then retry the same message: aamio_outbox_retry with this id, or aamio outbox retry --id/);
+  assert.match(stopped.fix, /Do not compose a replacement/);
+  assert.doesNotMatch(stopped.message + " " + stopped.fix, /send it again/);
+  assert.equal(posts(fake), before, "nothing went out for this attempt");
+  assert.equal(outboxOutcome(sender.outbox[id]), "unknown");
+  assert.deepEqual(sender.outboxPending().map((p) => p.message_id), [id], "and it is still to be settled");
+  // Both the command line and the local server write the stop out with this function.
+  assert.deepEqual(stopFields(stopped), { outcome: "unknown", message_id: id, retryable: null });
+
+  // The local server says the same: the code, the id and the outcome, and no word of a new message.
+  failSaving(sender, "outbox.json");
+  const over = (await call(sender, "aamio_outbox_retry", { id })).result;
+  assert.equal(over.isError, true);
+  assert.deepEqual([over.structuredContent.error_code, over.structuredContent.outcome, over.structuredContent.message_id, over.structuredContent.retryable], ["retry_not_sent", "unknown", id, null]);
+  assert.match(over.structuredContent.error, /this attempt of message m-[0-9a-f]{16} was not sent\. An earlier attempt of it left this machine and may have arrived/);
+  assert.match(over.structuredContent.fix, /^Free the disk, then retry the same message/);
+  assert.equal(posts(fake), before);
+
+  // The same id once the disk takes writes: the stored bytes, a replay where the first arrived.
+  const [row] = await sender.outboxRetry(id);
+  assert.deepEqual([row.status, row.http], ["delivered", 201]);
+  assert.deepEqual((await receiver.read()).map((m) => m.replay), [false, true]);
+
+  // A message that never left keeps its own words: nothing of it is anywhere, so it is sent again as it is written.
+  failSaving(sender, "outbox.json");
+  const unwritten = await failed(() => sender.send("receiver", { text: "never written down" }));
+  assert.deepEqual([unwritten?.code, unwritten.outcome], ["not_sent", "stopped"]);
+  assert.match(unwritten.message, /was neither recorded nor sent\. Free the disk, then send it again\.$/);
+  const real = sender.saveJson.bind(sender);
+  let saves = 0;
+  sender.saveJson = async (name, value) => {
+    // Written to the outbox, and the write that says it is on its way fails.
+    if (name === "outbox.json" && ++saves === 2) throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+    return real(name, value);
+  };
+  const unsent = await failed(() => sender.send("receiver", { text: "written down, and never sent" }));
+  assert.deepEqual([unsent?.code, unsent.outcome], ["not_sent", "stopped"]);
+  assert.match(unsent.message, /was not sent\. Free the disk, then send it again\.$/);
+  assert.equal(outboxOutcome(sender.outbox[unsent.message_id]), "never_sent");
+});
+
+test("a retry stopped at the gate says which message it was, and what an earlier attempt left open", async (t) => {
+  // The gate's words are about the attempt it stopped: "nothing was sent". Of a message whose first attempt got no
+  // answer that is not the whole of it, and the stop named neither the message nor its outcome.
+  const fake = new FakeAamio();
+  const { sender } = await pair(t, fake);
+  const open = (await lostSend(fake, sender)).message_id;
+  fake.failNext(429);
+  const turned = (await failed(() => sender.send("receiver", { text: "turned away by a rate window" }))).message_id;
+  const before = posts(fake);
+  sender.client.planFor = async () => {
+    throw new GateStop("This inbox requires something, a condition this client does not know how to meet, so nothing was sent.", "Update the aamio client.");
+  };
+  const stopped = await failed(() => sender.outboxRetry(open));
+  assert.ok(stopped instanceof GateStop);
+  assert.deepEqual([stopped.message_id, stopped.outcome], [open, "unknown"]);
+  assert.match(stopped.earlier_attempt, /^This stop is about this attempt only\. An earlier attempt of it left this machine and may have arrived, so its outcome is still unknown\. When the gate can be met, retry the same message/);
+  assert.deepEqual(Object.keys(stopFields(stopped)), ["outcome", "message_id", "earlier_attempt"]);
+  // One the rate window turned away was never stored, and the stop does not say that it may have been.
+  const settled = await failed(() => sender.outboxRetry(turned));
+  assert.deepEqual([settled.message_id, settled.outcome, settled.earlier_attempt], [turned, "refused", undefined]);
+  assert.equal(posts(fake), before);
+
+  const over = (await call(sender, "aamio_outbox_retry", { id: open })).result;
+  assert.equal(over.isError, true);
+  assert.deepEqual([over.structuredContent.error_code, over.structuredContent.message_id, over.structuredContent.outcome], ["gate", open, "unknown"]);
+  assert.match(over.structuredContent.earlier_attempt, /may have arrived/);
+  // A send stopped at the gate is a message that never left: it names no outcome of an earlier attempt.
+  const fresh = (await call(sender, "aamio_send", { to: "receiver", text: "stopped at the gate" })).result;
+  assert.deepEqual([fresh.structuredContent.error_code, fresh.structuredContent.earlier_attempt], ["gate", undefined]);
+});
+
+test("a send the service turned away says the trace that could not be written too", async (t) => {
+  // The answer was 429 and trace.json could not be written. The failure said the 429 and not the trace: that was in
+  // attention, which a command that sends once and exits never fetches.
+  const fake = new FakeAamio();
+  const { sender, receiver } = await pair(t, fake);
+  failSaving(sender, "trace.json", 99);
+  fake.failNext(429);
+  const turned = await failed(() => sender.send("receiver", { text: "turned away, and untraced" }));
+  assert.deepEqual([turned?.code, turned.status, turned.outcome, turned.retryable], ["send_failed", 429, "refused", true]);
+  assert.match(turned.trace_error, /^trace\.json: ENOSPC/);
+  assert.deepEqual(Object.keys(stopFields(turned)), ["outcome", "message_id", "status", "trace_error", "retryable"]);
+
+  fake.failNext(429);
+  const over = (await call(sender, "aamio_send", { to: "receiver", text: "the same over the local server" })).result;
+  assert.equal(over.isError, true);
+  assert.deepEqual([over.structuredContent.error_code, over.structuredContent.status, over.structuredContent.retryable], ["send_failed", 429, true]);
+  assert.match(over.structuredContent.trace_error, /^trace\.json: ENOSPC/);
+  assert.match(over.structuredContent.fix, /declined this for now/);
+
+  // An answer on the board goes the way a send goes, and says the same.
+  const posted = await receiver.boardPost({ kind: "need", title: "a need", text: "who can help?" });
+  fake.failNext(500);
+  const answer = await failed(() => sender.boardAnswer(posted.post.id, { text: "I can" }));
+  assert.deepEqual([answer?.code, answer.status, answer.outcome], ["send_failed", 500, "attempted"]);
+  assert.match(answer.trace_error, /^trace\.json: ENOSPC/);
+  fake.failNext(500);
+  const second = (await call(sender, "aamio_board_answer", { post: posted.post.id, text: "over the local server" })).result;
+  assert.deepEqual([second.isError, second.structuredContent.operation, second.structuredContent.status], [true, "board_answer", 500]);
+  assert.match(second.structuredContent.trace_error, /^trace\.json: ENOSPC/);
+
+  // A send that is traced says nothing of it.
+  const { sender: fine } = await pair(t, fake);
+  fake.failNext(429);
+  const traced = await failed(() => fine.send("receiver", { text: "turned away, and traced" }));
+  assert.deepEqual([traced.status, "trace_error" in stopFields(traced)], [429, false]);
+});
+
+test("on the command line, against a service that answers: a send turned away says the trace that could not be written, and so does its retry", async (t) => {
+  const fake = new FakeAamio({ now: Math.floor(Date.now() / 1000) });
+  const { sender, receiver, homeB } = await pair(t, fake);
+  await sender.close();
+  const { cli } = await serveFake(t, fake);
+  // A folder where the trace should be: the file can be neither read nor replaced.
+  await rm(join(homeB, "trace.json"), { force: true });
+  await mkdir(join(homeB, "trace.json"));
+  fake.failNext(429);
+  const refused = await cli(homeB, "send", "receiver", "turned away, and untraced");
+  assert.equal(refused.status, 1, refused.stderr);
+  const told = JSON.parse(refused.stdout);
+  assert.deepEqual([told.error_code, told.status, told.outcome, told.retryable], ["send_failed", 429, "refused", true]);
+  assert.match(told.trace_error, /^trace\.json: /);
+  assert.match(told.fix, /declined this for now/);
+
+  const again = await cli(homeB, "outbox", "retry", "--id", told.message_id);
+  assert.equal(again.status, 0, again.stderr);
+  const [row] = JSON.parse(again.stdout).retried;
+  assert.deepEqual([row.id, row.status, row.http], [told.message_id, "delivered", 201]);
+  assert.match(row.trace_error, /^trace\.json: /);
+  assert.deepEqual((await receiver.read()).map((m) => [m.body.text, m.replay]), [["turned away, and untraced", false]]);
 });

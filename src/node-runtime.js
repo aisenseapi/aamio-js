@@ -184,6 +184,32 @@ export function sendAdvice(outcome, status) {
   return [null, `aamio answered ${status}, which this client does not classify. It may or may not have stored the message before failing, so treat delivery as unsettled: keep the message_id, read the error, and do not resend blindly.`];
 }
 
+// Said with a stop that came while a message was being sent again. The stop
+// is that attempt's: the one before it is still with the other side, and the
+// words of a message that never left, "not sent, send it again", read as leave
+// to write it anew (a check of 12 November 2026).
+const EARLIER_ATTEMPT = "An earlier attempt of it left this machine and may have arrived, so its outcome is still unknown.";
+const RETRY_SAME_ID = "retry the same message: aamio_outbox_retry with this id, or aamio outbox retry --id on the command line. That sends the stored bytes again, which a recipient that keeps what it has seen marks a replay. Do not compose a replacement, and do not send the text as a new message.";
+
+/** The codes of a send that did not end in a stored message. Each is said with its message id and its outcome. */
+export const SEND_STOPS = ["send_failed", "not_sent", "retry_not_sent"];
+
+/**
+ * What such a stop says of itself beside its words, for the command line and
+ * the local server alike. The two wrote these fields out separately, and the
+ * trace that could not be written was in neither: a command that sends once
+ * and exits never saw it (a check of 12 November 2026).
+ */
+export function stopFields(error) {
+  const said = {};
+  for (const field of ["outcome", "message_id", "status"]) if (error?.[field] !== undefined) said[field] = error[field];
+  for (const field of ["outbox_error", "trace_error"]) if (error?.[field]) said[field] = error[field];
+  // Whether the same stored bytes are worth sending again: true, false, or null when it cannot be told.
+  if (error?.retryable !== undefined) said.retryable = error.retryable;
+  if (error?.earlier_attempt) said.earlier_attempt = error.earlier_attempt;
+  return said;
+}
+
 /** A partner's name and key as partnerAdd takes them, checked where nothing has been opened yet. Throws invalid_name or invalid_key. */
 export function checkPartner(name, key) {
   if (typeof name !== "string" || !NAME.test(name)) throw runtimeError("invalid_name", "A partner's name is 1 to 64 characters, with no control characters.");
@@ -418,7 +444,13 @@ export class NodeRuntime {
           : "the process stopped before its proof of work was done, so nothing was sent";
         changed = true;
       }
-      if (["attempted", "unknown"].includes(entry.status) && entry.ever_open !== true) {
+      // An attempt left open before this process, by this version or an older
+      // one, stays open: a stop or a refusal from now on settles a later
+      // attempt, not that one. Asked of the outcome and not of the status: an
+      // entry an older client wrote as refused, after an answer that proved
+      // nothing, had no mark, and a 410 on its retry called a message that may
+      // have landed refused, and not stored (a check of 12 November 2026).
+      if (outboxOpen(entry) && entry.ever_open !== true) {
         entry.ever_open = true;
         changed = true;
       }
@@ -827,7 +859,9 @@ export class NodeRuntime {
     }
     if (answer.status !== 201) {
       const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
-      throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, retryable, fix });
+      // The trace that could not be written is said with the failure too: a
+      // command that sends once and exits never fetches attention.
+      throw runtimeError("send_failed", `send ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, retryable, fix });
     }
     // A 201 is a delivery even when the answer carries no receipt: read field
     // by field, a missing one threw after the message was stored, and the
@@ -889,14 +923,21 @@ export class NodeRuntime {
 
   /** The stored bytes sent once, and what the answer allows this side to claim recorded. */
   async deliver(entry, advice) {
+    // What an earlier attempt left open stays open, whatever this one is
+    // answered: read here, before the status is written over.
+    if (outboxOpen(entry)) entry.ever_open = true;
     entry.attempts = (entry.attempts || 0) + 1;
     entry.status = "sending";
     try {
       await this.saveOutbox();
     } catch (error) {
-      // Nothing has left this machine, and nothing will.
+      // Nothing has left this machine for this attempt, and nothing will.
       entry.status = entry.ever_open ? "unknown" : "stopped";
-      throw runtimeError("not_sent", `the outbox could not be written (${error.code || error.message}), so message ${entry.id} was not sent. Free the disk, then send it again.`, { message_id: entry.id, outcome: entry.status });
+      const why = error.code || error.message;
+      if (entry.ever_open) {
+        throw runtimeError("retry_not_sent", `the outbox could not be written (${why}), so this attempt of message ${entry.id} was not sent. ${EARLIER_ATTEMPT}`, { message_id: entry.id, outcome: entry.status, retryable: null, fix: "Free the disk, then " + RETRY_SAME_ID });
+      }
+      throw runtimeError("not_sent", `the outbox could not be written (${why}), so message ${entry.id} was not sent. Free the disk, then send it again.`, { message_id: entry.id, outcome: entry.status });
     }
     const headers = { "Content-Type": "application/json", "X-Key": this.keys.public, "X-Sig": this.keys.sign(threadSigningInput(entry.w, entry.envelope)) };
     let notes = [...(advice.notes || [])];
@@ -993,8 +1034,17 @@ export class NodeRuntime {
       try {
         answer = await this.deliver(entry, await this.client.planFor(entry.w));
       } catch (error) {
-        // What was sent again before this one stopped is said with the stop.
-        if (error instanceof Error) error.retried = out;
+        if (error instanceof Error) {
+          // What was sent again before this one stopped is said with the stop.
+          error.retried = out;
+          // A stop at the gate says nothing was sent, which is true of this
+          // attempt and not of the message: which message, and what an earlier
+          // attempt left open, are said beside the gate's own words.
+          if (error instanceof GateStop) {
+            Object.assign(error, { message_id: entry.id, outcome: outboxOutcome(entry) });
+            if (outboxOpen(entry)) error.earlier_attempt = `This stop is about this attempt only. ${EARLIER_ATTEMPT} When the gate can be met, ${RETRY_SAME_ID}`;
+          }
+        }
         throw error;
       }
       const row = { id: entry.id, w: entry.w, status: entry.status, http: answer.status };
@@ -1320,7 +1370,7 @@ export class NodeRuntime {
     const answer = await this.deliver(entry, advice);
     if (answer.status !== 201) {
       const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
-      throw runtimeError("send_failed", `answer ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, retryable, fix });
+      throw runtimeError("send_failed", `answer ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, retryable, fix });
     }
     const receipt = isObject(answer.result) ? answer.result : {};
     const done = { post: post.id, w: post.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, replies_arrive_on: "board", reply_to: channel.w };
