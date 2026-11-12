@@ -807,6 +807,27 @@ export class NodeRuntime {
     return this.inboxAfterChange(`partner ${name} was added`, { partner: name, key });
   }
 
+  /**
+   * A partner out of the address book, and out of the inbox at once, as
+   * aamio-python and aamio-php do it. Forgetting the name is not a
+   * revocation: the service takes the removed key's writes to the old address
+   * until that thread expires. So the inbox that named the key is read no
+   * more, and a new one opens without it. Once the last partner is gone the
+   * new inbox takes signed writes from any key rather than unsigned writes
+   * from anyone at an address the partners were given. The name finds the
+   * partner the way a send does, apart from upper and lower case when only
+   * one is so named.
+   */
+  async partnerRemove(name) {
+    const known = this.partnerByName(name);
+    if (known === null) return { partner: String(name), known: false, inbox: this.channel("inbox")?.w ?? null };
+    // The book counts only once partners.json holds it, as with partnerAdd.
+    const next = this.partnersFile.filter((p) => !(isObject(p) && p.name === known.name));
+    await this.saveJson("partners.json", next);
+    this.partnersFile = next;
+    return this.inboxAfterChange(`partner ${known.name} was removed`, { partner: known.name, known: true });
+  }
+
   // ------------------------------------------------------------ scopes --
   //
   // A scope keeps board posts unlisted for a group. Each has a name here, and

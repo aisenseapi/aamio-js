@@ -305,7 +305,7 @@ test("an archive that cannot be written costs the record and nothing else: the m
   const answered = await sender.boardAnswer(posted.post.id, { text: "delivered" });
   assert.deepEqual([answered.seq, typeof answered.archive_error], [1, "string"]);
   const withdrawn = await receiver.boardWithdraw(posted.post.id);
-  assert.deepEqual([withdrawn.withdrawn, typeof withdrawn.archive_error, fake.posts.size], [true, "string", 0]);
+  assert.deepEqual([withdrawn.deleted, typeof withdrawn.archive_error, fake.posts.size], [true, "string", 0]);
   const receipt = await receiver.receipt("inbox");
   assert.deepEqual([receipt.count, typeof receipt.archive_error], [1, "string"]);
   // And a send that failed says both.

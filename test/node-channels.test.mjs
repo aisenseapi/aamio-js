@@ -690,4 +690,40 @@ test("on the command line the address book is answered as an object, as the othe
   assert.deepEqual([added.partner, added.key, added.partners.map((row) => row.name)], ["friend", friend, ["guest", "friend"]], "and a change says the book as it is after it");
   assert.ok("inbox" in added && "rotated" in added);
   assert.deepEqual(Object.keys(said(await cli(homeA, "channel", "list"))), ["channels"]);
+  // And out again, by the name in another case, with the book after the change.
+  const removed = said(await cli(homeA, "partner", "remove", "FRIEND"));
+  assert.deepEqual([removed.partner, removed.known, removed.partners.map((row) => row.name)], ["friend", true, ["guest"]]);
+  const twice = said(await cli(homeA, "partner", "remove", "friend"));
+  assert.deepEqual([twice.known, twice.partners.map((row) => row.name)], [false, ["guest"]]);
+});
+
+test("partner remove takes a partner out of the book and out of the inbox, as the other two runtimes do", async (t) => {
+  const fake = new FakeAamio();
+  const { owner, guest, homeA } = await pair(t, fake);
+  const before = owner.channel("inbox");
+  assert.deepEqual(before.allow, [guest.keys.public]);
+
+  // By the name in another case, as a send finds it.
+  const removed = await owner.partnerRemove("GUEST");
+  assert.deepEqual([removed.partner, removed.known, removed.rotated], ["guest", true, true]);
+  assert.deepEqual(owner.partnerList(), []);
+  assert.deepEqual(JSON.parse(await readFile(join(homeA, "partners.json"), "utf8")), [], "the book on disk is the book in memory");
+  const inbox = owner.channel("inbox");
+  assert.notEqual(inbox.w, before.w);
+  assert.deepEqual(inbox.allow, ["*"], "the last partner gone: signed writes from any key, not unsigned ones from anyone");
+  assert.deepEqual([removed.old_inbox.w, removed.old_inbox.muted], [before.w, true]);
+  assert.equal(owner.state.channels.find((channel) => channel.w === before.w).muted, true, "and the inbox that named the key is read no more");
+
+  // A name nobody has changes nothing.
+  assert.deepEqual(await owner.partnerRemove("nobody"), { partner: "nobody", known: false, inbox: inbox.w });
+
+  // Two names that differ only in case, as another client may have written them: a guess would remove the wrong one.
+  const ann = Keys.generate().public;
+  const other = Keys.generate().public;
+  owner.partnersFile = [{ name: "Ann", key: ann }, { name: "ANN", key: other }];
+  await owner.saveJson("partners.json", owner.partnersFile);
+  assert.equal((await failed(() => owner.partnerRemove("ann"))).code, "ambiguous_partner");
+  assert.deepEqual(owner.partnerList().map((p) => p.name), ["Ann", "ANN"], "and nothing was removed");
+  assert.deepEqual((await owner.partnerRemove("ANN")).partner, "ANN");
+  assert.deepEqual(owner.partnerList().map((p) => [p.name, p.key]), [["Ann", ann]], "the exact name removes that one alone");
 });

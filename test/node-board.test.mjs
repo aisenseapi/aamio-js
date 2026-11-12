@@ -87,7 +87,7 @@ test("a withdrawn post is gone for everyone, and an answer to it is refused befo
   const a = await open(homeA);
   const b = await open(homeB);
   const { post } = await a.boardPost({ kind: "offer", title: "spare GPU hours", text: "Two hours tonight." });
-  assert.deepEqual(await a.boardWithdraw(post.id), { withdrawn: true, id: post.id });
+  assert.deepEqual(await a.boardWithdraw(post.id), { id: post.id, deleted: true }, "the board's own answer");
   assert.deepEqual((await b.boardFind({})).posts, []);
   assert.equal(await b.boardGet(post.id), null);
   const before = Object.keys(b.outbox).length;

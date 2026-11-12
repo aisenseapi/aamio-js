@@ -316,7 +316,8 @@ export class FakeAamio {
       if (!post) return this.reply(404, { error: "no live post with that id", id });
       if (!verify(post.key, boardDeleteSigningInput(id, body), this.header(init, "X-Sig") || "")) return this.reply(403, { error: "only the key that posted can withdraw", fix: "Sign with that key." });
       this.posts.delete(id);
-      return this.reply(200, { withdrawn: true, id });
+      // What the board answers (func_aamio_board.php).
+      return this.reply(200, { id, deleted: true });
     }
     return this.reply(404, { error: "not on the fake board", fix: "none" });
   }

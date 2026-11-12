@@ -21,6 +21,7 @@ const help = `Usage: aamio [--home DIR] [--no-archive] <command>
   whoami                       Show the public key, hash and hash prefix
   partner add NAME KEY         Put a partner's public key in the address book
   partner list                 The address book
+  partner remove NAME          Take a partner out of the address book: the inbox opens again without its key
   lookup [NAME ...]            Which partners are reachable now, and where
   send TO TEXT [--data JSON] [--re SHA256]
                                Send a partner a message, signed and sealed to its key
@@ -77,6 +78,7 @@ const SPEC = {
   serve: { positional: [] },
   "partner add": { positional: ["name", "key"] },
   "partner list": { positional: [] },
+  "partner remove": { positional: ["name"] },
   lookup: { positional: [], rest: true, options: ["--wait"] },
   send: { positional: ["to", "text"], options: ["--data", "--re"] },
   read: { positional: [], options: ["--wait", "--limit", "--max-bytes"] },
@@ -225,6 +227,8 @@ function plan(command, positional, options) {
       return async (runtime) => ({ ...(await runtime.partnerAdd(first, second)), partners: runtime.partnerList() });
     case "partner list":
       return (runtime) => ({ partners: runtime.partnerList() });
+    case "partner remove":
+      return async (runtime) => ({ ...(await runtime.partnerRemove(first)), partners: runtime.partnerList() });
     case "lookup": {
       const wait = whole(options.wait, "--wait", 0, 25) ?? 0;
       return (runtime) => runtime.lookup(positional.length ? positional : null, wait);

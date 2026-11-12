@@ -81,7 +81,12 @@ only, and opens again when the book changes. Before the first one, a read opens
 an inbox anyone who has its address can write to, signed or not, since a first
 contact has nobody to name. When the first partner is added, a new inbox opens
 for the partners, and the open one is still read until it expires, within the
-hour, as partner add says in its answer. The board inbox takes any signed key, since whoever answers
+hour, as partner add says in its answer. `partner remove NAME` does the
+reverse: the inbox that named the key is read no more, and a new one opens
+without it, since forgetting a name is not a revocation and the service takes
+that key's writes to the old address until it expires. It is not a key block
+either: once the last partner is gone, the new inbox takes signed writes from
+any key. The board inbox takes any signed key, since whoever answers
 a post has not been met. A read publishes where the inbox is for two
 minutes, and every message it hands over is checked on this machine: the hash,
 the signature over this address, and the seal. A message read before, the same

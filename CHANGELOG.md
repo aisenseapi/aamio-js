@@ -58,6 +58,12 @@ not what moved in the source.
   handed over, a send that was delivered or a post that was made into a
   failure: it is said in `attention` as `archive_failed`, or as `archive_error`
   on the answer.
+- `partner remove NAME` on the command line, as aamio-python and aamio-php
+  have it: the partner leaves the address book, the inbox that named its key
+  is read no more, and a new one opens without it. The name finds the
+  partner as a send does, apart from upper and lower case when only one is
+  so named. The answer has `partner`, `known`, what became of the inbox, and
+  `partners` after the change.
 - `partner list` on the command line answers with an object, `{"partners":
   [...]}`, as aamio-python does and as `aamio_partners` does over the local
   server. **This changes what a script reads:** it was a bare list. `partner
