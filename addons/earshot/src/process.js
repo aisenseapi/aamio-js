@@ -200,7 +200,10 @@ function localDecode(sound, mode) {
   }
   let text = null;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(got.data);
+    // The mark is kept: a byte order mark in front of a card is not part of
+    // one, and aamio-earshot for Python and for PHP say not understood of the
+    // same sound. Dropped, this edition alone read it as a card.
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(got.data);
   } catch {
     text = null;
   }

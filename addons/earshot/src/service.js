@@ -141,11 +141,15 @@ export function post(path, body, contentType, limit, { base = BASE, timeout = TI
   });
 }
 
-/** aisense's own error and fix, when its answer carries them. */
+/**
+ * aisense's own error and fix, when its answer carries them. Here and below a
+ * byte order mark is kept, so JSON with one in front is not JSON, as in the
+ * editions for Python and PHP.
+ */
 function words(payload) {
   let said;
   try {
-    said = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
+    said = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(payload));
   } catch {
     return [null, null];
   }
@@ -189,7 +193,7 @@ export async function decode(sound, mode, send = post) {
   if (status !== 200) throw failure(status, headers, payload, "read", "not_readable");
   let said = null;
   try {
-    said = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
+    said = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(payload));
   } catch {
     said = null;
   }

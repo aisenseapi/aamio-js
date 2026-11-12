@@ -3,6 +3,7 @@
 // service tests of aamio-python's tests/test_earshot_process.py and aamio-php's addons/earshot/tests/process.inc.php.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -58,7 +59,9 @@ test("decode posts the WAV to the mode and reads the documented answer", async (
   assert.deepEqual(await service.decode(Buffer.from("RIFF1234WAVE"), "auto", fake.send), answer);
   const [path, payload, type, limit] = fake.asked[0];
   assert.deepEqual([path, payload.toString("latin1"), type, limit], ["/audio_decode/auto", "RIFF1234WAVE", "audio/wav", service.MAX_JSON_BYTES]);
-  for (const odd of ["not json", "[1, 2]", JSON.stringify({ text: "no data_base64" }), "null", Buffer.from([0x22, 0xff, 0x22])]) {
+  // The last is the documented answer with a byte order mark in front: not JSON, as in the editions for Python and PHP.
+  const marked = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(answer))]);
+  for (const odd of ["not json", "[1, 2]", JSON.stringify({ text: "no data_base64" }), "null", Buffer.from([0x22, 0xff, 0x22]), marked]) {
     const error = await caught(() => service.decode(Buffer.from("RIFF"), "auto", fakePost(200, odd).send));
     assert.ok(error instanceof service.Unreachable && error.reason === "service_answered_something_else" && error.answered === true, String(odd));
   }
@@ -240,4 +243,49 @@ test("an answer that breaks off is done here too", async (t) => {
     said = await process_.handle(request("command", "decode", { file: heard }), seams);
     assert.deepEqual([said.result.status, said.result.engine, said.result.fallback.sent], ["heard", "local", "yes"], name);
   }
+});
+
+test("no proxy is taken from the environment, with or without NODE_USE_ENV_PROXY", async (t) => {
+  // What the README says, tried on the Node that runs this. The add-on's own post() runs in a process of its own,
+  // as it does under aamio, with the variables aamio passes on. The proxy is a listener that only counts.
+  const fine = await receiver(t, (incoming, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end("{}");
+  });
+  const asked = [];
+  const proxy = createServer((incoming, response) => {
+    asked.push(`${incoming.method} ${incoming.url}`);
+    response.writeHead(502);
+    response.end();
+  });
+  proxy.on("connect", (incoming, socket) => {
+    asked.push(`CONNECT ${incoming.url}`);
+    socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+  });
+  await new Promise((resolve, reject) => {
+    proxy.once("error", reject);
+    proxy.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => {
+    proxy.closeAllConnections?.();
+    proxy.close(() => resolve());
+  }));
+  const there = `http://127.0.0.1:${proxy.address().port}`;
+  const code = `const service = await import(process.argv[1]);
+const [status] = await service.post("/audio_decode/auto", Buffer.from("RIFF"), "audio/wav", 1000, { base: process.argv[2] });
+console.log(status);`;
+  const run = (env) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", code, new URL("../src/service.js", import.meta.url).href, fine.base], {
+      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HTTP_PROXY: there, http_proxy: there, HTTPS_PROXY: there, https_proxy: there, ...env }, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    child.stderr.on("data", (chunk) => { err += chunk; });
+    child.once("error", reject);
+    child.once("close", () => resolve(out.trim() || err.trim()));
+  });
+  assert.equal(await run({}), "200");
+  assert.equal(await run({ NODE_USE_ENV_PROXY: "1" }), "200");
+  assert.deepEqual([fine.seen.map((one) => one.url), asked], [["/audio_decode/auto", "/audio_decode/auto"], []], "both went to the service itself, and the proxy was asked for nothing");
 });

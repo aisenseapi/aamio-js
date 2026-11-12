@@ -250,6 +250,12 @@ test("the local engine makes and reads the sound here and sends nothing", async 
   said = await run(request("tool", "aamio_addon_earshot_listen", { engine: "local" }), w);
   result = said.result;
   assert.deepEqual([said.exit_code, result.status, result.engine, result.mode, result.card.name, result.corrected_bits, result.protocol, w.decoded], [0, "heard", "local", "high", "rom-42", 0, "aisense-audio-v2", []]);
+  // The same card with a byte order mark in front is no card, in this edition as in the ones for Python and PHP.
+  w = world();
+  w.recording = codec.encode(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(TIMED)]), "high");
+  said = await run(request("tool", "aamio_addon_earshot_listen", { engine: "local" }), w);
+  assert.deepEqual([said.exit_code, said.is_error, said.result.status, said.result.reason, said.result.engine], [3, false, "not_understood", "not_an_aamio_card", "local"]);
+  assert.deepEqual([said.result.heard.text.charCodeAt(0), said.result.heard.byte_length], [0xfeff, Buffer.byteLength(TIMED) + 3], "and what was heard is handed over as it was");
 });
 
 test("when aisense cannot be reached the recording is read here", async () => {
