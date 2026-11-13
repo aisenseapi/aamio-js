@@ -336,13 +336,24 @@ function messageShape(body, envelope) {
   return shape;
 }
 
+/** Presence tags from a comma-separated list, as aamio-python reads --tags and AAMIO_TAGS. */
+export function tagsFrom(text) {
+  return String(text ?? "").split(",").filter(Boolean);
+}
+
 export class NodeRuntime {
   /** Takes the home, reads its key and its files. Close it to let go. */
-  static async open({ home, host = process.env.AAMIO_HOST || DEFAULT_BASE, board = process.env.AAMIO_BOARD || DEFAULT_BOARD, verifyum = process.env.AAMIO_VERIFYUM || VERIFYUM_MCP, fetch = globalThis.fetch, clock = () => Date.now() / 1000, archive = null } = {}) {
+  static async open({ home, host = process.env.AAMIO_HOST || DEFAULT_BASE, board = process.env.AAMIO_BOARD || DEFAULT_BOARD, verifyum = process.env.AAMIO_VERIFYUM || VERIFYUM_MCP, fetch = globalThis.fetch, clock = () => Date.now() / 1000, archive = null, tags } = {}) {
     const owner = await takeHome(home, { host });
     try {
       const runtime = new NodeRuntime({ home, host, board, verifyum, keys: await readKeys(home), owner, fetch, clock, archive });
       await runtime.load();
+      // The tags presence publishes, taken as aamio-python and aamio-php take
+      // them: the ones given now, else the home's own, else AAMIO_TAGS. They
+      // are the home's from the next save on. This runtime had no way to set
+      // them (a check of 13 November 2026).
+      if (Array.isArray(tags)) runtime.state.tags = tags;
+      else if (!runtime.state.tags.length) runtime.state.tags = tagsFrom(process.env.AAMIO_TAGS || "");
       return runtime;
     } catch (error) {
       await owner.release();

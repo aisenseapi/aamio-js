@@ -49,6 +49,9 @@ export class FakeAamio {
     this.gates = new Map();
     this.closeFailures = [];
     this.openFailures = [];
+    // What doctor asks of a service: its health and its descriptor, as the real one answers them.
+    this.healthStatus = 200;
+    this.descriptor = { version: "0.7.43", protocol: { version: 1, capabilities: ["threads", "signing", "long-poll", "allowlist", "reset", "gate", "pow", "receipts", "presence", "board", "scopes", "read-limits", "sealed-claim", "canonical-keys"] } };
     this.refuseGate = false;
     this.boardPage = 200;
     this.boardScopeEcho = undefined;
@@ -113,6 +116,8 @@ export class FakeAamio {
     const method = init.method || "GET";
     const body = typeof init.body === "string" ? init.body : "";
     const parts = url.pathname.split("/").filter(Boolean);
+    if (method === "GET" && url.pathname === "/health") return this.reply(this.healthStatus, this.healthStatus === 200 ? { status: "ok", version: "0.7.43", revision: "fake" } : { error: "the test asked for " + this.healthStatus });
+    if (method === "GET" && url.pathname === "/.well-known/aamio.json") return this.reply(200, this.descriptor);
     if (parts[0] === "p") return this.presenceAnswer(method, parts, body, init);
     const w = parts[0];
     if (method === "PUT" && parts.length === 1) {

@@ -533,7 +533,9 @@ export async function handle(request, seams = {}) {
   if (short === "show") return answer(await show(args, kind, encode, display, now, write));
   if (short === "read") return answer(await readFile(args, kind, decode, readLocal, clock));
   if (short === "scan") return answer(await scan(args, kind, frames, readFrame, clock));
-  return answer(refused("unknown_call", `The add-on ${NAME} has no ${kind} called ${name}. aamio addon ${NAME} --help lists its commands, and aamio addon list its tools.`));
+  // A name is said as it is, and anything else as JSON, as Earshot says it: an object came out as [object Object].
+  const said = (value) => (typeof value === "string" ? value : JSON.stringify(value ?? null));
+  return answer(refused("unknown_call", `The add-on ${NAME} has no ${said(kind)} called ${said(name)}. aamio addon ${NAME} --help lists its commands, and aamio addon list its tools.`));
 }
 
 /**

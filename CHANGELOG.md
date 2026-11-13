@@ -6,6 +6,21 @@ not what moved in the source.
 
 ## 0.7.0 - 2026-11-12
 
+- `aamio doctor` answers as it does in aamio-python and aamio-php: the
+  service, read from `/health`, whether this client fits it, from what the
+  service declares at `/.well-known/aamio.json`, who can read the home, and
+  what is kept. Who can read the home is the folder's access control list on
+  Windows, read with `Get-Acl` or with `icacls` when that is not there, and
+  the owner and mode bits of every file elsewhere. `init` says it too, under
+  `local_storage.who_can_read`.
+- `--host URL` names the service, before `AAMIO_HOST`. `init --tags a,b` sets
+  the tags presence publishes, and `AAMIO_TAGS` stands in when the home has
+  none, as in the other two runtimes. There was no way to set them here.
+  `init --archive keep|off|days:N` chooses what is kept at the start.
+- `init` and `whoami` answer with the inbox, when it expires, the service and
+  the tags beside the key, as the other two runtimes and the local server do.
+  `init` still opens no inbox, so it needs no service.
+- `--version` prints `aamio 0.7.0`, as the other two runtimes print theirs.
 - The outbox is settled from Node. `outbox retry [--id ID]` and
   `aamio_outbox_retry` send the stored bytes of a message again, with the same
   id, address and envelope, so a recipient that keeps what it has seen marks the

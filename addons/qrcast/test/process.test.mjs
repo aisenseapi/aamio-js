@@ -114,6 +114,9 @@ test("the probe names the add-on, and a request off contract 2 is refused", asyn
   }
   const unknown = await handle(request("command", "nope"));
   assert.deepEqual([unknown.exit_code, unknown.result.reason, unknown.result.fix], [2, "unknown_call", "The add-on qrcast has no command called nope. aamio addon qrcast --help lists its commands, and aamio addon list its tools."]);
+  // Anything but a name is said as JSON, as Earshot says it: an object came out as [object Object].
+  const odd = await handle(request("command", { not: "a name" }));
+  assert.equal(odd.result.fix, 'The add-on qrcast has no command called {"not":"a name"}. aamio addon qrcast --help lists its commands, and aamio addon list its tools.');
   // card is the command line's alone, and a tool is known by its whole name.
   assert.equal((await handle(request("tool", "aamio_addon_qrcast_card", { address: ADDRESS }))).result.reason, "unknown_call");
   assert.equal((await handle(request("tool", "show", { address: ADDRESS }))).result.reason, "unknown_call");

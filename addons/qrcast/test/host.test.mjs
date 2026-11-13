@@ -67,6 +67,8 @@ test("the core lists qrcast from its manifest, enables it with the probe, and ru
   // The home has its identity before anything is installed in it.
   const made = await cli(home, "init");
   assert.equal(made.status, 0, made.stderr);
+  // init writes the home's state, as it does in aamio-python and aamio-php. No command of the add-on writes it again.
+  const state = readFileSync(join(home, "state.json"));
 
   // As npm install leaves it: the files package.json names, and the folder's own package.json naming the package.
   const folder = join(home, "addon-packages", "npm");
@@ -147,7 +149,7 @@ test("the core lists qrcast from its manifest, enables it with the probe, and ru
   assert.equal(unknown.status, 2, "scan has no engine on the command line either: the camera is read here only");
   assert.match(unknown.stderr, /scan does not take --engine/);
   assert.equal(existsSync(join(home, "addons", "qrcast")), false, "no command made a directory in the home: the add-on needs nothing of it");
-  assert.equal(existsSync(join(home, "state.json")), false, "and none opened the runtime");
+  assert.ok(readFileSync(join(home, "state.json")).equals(state), "and none opened the runtime to write the home's state again");
 
   // The tools come from the manifest, with their schemas and hints, and a call is settled by the process.
   const { loaded } = await import("../../../src/node-addons.js");

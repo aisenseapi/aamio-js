@@ -7,18 +7,22 @@ import { initIdentity, readIdentity } from "../src/node-identity.js";
 import { RUNTIME_TOOL_NAMES, serveMcp } from "../src/node-mcp.js";
 import { AddonError, describe, disable, enable, enabledButMissing, installWords, loaded } from "../src/node-addons.js";
 import { parseCommand, probe, runCommand, usageOf } from "../src/node-addon-process.js";
-import { archiveStatus, parsePolicy, readPolicy } from "../src/node-archive.js";
-import { CHANNEL_TTL, NodeRuntime, SEND_STOPS, checkChannelTtl, checkGate, checkLabel, checkPartner, checkRe, stopFields } from "../src/node-runtime.js";
+import { archiveStatus, parsePolicy } from "../src/node-archive.js";
+import { doctor, homeCheck } from "../src/node-doctor.js";
+import { CHANNEL_TTL, NodeRuntime, SEND_STOPS, checkChannelTtl, checkGate, checkLabel, checkPartner, checkRe, stopFields, tagsFrom } from "../src/node-runtime.js";
 import { checkAccess, checkScopeAdd, checkScopeName } from "../src/node-scopes.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const help = `Usage: aamio [--home DIR] [--no-archive] <command>
+const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
 
-  init                         Create a local identity, or show the existing public identity
+  init [--tags a,b] [--archive keep|off|days:N]
+                               Create a local identity, or show the existing one, with the tags presence
+                               publishes and what is kept on this machine
   archive [status|keep|off|days:N|prune] [--max-mb N] [--all]
                                What is kept on this machine, and for how long: decrypted messages are kept
                                in archive/ unless this says otherwise
-  whoami                       Show the public key, hash and hash prefix
+  whoami                       The public key, hash and hash prefix, the inbox, the service and the tags
+  doctor                       Does this client fit the service, who can read the home, and what is kept
   partner add NAME KEY         Put a partner's public key in the address book
   partner list                 The address book
   partner remove NAME          Take a partner out of the address book: the inbox opens again without its key
@@ -65,16 +69,18 @@ const help = `Usage: aamio [--home DIR] [--no-archive] <command>
 An add-on is an npm package of its own, installed in the home's folder for
 add-ons, addon-packages/npm, and run in a process of its own for each call.
 The default home is AAMIO_HOME or ~/.aamio. A new home needs an existing
-parent directory. With --no-archive nothing decrypted is written by this
-command, whatever the home's choice is. Run with --version to print the npm
-package version.
+parent directory. The service is --host, else AAMIO_HOST, else https://aamio.at.
+The tags presence publishes are init --tags, else the home's own, else
+AAMIO_TAGS. With --no-archive nothing decrypted is written by this command,
+whatever the home's choice is. Run with --version to print the version.
 `;
 
 // What each command takes. A group is two words: partner add, outbox pending.
 // optional says how many of the last positional arguments may be left out.
 const SPEC = {
-  init: { positional: [] },
+  init: { positional: [], options: ["--tags", "--archive"] },
   whoami: { positional: [] },
+  doctor: { positional: [] },
   serve: { positional: [] },
   "partner add": { positional: ["name", "key"] },
   "partner list": { positional: [] },
@@ -109,6 +115,8 @@ const GROUPS = ["partner", "outbox", "board", "scope", "channel"];
 
 function parse(argv) {
   let home;
+  // The service, as aamio-python and aamio-php take it: --host, else AAMIO_HOST, else aamio.at.
+  let host;
   // null is the home's own choice, from config.json. --no-archive turns the archive off for this command.
   let archive = null;
   const args = [];
@@ -120,6 +128,12 @@ function parse(argv) {
         throw new Error("Supply --home once with a directory path.");
       }
       home = value;
+    } else if (arg === "--host" || arg.startsWith("--host=")) {
+      const value = arg === "--host" ? argv[++i] : arg.slice("--host=".length);
+      if (host !== undefined || !value || (arg === "--host" && value.startsWith("-"))) {
+        throw new Error("Supply --host once with the service's URL.");
+      }
+      host = value;
     } else if (arg === "--no-archive") {
       archive = false;
     } else {
@@ -131,7 +145,7 @@ function parse(argv) {
   }
   if (args.length === 1 && args[0] === "--version") return { command: "version" };
   // An add-on's commands are its manifest's to say, so the words after addon are read later, against it.
-  if (args[0] === "addon") return { command: "addon", home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), words: args.slice(1), archive };
+  if (args[0] === "addon") return { command: "addon", home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), host, words: args.slice(1), archive };
   const command = GROUPS.includes(args[0]) ? `${args[0]} ${args[1] ?? ""}`.trim() : args[0];
   const spec = SPEC[command];
   if (!spec) throw new Error(`Expected one of: ${Object.keys(SPEC).join(", ")}. Run aamio --help for usage.`);
@@ -163,7 +177,7 @@ function parse(argv) {
     const named = spec.positional.map((p, i) => (i < fewest ? p.toUpperCase() : `[${p.toUpperCase()}]`)).join(" ");
     throw new Error(`${command} takes ${spec.positional.length ? named : "no arguments"}. Run aamio --help for usage.`);
   }
-  return { command, home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), positional, options, archive };
+  return { command, home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), host, positional, options, archive };
 }
 
 function whole(value, name, low, high = null) {
@@ -227,6 +241,8 @@ function plan(command, positional, options) {
       return async (runtime) => ({ ...(await runtime.partnerAdd(first, second)), partners: runtime.partnerList() });
     case "partner list":
       return (runtime) => ({ partners: runtime.partnerList() });
+    case "doctor":
+      return (runtime) => doctor(runtime, version);
     case "partner remove":
       return async (runtime) => ({ ...(await runtime.partnerRemove(first)), partners: runtime.partnerList() });
     case "lookup": {
@@ -396,7 +412,7 @@ its manifest says, and records the choice in addons.json in the home.
  * leaves it not there. An add-on's own command runs in a process of the
  * add-on's, with the home open for it unless its manifest says it needs none.
  */
-async function addon(home, words, archive) {
+async function addon(home, words, archive, host) {
   const [first, ...rest] = words;
   const say = (value) => process.stdout.write(JSON.stringify(value) + "\n");
   const refuse = (message, code) => {
@@ -451,7 +467,7 @@ async function addon(home, words, archive) {
       done = await runCommand(manifest, parsed, null, options);
     } else {
       await initIdentity(home);
-      const runtime = await NodeRuntime.open({ home, archive });
+      const runtime = await NodeRuntime.open({ home, host, archive });
       try {
         done = await runCommand(manifest, parsed, runtime, options);
       } finally {
@@ -476,10 +492,11 @@ async function main() {
     process.stderr.write(error.message + "\n");
     return 2;
   }
-  const { command, home, archive } = options;
+  const { command, home, host, archive } = options;
   if (command === "help") process.stdout.write(help);
-  else if (command === "version") process.stdout.write(version + "\n");
-  else if (command === "addon") return addon(home, options.words, archive);
+  // As aamio-python and aamio-php say it.
+  else if (command === "version") process.stdout.write(`aamio ${version}\n`);
+  else if (command === "addon") return addon(home, options.words, archive, host);
   else if (command === "serve") {
     // The add-ons enabled in this home, read before the home is taken: one
     // that cannot be used stops the start and says so, a quiet absence would
@@ -501,7 +518,7 @@ async function main() {
     await initIdentity(home);
     // One live runtime per home, Node, Python or PHP: serve holds the home,
     // owner.lock and all, for as long as it runs, as the other servers do.
-    const runtime = await NodeRuntime.open({ home, archive });
+    const runtime = await NodeRuntime.open({ home, host, archive });
     // Presence lives two minutes. Once a read or a send has opened the inbox,
     // it is published again every minute and the inbox renewed before it runs
     // out, so partners keep finding this server. Nothing goes out before that.
@@ -520,15 +537,30 @@ async function main() {
       await runtime.serial(() => runtime.close());
     }
   } else if (command === "init" || command === "whoami") {
-    const identity = command === "init" ? await initIdentity(home) : await readIdentity(home);
-    // Said once, where a person sets the runtime up: the service forgets,
-    // and this folder does not unless it is told to.
-    if (command === "init") identity.local_storage = { ...(await archiveStatus(home, await readPolicy(home))), home };
-    process.stdout.write(JSON.stringify(identity) + "\n");
+    // The fields aamio-python and aamio-php answer with: the key, the inbox,
+    // the service and the tags presence publishes. They answered with three
+    // more than this did (a check of 13 November 2026). init opens no inbox
+    // here, so it needs no service: the first read opens one.
+    const tags = command === "init" && options.options.tags !== undefined ? tagsFrom(options.options.tags) : undefined;
+    const chosen = command === "init" && options.options.archive !== undefined ? usage(() => parsePolicy(options.options.archive)) : null;
+    if (command === "init") await initIdentity(home);
+    else await readIdentity(home);
+    const runtime = await NodeRuntime.open({ home, host, archive, tags });
+    try {
+      if (chosen) await runtime.archiveSet(chosen);
+      if (command === "init") await runtime.saveState();
+      const answer = runtime.whoami();
+      // Said once, where a person sets the runtime up: the service forgets,
+      // and this folder does not unless it is told to.
+      if (command === "init") answer.local_storage = { ...(await archiveStatus(home, runtime.archivePolicy)), home, who_can_read: homeCheck(home) };
+      process.stdout.write(JSON.stringify(answer) + "\n");
+    } finally {
+      await runtime.close();
+    }
   } else {
     const act = plan(command, options.positional, options.options);
     await initIdentity(home);
-    const runtime = await NodeRuntime.open({ home, archive });
+    const runtime = await NodeRuntime.open({ home, host, archive });
     let result;
     try {
       result = await act(runtime);
