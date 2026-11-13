@@ -21,6 +21,13 @@ not what moved in the source.
   the tags beside the key, as the other two runtimes and the local server do.
   `init` still opens no inbox, so it needs no service.
 - `--version` prints `aamio 0.7.0`, as the other two runtimes print theirs.
+- A command that cannot do what it was asked answers with JSON on standard
+  output, `error` and `error_code`, and exits 1, as aamio-python and aamio-php
+  answer. So does an argument that is wrong for the command, as a key that is
+  no key, and no home is made for it. It said so on standard error, which a
+  script that reads the answer never saw. A home that cannot be opened is
+  still said on standard error, and so is `trace` of a counterpart nothing is
+  recorded about, as in the other two.
 - The outbox is settled from Node. `outbox retry [--id ID]` and
   `aamio_outbox_retry` send the stored bytes of a message again, with the same
   id, address and envelope, so a recipient that keeps what it has seen marks the

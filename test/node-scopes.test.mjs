@@ -933,15 +933,18 @@ test("on the command line: a scope is made, shared, posted in, found, answered a
   said(await cli(homeB, "board", "answer", posted.post.id, "looks good", "--scope", "team"));
   assert.deepEqual(said(await cli(homeA, "read")).messages.map((m) => [m.channel, m.body.text, m.body.post]), [["board", "looks good", posted.post.id]]);
 
-  // By its address a scope is held to post only, and what is wrong is said on standard error, with nothing on standard output.
+  // By its address a scope is held to post only. What is wrong is said as JSON on standard output, as aamio-python and
+  // aamio-php say it, with nothing on standard error.
   const other = scopeAddress(newScopeKey());
   assert.deepEqual(said(await cli(homeB, "scope", "add", "elsewhere", "--address", other)), { name: "elsewhere", address: other, can_read: false });
   for (const [args, why] of [[["scope", "key", "elsewhere"], /scope elsewhere is held to post only, so there is no key here/], [["scope", "new", "TEAM"], /there is a scope called TEAM already/], [["scope", "key", "missing"], /no scope called missing here/],
     [["board", "find", "--scope", "elsewhere"], /held to post only\. Reading it takes the key/], [["scope", "share", "team", "nobody", "--access", "read"], /only with a partner in your address book/]]) {
     const refused = await cli(homeB, ...args);
-    assert.deepEqual([refused.status, refused.stdout], [1, ""], args.join(" "));
-    assert.match(refused.stderr, why);
-    output.push(refused.stderr);
+    assert.deepEqual([refused.status, refused.stderr], [1, ""], args.join(" "));
+    const told = JSON.parse(refused.stdout);
+    assert.equal(typeof told.error_code, "string", args.join(" "));
+    assert.match(told.error, why);
+    output.push(refused.stdout, refused.stderr);
   }
 
   // Nothing above showed a key. The one command that does is asked for one by a person, to pass on by hand.

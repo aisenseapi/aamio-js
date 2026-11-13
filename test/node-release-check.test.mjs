@@ -299,8 +299,9 @@ test("a partner's name and key and send --re are checked before a home is made",
   for (const [args, said] of [[["partner", "add", "bob", "not-a-key"], /not a base64url Ed25519 public key/], [["partner", "add", "bad\u0007name", Keys.generate().public], /1 to 64 characters/],
     [["send", "bob", "hi", "--re", "xyz"], /64 lowercase hex characters/]]) {
     const ran = spawnSync(process.execPath, [bin, "--home", home, ...args], { encoding: "utf8", timeout: 30_000 });
-    assert.equal(ran.status, 1, ran.stderr);
-    assert.match(ran.stderr, said);
+    // The answer is JSON on standard output, as in aamio-python and aamio-php, and nothing is made for it.
+    assert.deepEqual([ran.status, ran.stderr], [1, ""], args.join(" "));
+    assert.match(JSON.parse(ran.stdout).error, said);
     assert.equal(existsSync(home), false, `${args.join(" ")}: no home made`);
   }
 });

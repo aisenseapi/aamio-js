@@ -484,6 +484,28 @@ async function addon(home, words, archive, host) {
   }
 }
 
+// What a command could not do is its answer: JSON on standard output with
+// error and error_code, and exit status 1, as aamio-python and aamio-php
+// answer it. It was a line on standard error, which a script that reads
+// answers never saw (a check of 13 November 2026). A stop of a send has its
+// own answer, below. A home that cannot be opened, before any command runs, is
+// still said on standard error, as the other two say it.
+const KNOWN = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
+  "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
+  "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed", "no_trace",
+  "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only",
+  "invalid_label", "invalid_gate", "invalid_ttl", "invalid_note", "invalid_address", "invalid_archive", "channel_exists", "channel_unavailable", "binding_conflict"];
+
+// trace of a counterpart nothing is recorded about is said on standard error,
+// with nothing on standard output, as aamio-python and aamio-php say it.
+function answered(error) {
+  return typeof error?.code === "string" && KNOWN.includes(error.code) && error.code !== "no_trace" && !SEND_STOPS.includes(error.code) && !(error instanceof GateStop);
+}
+
+function failure(error) {
+  return { error: error.message, error_code: error.code, ...(error.fix ? { fix: error.fix } : {}) };
+}
+
 async function main() {
   let options;
   try {
@@ -554,16 +576,34 @@ async function main() {
       // and this folder does not unless it is told to.
       if (command === "init") answer.local_storage = { ...(await archiveStatus(home, runtime.archivePolicy)), home, who_can_read: homeCheck(home) };
       process.stdout.write(JSON.stringify(answer) + "\n");
+    } catch (error) {
+      if (!answered(error)) throw error;
+      process.stdout.write(JSON.stringify(failure(error)) + "\n");
+      return 1;
     } finally {
       await runtime.close();
     }
   } else {
-    const act = plan(command, options.positional, options.options);
+    // An argument that is wrong for the command rather than for the command
+    // line, as a key that is no key, is the command's answer too, as in the
+    // other two, and no home is made for it.
+    let act;
+    try {
+      act = plan(command, options.positional, options.options);
+    } catch (error) {
+      if (!answered(error)) throw error;
+      process.stdout.write(JSON.stringify(failure(error)) + "\n");
+      return 1;
+    }
     await initIdentity(home);
     const runtime = await NodeRuntime.open({ home, host, archive });
     let result;
     try {
       result = await act(runtime);
+    } catch (error) {
+      if (!answered(error)) throw error;
+      process.stdout.write(JSON.stringify(failure(error)) + "\n");
+      return 1;
     } finally {
       await runtime.close();
     }
@@ -589,12 +629,7 @@ try {
     process.stdout.write(JSON.stringify(said) + "\n");
     process.exitCode = 1;
   } else {
-    const known = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
-      "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
-      "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed", "no_trace",
-      "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only",
-      "invalid_label", "invalid_gate", "invalid_ttl", "invalid_note", "invalid_address", "invalid_archive", "channel_exists", "channel_unavailable", "binding_conflict"];
-    process.stderr.write((known.includes(error?.code) ? error.message + (error.fix ? ` ${error.fix}` : "") : "The local Node runtime could not complete this command.") + "\n");
+    process.stderr.write((KNOWN.includes(error?.code) ? error.message + (error.fix ? ` ${error.fix}` : "") : "The local Node runtime could not complete this command.") + "\n");
     process.exitCode = 1;
   }
 }

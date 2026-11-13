@@ -564,12 +564,17 @@ test("on the command line: a channel is opened, listed and closed, and one for a
 
   const closed = said(await cli(homeA, "channel", "close", "tender"));
   assert.deepEqual([closed.deleted, closed.closed_here], [true, true]);
+  // What a command could not do is its answer, as JSON on standard output, as in aamio-python and aamio-php.
   const twice = await cli(homeA, "channel", "close", "tender");
-  assert.deepEqual([twice.status, twice.stdout], [1, ""]);
-  assert.match(twice.stderr, /no channel called tender in this home/);
+  assert.deepEqual([twice.status, twice.stderr], [1, ""]);
+  const gone = JSON.parse(twice.stdout);
+  assert.deepEqual([gone.error_code, Object.keys(gone)], ["unknown_channel", ["error", "error_code"]]);
+  assert.match(gone.error, /^no channel called tender in this home/);
   const taken = await cli(homeA, "channel", "open", forOne.label);
-  assert.equal(taken.status, 1);
-  assert.match(taken.stderr, /there is a channel called with-[0-9a-f]{8} already/);
+  assert.deepEqual([taken.status, taken.stderr], [1, ""]);
+  const there = JSON.parse(taken.stdout);
+  assert.equal(there.error_code, "channel_exists");
+  assert.match(there.error, /there is a channel called with-[0-9a-f]{8} already/);
 });
 
 test("on the command line: what can be seen to be wrong about a channel is refused before the home is opened or made", async (t) => {
