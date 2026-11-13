@@ -265,6 +265,19 @@ async function ask(runtime, path) {
   }
 }
 
+/**
+ * What /health said when it is not aamio's health answer, an object with
+ * "service": "aamio" and "status": "ok" as the service gives it, and null when
+ * it is. A 200 from a proxy or a login page in front of the host was said as
+ * healthy, beside "answered 200 and not 200" (a check of 13 November 2026).
+ */
+function notHealth(body) {
+  if (body === null || body === "") return "an empty body";
+  if (typeof body === "string") return "a body that is not JSON";
+  if (!isObject(body) || body.service !== "aamio" || body.status !== "ok") return "JSON that is not aamio's health answer";
+  return null;
+}
+
 /** One answer to three questions: does this client fit the service, who can read the home, what is kept. */
 export async function doctor(runtime, version) {
   const health = await ask(runtime, "/health");
@@ -272,14 +285,17 @@ export async function doctor(runtime, version) {
   // both apart from whether this client fits it. A 503 from /health was said
   // as no answer, beside a fit read from the descriptor, which had answered
   // (a check of 13 November 2026). As aamio-python and aamio-php say it.
-  const service = { host: runtime.host, reachable: health.status > 0, healthy: health.status === 200, status: health.status };
-  if (health.status === 200 && isObject(health.body)) {
+  const unlike = health.status === 200 ? notHealth(health.body) : null;
+  const service = { host: runtime.host, reachable: health.status > 0, healthy: health.status === 200 && unlike === null, status: health.status };
+  if (service.healthy) {
     service.version = health.body.version ?? null;
     service.revision = health.body.revision ?? null;
+  } else if (health.status === 0) {
+    service.problem = "no answer from /health, so the service's version and health were not read";
+  } else if (health.status !== 200) {
+    service.problem = `/health answered ${health.status} and not 200: the service is reachable and not healthy, and its version was not read`;
   } else {
-    service.problem = health.status === 0
-      ? "no answer from /health, so the service's version and health were not read"
-      : `/health answered ${health.status} and not 200: the service is reachable and not healthy, and its version was not read`;
+    service.problem = `/health answered 200 with ${unlike}, so the service's version and health were not read: check that --host names the aamio service and not a page in front of it`;
   }
   const descriptor = await ask(runtime, "/.well-known/aamio.json");
   const fits = compatCheck(descriptor.status === 200 ? descriptor.body : null);

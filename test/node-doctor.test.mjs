@@ -166,6 +166,16 @@ test("doctor answers as aamio-python and aamio-php do: the service, whether it f
   assert.deepEqual([unwell.service.reachable, unwell.service.healthy, unwell.service.status, unwell.compatibility.verdict], [true, false, 503, "full"]);
   assert.match(unwell.service.problem, /^\/health answered 503 and not 200: the service is reachable and not healthy/);
   fake.healthStatus = 200;
+  // What answers 200 at /health and is not aamio's health answer is reachable and not healthy, said with what came. A
+  // 200 from a proxy or a login page was said as healthy, beside "answered 200 and not 200" (a check of 13 November 2026).
+  for (const [text, what] of [["<!doctype html><title>Sign in</title>", "a body that is not JSON"], ["", "an empty body"],
+    ["[]", "JSON that is not aamio's health answer"], ['{"status": "ok"}', "JSON that is not aamio's health answer"]]) {
+    fake.healthText = text;
+    const page = await said("doctor");
+    assert.deepEqual([page.service.reachable, page.service.healthy, page.service.status, "version" in page.service], [true, false, 200, false], text);
+    assert.equal(page.service.problem, `/health answered 200 with ${what}, so the service's version and health were not read: check that --host names the aamio service and not a page in front of it`);
+  }
+  fake.healthText = null;
   // A service that declares no capabilities is partial, never full.
   fake.descriptor = { version: "0.7.0" };
   assert.equal((await said("doctor")).compatibility.verdict, "partial");

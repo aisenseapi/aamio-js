@@ -13,9 +13,12 @@ not what moved in the source.
   fix. They went on to the service. `data` declares no fields, and takes any.
 - `doctor` says whether the service answered, whether it is healthy and
   whether this client fits it, each apart: `service.reachable`,
-  `service.healthy` and `service.status`, beside `compatibility`. A 503 from
-  `/health` was said as no answer, beside a fit read from the descriptor,
-  which had answered.
+  `service.healthy` and `service.status`, beside `compatibility`. Healthy is
+  aamio's own health answer, an object with `"service": "aamio"` and
+  `"status": "ok"`: a 200 from a page in front of the host, such as a proxy
+  or a login page, is reachable and not healthy, and `problem` says what came.
+  A 503 from `/health` was said as no answer, beside a fit read from the
+  descriptor, which had answered.
 - `--help` and the README say that `--host` moves the service and nothing
   else: the board is `AAMIO_BOARD` and the receipt anchor `AAMIO_VERIFYUM`,
   with an example for a copy of both on your own machine. The README no
