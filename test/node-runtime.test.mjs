@@ -179,7 +179,11 @@ test("over MCP a server that holds the home offers its tools, and a message goes
   assert.equal(read.messages[0].body.text, "over mcp");
   assert.equal(read.messages[0].sender, "b");
   assert.equal(read.messages[0].sha256, sent.result.structuredContent.sha256);
-  assert.equal((await call(a, "aamio_send", { text: "no recipient" })).error.code, -32602, "arguments the schema does not allow are refused before anything is done");
+  // The call's answer, which a model reads, as in aamio-python and aamio-php. Arguments that are no object stay a protocol error.
+  const unaddressed = (await call(a, "aamio_send", { text: "no recipient" })).result;
+  assert.deepEqual([unaddressed.isError, unaddressed.structuredContent.error_code, unaddressed.structuredContent.error], [true, "invalid_arguments", "aamio_send needs to"],
+    "arguments the schema does not allow are refused before anything is done");
+  assert.equal((await call(a, "aamio_send", ["b", "x"])).error.code, -32602);
   const failed = (await call(b, "aamio_send", { to: "nobody", text: "x" })).result;
   assert.equal(failed.isError, true);
   assert.equal(failed.structuredContent.error_code, "unknown_partner");

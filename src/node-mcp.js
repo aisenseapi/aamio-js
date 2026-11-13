@@ -508,7 +508,15 @@ async function addPartner(runtime, args, ask) {
   return [{ added: false, partner: name, error: `the address book changed again while ${name} was being asked about, so nothing was changed`, fix: "Call aamio_partner_add again." }, true];
 }
 
-/** Arguments as the tool's schema says: an object of known names, each of its type. A sentence naming what is wrong, or null. */
+/** What a call whose arguments do not fit is told to do, in the three runtimes alike. */
+const ARGUMENTS_FIX = "Check each argument against the tool's inputSchema and call again.";
+
+/**
+ * Arguments as the tool's schema says: an object of known names, each of its
+ * type. A sentence naming what is wrong, or null. aamio-python and aamio-php
+ * check them the same way, and a string's length is counted in characters, as
+ * JSON Schema counts it and as they do.
+ */
 function wrongArguments(tool, args) {
   if (args === undefined) args = {};
   if (!object(args)) return "arguments must be an object";
@@ -516,7 +524,7 @@ function wrongArguments(tool, args) {
   for (const [name, value] of Object.entries(args)) {
     const want = properties[name];
     if (!want) return `${tool.name} takes no argument called ${name}`;
-    const ok = want.type === "string" ? typeof value === "string" && (!want.pattern || new RegExp(want.pattern).test(value)) && value.length >= (want.minLength ?? 0) && value.length <= (want.maxLength ?? Infinity) && (!want.enum || want.enum.includes(value))
+    const ok = want.type === "string" ? typeof value === "string" && (!want.pattern || new RegExp(want.pattern).test(value)) && [...value].length >= (want.minLength ?? 0) && [...value].length <= (want.maxLength ?? Infinity) && (!want.enum || want.enum.includes(value))
       : want.type === "integer" ? Number.isInteger(value) && value >= (want.minimum ?? -Infinity) && value <= (want.maximum ?? Infinity)
         : want.type === "boolean" ? typeof value === "boolean"
         : want.type === "object" ? object(value)
@@ -572,8 +580,14 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
       throw failure;
     }
   }
+  // An object, or nothing: anything else is a request this server cannot
+  // read. Arguments that do not fit the tool's schema are the call's answer,
+  // as in aamio-python and aamio-php, where a model reads what is wrong and
+  // can call again with what fits. They were a protocol error here (a check
+  // of 13 November 2026).
+  if (params.arguments !== undefined && !object(params.arguments)) return rpcError(id, -32602, "arguments must be an object");
   const wrong = wrongArguments(tool, params.arguments);
-  if (wrong) return rpcError(id, -32602, wrong);
+  if (wrong) return complete(toolResult({ error: wrong, error_code: "invalid_arguments", fix: ARGUMENTS_FIX }, true));
   const args = params.arguments ?? {};
   try {
     const data = await runtime.serial(async () => {

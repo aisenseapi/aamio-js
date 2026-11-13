@@ -882,7 +882,7 @@ test("over MCP the tools speak in names and never hand out a key", async (t) => 
   assert.deepEqual([blind.isError, blind.structuredContent.error_code], [true, "unknown_post"]);
   assert.deepEqual((await tool(sender, "aamio_scope_remove", { name: "elsewhere" })).structuredContent, { removed: "elsewhere" });
 
-  // What is wrong is said, in the answer or as a protocol error, and the next call is answered.
+  // What is wrong is said in the answer, and the next call is answered.
   for (const [name, args, code] of [
     ["aamio_scope_new", { name: "not a name" }, "invalid_scope"], ["aamio_scope_new", { name: "TEAM" }, "scope_exists"], ["aamio_scope_add", { name: "x" }, "invalid_scope"],
     ["aamio_scope_add", { name: "x", key: "short" }, "invalid_scope"], ["aamio_scope_share", { name: "team", to: receiver.channel("inbox").w, access: "read" }, "unknown_partner"],
@@ -892,7 +892,8 @@ test("over MCP the tools speak in names and never hand out a key", async (t) => 
     assert.deepEqual([refused.isError, refused.structuredContent.error_code], [true, code], `${name} ${JSON.stringify(args)}`);
   }
   for (const [name, args] of [["aamio_scope_new", {}], ["aamio_scope_new", { name: 7 }], ["aamio_scope_share", { name: "team", to: "receiver", access: "both" }], ["aamio_scope_share", { name: "team", to: "receiver" }], ["aamio_scopes", { name: "team" }], ["aamio_scope_add", { name: "x", key: elsewhere, show: true }], ["aamio_board_find", { scope: 7 }]]) {
-    assert.equal((await tool(sender, name, args)).error?.code, -32602, `${name} ${JSON.stringify(args)}`);
+    const unfit = await tool(sender, name, args);
+    assert.deepEqual([unfit.isError, unfit.structuredContent?.error_code], [true, "invalid_arguments"], `${name} ${JSON.stringify(args)}`);
   }
   assert.deepEqual((await tool(sender, "aamio_scopes")).structuredContent, { scopes: [made] });
 

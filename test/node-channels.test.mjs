@@ -524,7 +524,8 @@ test("over MCP: a channel is opened, handed over, listed and closed, and what go
     assert.deepEqual([refused.isError, refused.structuredContent.error_code], [true, code], JSON.stringify(args));
   }
   for (const args of [{ label: "x" }, { ttl: 600 }, { label: "x", ttl: 10 }, { label: "x", ttl: 4000 }, { label: "x", ttl: 600, allow: "guest" }, { label: "x", ttl: 600, gate: "pow" }, { label: "x", ttl: 600, extra: 1 }]) {
-    assert.equal((await call(owner, "aamio_open_channel", args)).error?.code, -32602, JSON.stringify(args));
+    const unfit = await call(owner, "aamio_open_channel", args);
+    assert.deepEqual([unfit.isError, unfit.structuredContent?.error_code], [true, "invalid_arguments"], JSON.stringify(args));
   }
 
   const closed = await call(owner, "aamio_close_channel", { label: "tender" });

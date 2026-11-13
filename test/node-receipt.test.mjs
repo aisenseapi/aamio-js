@@ -254,12 +254,14 @@ test("over MCP aamio_read asks for one message's worth per channel unless told, 
   assert.equal(fake.budgets.at(-1), 65536, "the default budget");
   await call("aamio_read", { max_bytes: 2048 });
   assert.equal(fake.budgets.at(-1), 2048);
-  assert.equal((await call("aamio_read", { max_bytes: 100 })).error.code, -32602, "under 512 is refused by the schema");
+  const small = (await call("aamio_read", { max_bytes: 100 })).result;
+  assert.deepEqual([small.isError, small.structuredContent.error_code], [true, "invalid_arguments"], "under 512 is refused by the schema");
 
   const receipt = (await call("aamio_receipt", { channel: "inbox" })).result.structuredContent;
   assert.equal(receipt.held_locally, 1);
   assert.equal(receipt.local_root_matches, true);
-  assert.equal((await call("aamio_receipt", { anchor: "yes" })).error.code, -32602);
+  const worded = (await call("aamio_receipt", { anchor: "yes" })).result;
+  assert.deepEqual([worded.isError, worded.structuredContent.error_code], [true, "invalid_arguments"]);
   const nowhere = (await call("aamio_receipt", { channel: "nowhere" })).result;
   assert.equal(nowhere.isError, true);
   assert.equal(nowhere.structuredContent.error_code, "unknown_channel");

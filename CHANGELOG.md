@@ -31,6 +31,12 @@ not what moved in the source.
 - A partner's name is counted in characters, as aamio-python and aamio-php
   count it. A character outside the basic plane counted twice, and a name of 33
   emoji was refused here and taken there.
+- Over MCP, arguments that do not fit a tool's schema are the call's answer,
+  with `error_code` `invalid_arguments`, what is wrong and a fix, as in
+  aamio-python and aamio-php, where a model reads it and can call again. They
+  were a protocol error. Arguments that are no object still are one. A
+  string's length in the schema is counted in characters, as JSON Schema
+  counts it.
 - The outbox is settled from Node. `outbox retry [--id ID]` and
   `aamio_outbox_retry` send the stored bytes of a message again, with the same
   id, address and envelope, so a recipient that keeps what it has seen marks the

@@ -668,7 +668,16 @@ test("over MCP: the three tools are there, a retry takes one id, and each refusa
   assert.equal(tools.length, 24);
   for (const name of ["aamio_trace", "aamio_outbox_retry", "aamio_outbox_forget"]) assert.ok(tools.some((tool) => tool.name === name), name);
   assert.deepEqual(tools.find((tool) => tool.name === "aamio_outbox_retry").inputSchema.required, ["id"], "settling one is a decision per message, never a sweep");
-  assert.equal((await call(sender, "aamio_outbox_retry", {})).error.code, -32602);
+  const unsaid = (await call(sender, "aamio_outbox_retry", {})).result;
+  assert.deepEqual([unsaid.isError, unsaid.structuredContent.error_code], [true, "invalid_arguments"]);
+  // A name spelt wrong is the call's answer too, as in aamio-python and aamio-php, where it was passed over.
+  const typo = (await call(sender, "aamio_trace", { lmit: 5 })).result;
+  assert.deepEqual([typo.isError, typo.structuredContent.error_code, typo.structuredContent.error], [true, "invalid_arguments", "aamio_trace takes no argument called lmit"]);
+  // A string's length is counted in characters, as JSON Schema and the other two count it: 64 of them fit, in any plane.
+  const sixtyFour = (await call(sender, "aamio_outbox_forget", { id: "\u{1F600}".repeat(64) })).result;
+  assert.notEqual(sixtyFour.structuredContent.error_code, "invalid_arguments", JSON.stringify(sixtyFour.structuredContent));
+  const sixtyFive = (await call(sender, "aamio_outbox_forget", { id: "\u{1F600}".repeat(65) })).result;
+  assert.deepEqual([sixtyFive.isError, sixtyFive.structuredContent.error_code], [true, "invalid_arguments"]);
 
   // A send that failed says its id, whether the same bytes are worth sending again, and how.
   fake.failNext("lost");
@@ -695,7 +704,8 @@ test("over MCP: the three tools are there, a retry takes one id, and each refusa
   assert.deepEqual((await call(sender, "aamio_trace", {})).result.structuredContent.counterparts.map((row) => row.with), ["receiver"]);
   const nobody = (await call(sender, "aamio_trace", { who: "nobody" })).result;
   assert.deepEqual([nobody.isError, nobody.structuredContent.error_code], [true, "no_trace"]);
-  assert.equal((await call(sender, "aamio_trace", { limit: 51 })).error.code, -32602);
+  const over = (await call(sender, "aamio_trace", { limit: 51 })).result;
+  assert.deepEqual([over.isError, over.structuredContent.error_code], [true, "invalid_arguments"]);
 
   const forgotten = (await call(sender, "aamio_outbox_forget", { id })).result;
   assert.deepEqual([forgotten.isError, forgotten.structuredContent.forgotten, forgotten.structuredContent.outcome, forgotten.structuredContent.already_sending], [false, true, "delivered", true]);

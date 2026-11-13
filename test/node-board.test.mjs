@@ -188,7 +188,8 @@ test("over MCP the board tools post, find, answer, list tags and withdraw, and r
   assert.equal(gone.isError, true);
   assert.equal(gone.structuredContent.error_code, "unknown_post");
   for (const [args, why] of [[{ kind: "maybe", title: "x", text: "y" }, "kind is need or offer"], [{ kind: "need", title: "x", text: "y", tags: Array(9).fill("t") }, "at most eight tags"], [{ kind: "need", title: "x".repeat(81), text: "y" }, "a title of at most 80"]]) {
-    assert.equal((await call(a, "aamio_board_post", args)).error?.code, -32602, why);
+    const refused = (await call(a, "aamio_board_post", args)).result;
+    assert.deepEqual([refused?.isError, refused?.structuredContent?.error_code], [true, "invalid_arguments"], why);
   }
   assert.equal(fake.posts.size, 0, "nothing refused by the schema reached the board");
 });
