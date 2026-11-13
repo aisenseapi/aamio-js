@@ -249,6 +249,58 @@ export function checkGate(gate) {
   return gate;
 }
 
+
+/**
+ * What a body may be and still be read as JSON, in all three runtimes: every
+ * number finite and nested at most this deep, the outermost array or object
+ * counted as one. Anything else is handed over as text. A body nested 5 000
+ * deep made every read of its thread throw here, and the messages other
+ * channels had handed over in the same read, their cursors saved, were lost.
+ * 1e999 became Infinity, and went on as null (a security review of 13 November
+ * 2026).
+ */
+export const BODY_MAX_DEPTH = 64;
+
+/**
+ * [path, what] for the first part of value no reader can hold, in document
+ * order, or null: "not finite" for a number such as 1e999, and "too deep" for
+ * arrays and objects nested deeper than limit. The path names keys and indices
+ * with dots, and is "" for value itself.
+ */
+export function unfitJson(value, limit = BODY_MAX_DEPTH) {
+  const stack = [[value, "", 0]];
+  while (stack.length) {
+    const [node, path, level] = stack.pop();
+    if (typeof node === "number") {
+      if (!Number.isFinite(node)) return [path, "not finite"];
+      continue;
+    }
+    if (node === null || typeof node !== "object") continue;
+    if (level + 1 > limit) return [path, "too deep"];
+    const items = Array.isArray(node) ? node.map((child, index) => [String(index), child]) : Object.entries(node);
+    for (const [key, child] of items.reverse()) stack.push([child, path ? `${path}.${key}` : key, level + 1]);
+  }
+  return null;
+}
+
+/** What is wrong with an argument unfitJson found, as all three runtimes say it. */
+export function unfitText([path, what]) {
+  const where = path || "arguments";
+  if (what === "not finite") return `${where} is a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it`;
+  return `${where} is nested deeper than ${BODY_MAX_DEPTH}: a reader hands a message nested that deep over as text`;
+}
+
+/** A body's JSON as { value }, or null when it is to be read as text: not JSON, a number that is not finite, or too deep. */
+function bodyJson(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return unfitJson(value) === null ? { value } : null;
+}
+
 /**
  * A label for a channel of the caller's own. It names the channel in every
  * answer and its file in the archive, so it is made of what a file's name may
@@ -2365,12 +2417,9 @@ export class NodeRuntime {
     const raw = message.body;
     if (!message.verified || !message.from) return [{ text: raw }, { signed: false, encrypted: false, format: "unsigned" }];
     if (!isEnvelope(raw)) {
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return [{ text: raw }, { signed: true, encrypted: false, format: "text" }];
-      }
+      const read = bodyJson(raw);
+      if (read === null) return [{ text: raw }, { signed: true, encrypted: false, format: "text" }];
+      const parsed = read.value;
       return isObject(parsed) ? [parsed, { signed: true, encrypted: false, format: "json" }] : [{ text: raw }, { signed: true, encrypted: false, format: "json" }];
     }
     let text;
@@ -2382,12 +2431,9 @@ export class NodeRuntime {
     } catch (error) {
       return [{ text: null }, { signed: true, encrypted: true, format: "unreadable", error: error.name || "Error" }];
     }
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return [{ text }, { signed: true, encrypted: true, format: "text" }];
-    }
+    const read = bodyJson(text);
+    if (read === null) return [{ text }, { signed: true, encrypted: true, format: "text" }];
+    const parsed = read.value;
     return isObject(parsed) ? [parsed, { signed: true, encrypted: true, format: "json" }] : [{ text: parsed }, { signed: true, encrypted: true, format: "json" }];
   }
 
@@ -2456,6 +2502,22 @@ export class NodeRuntime {
       Object.assign(channel, { after: before.after, created_at: before.created_at, instance: before.instance, expire_at: before.expire_at, gone: before.gone, seen: before.seen, seen_from: before.seen_from });
       this.state.peers = before.peers;
       this.note(channel.label, "not_saved", `what this read found here could not be written down (${error.cause?.code || error.cause?.message}), so nothing from this channel was handed over. It is still there for the next read, and nothing was skipped.`, channel.w);
+      return [];
+    }
+  }
+
+  /**
+   * One channel of a read across channels, and what went wrong there said in
+   * attention rather than thrown, as aamio-python and aamio-php do. One channel
+   * that threw rejected the whole read, and what the channels before it had
+   * handed over, their cursors already saved, was lost (a security review of
+   * 13 November 2026).
+   */
+  async pollSafely(channel, wait, limit, maxBytes) {
+    try {
+      return await this.poll(channel, wait, limit, maxBytes);
+    } catch (error) {
+      this.note(channel.label, "unread", `this channel could not be read: ${error?.name || "Error"}. Messages from the other channels are still returned.`);
       return [];
     }
   }
@@ -2896,11 +2958,11 @@ export class NodeRuntime {
         notAsked.push(channel);
         continue;
       }
-      messages.push(...(await this.poll(channel, 0, limit - messages.length, maxBytes)));
+      messages.push(...(await this.pollSafely(channel, 0, limit - messages.length, maxBytes)));
     }
     const inbox = this.channel("inbox");
     if (!messages.length && wait > 0 && inbox && !inbox.muted) {
-      messages.push(...(await this.poll(inbox, wait, limit, maxBytes)));
+      messages.push(...(await this.pollSafely(inbox, wait, limit, maxBytes)));
       // What reached the other channels during the wait comes with this
       // answer, as in aamio-python: only the inbox can end the wait early. It
       // used to wait for the next read (a review of 9 November 2026).
@@ -2910,7 +2972,7 @@ export class NodeRuntime {
           notAskedAfter.push(channel);
           continue;
         }
-        messages.push(...(await this.poll(channel, 0, limit - messages.length, maxBytes)));
+        messages.push(...(await this.pollSafely(channel, 0, limit - messages.length, maxBytes)));
       }
     }
     for (const channel of notAsked) {

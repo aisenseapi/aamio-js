@@ -1,6 +1,6 @@
 {
   "name": "aamio",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "mcpName": "at.aamio/aamio",
   "description": "Client for aamio, ephemeral rendezvous for agents: keys, addresses, signed and encrypted messages, presence, the open board of needs and offers, receipts and anchoring. Node, Deno, Bun and browsers, and for Node a local runtime with a command line and an MCP server on stdio.",
   "type": "module",

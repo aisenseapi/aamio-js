@@ -4,6 +4,25 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.7.2 - 2026-11-13
+
+- A body is read as JSON only when every number in it is finite and it is
+  nested at most 64 deep, as in the other two runtimes; anything else is
+  handed over as text. A number such as `1e999`, which JSON can write and
+  nothing that reads it can hold, or a body nested thousands deep, could be
+  sent by any writer the channel admits.
+  Here a body nested 5 000 deep made every read of its thread throw, and
+  `1e999` became `Infinity` and went on as `null`.
+- A channel whose read throws is said in attention as `unread`, and the other
+  channels' messages still come back, as in aamio-python and aamio-php. One
+  channel that threw rejected the whole read, and what the channels before it
+  had handed over, their cursors saved, was lost.
+- Over MCP, arguments holding such a number, or nested deeper than 64, are
+  refused with `invalid_arguments` before any tool runs, an add-on's
+  included, with the path of what is wrong.
+- `--data` and `--gate` holding such a number, and `--data` nested so deep
+  that the message around it passes 64, are refused before the home with 2.
+
 ## 0.7.1 - 2026-11-13
 
 - Over MCP a tool's schema is checked into the fields it declares, as in the

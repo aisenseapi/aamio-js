@@ -9,7 +9,7 @@ import { AddonError, describe, disable, enable, enabledButMissing, installWords,
 import { parseCommand, probe, runCommand, usageOf } from "../src/node-addon-process.js";
 import { archiveStatus, parsePolicy } from "../src/node-archive.js";
 import { doctor, homeCheck } from "../src/node-doctor.js";
-import { CHANNEL_TTL, NodeRuntime, SEND_STOPS, checkChannelTtl, checkGate, checkLabel, checkPartner, checkRe, stopFields, tagsFrom } from "../src/node-runtime.js";
+import { BODY_MAX_DEPTH, CHANNEL_TTL, NodeRuntime, SEND_STOPS, checkChannelTtl, checkGate, checkLabel, checkPartner, checkRe, stopFields, tagsFrom, unfitJson } from "../src/node-runtime.js";
 import { checkAccess, checkScopeAdd, checkScopeName } from "../src/node-scopes.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -222,11 +222,31 @@ function scopeName(value) {
 
 function jsonData(value) {
   if (value === undefined) return null;
+  let parsed;
   try {
-    return JSON.parse(value);
+    parsed = JSON.parse(value);
   } catch {
     throw Object.assign(new Error("--data is not JSON. Give a JSON value, quoted for the shell."), { code: "usage" });
   }
+  return holdable(parsed, "--data", BODY_MAX_DEPTH - 1);
+}
+
+/**
+ * A JSON option every reader can hold, or the usage error that says why not:
+ * a number that is not finite, as 1e999 is, which JSON.parse makes Infinity
+ * and JSON.stringify sends as null, and --data nested so deep that the
+ * message around it passes BODY_MAX_DEPTH, which a reader hands over as text.
+ * The three runtimes refuse both alike (a security review of 13 November 2026).
+ */
+function holdable(parsed, option, limit) {
+  const unreadable = unfitJson(parsed, limit);
+  if (unreadable && unreadable[1] === "not finite") {
+    throw Object.assign(new Error(`${option} holds a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it.`), { code: "usage" });
+  }
+  if (unreadable) {
+    throw Object.assign(new Error(`${option} is nested too deep: with the message around it, it is deeper than ${BODY_MAX_DEPTH}, and a reader hands such a message over as text.`), { code: "usage" });
+  }
+  return parsed;
 }
 
 /**
@@ -349,6 +369,7 @@ function plan(command, positional, options) {
         } catch {
           throw wrong("--gate is not JSON. Quote it as one argument, as in --gate '{\"require\": {\"pow\": {\"bits\": 20}}}'.");
         }
+        holdable(gate, "--gate", 1000000);
         usage(() => checkGate(gate));
       }
       return (runtime) => runtime.channelOpen(first, { ttl, allow, gate });

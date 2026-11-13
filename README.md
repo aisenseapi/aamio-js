@@ -71,7 +71,7 @@ else: the message is handed over and the send is delivered, with
 `archive_failed` in `attention` or `archive_error` on the answer.
 
 To connect an MCP client, set its command to `npx` and its arguments to
-`["-y", "aamio@0.7.1", "--home", "/absolute/path/to/home", "serve"]`, or from a
+`["-y", "aamio@0.7.2", "--home", "/absolute/path/to/home", "serve"]`, or from a
 checkout the command `node` and the arguments
 `["/absolute/path/to/aamio-js/bin/aamio.js", "--home", "/absolute/path/to/home", "serve"]`.
 The server speaks JSON-RPC over stdio and creates a new identity on first

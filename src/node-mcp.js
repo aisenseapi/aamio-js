@@ -2,7 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { GateStop, isKey } from "./aamio.js";
 import { readIdentity } from "./node-identity.js";
-import { OUTBOX_NOTES, SEND_STOPS, checkGate, outboxOutcome, stopFields } from "./node-runtime.js";
+import { OUTBOX_NOTES, SEND_STOPS, checkGate, outboxOutcome, stopFields, unfitJson, unfitText } from "./node-runtime.js";
 import { toolsOf } from "./node-addons.js";
 import { HOST_QUESTION, callTool } from "./node-addon-process.js";
 
@@ -595,6 +595,15 @@ async function callAddonTool(id, params, session, version, reply, complete, mani
 /** One tool of the runtime. A call and the presence timer take turns with the home. */
 async function callRuntimeTool(id, params, session, version, reply, complete) {
   const runtime = session.runtime;
+  // A number that is not finite, as 1e999 is, or nesting deeper than a reader
+  // reads as JSON, is refused before any tool runs, an add-on's included, as in
+  // the other two runtimes. JSON.parse made 1e999 Infinity here and it went on
+  // as null; in aamio-php the arguments vanished and an add-on ran with its
+  // defaults (a security review of 13 November 2026).
+  if (object(params.arguments)) {
+    const unreadable = unfitJson(params.arguments);
+    if (unreadable) return complete(toolResult({ error: unfitText(unreadable), error_code: "invalid_arguments", fix: ARGUMENTS_FIX }, true));
+  }
   const tool = RUNTIME_TOOLS.find((t) => t.name === params.name);
   if (!tool) {
     const manifest = session.addons.find((held) => held.tools.some((offered) => offered.name === params.name));
