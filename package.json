@@ -22,6 +22,7 @@
     "src/node-addon-process.js",
     "src/node-addons.js",
     "src/node-archive.js",
+    "src/node-doctor.js",
     "src/node-identity.js",
     "src/node-lock.js",
     "src/node-mcp.js",

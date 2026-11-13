@@ -94,3 +94,23 @@ test("init takes the tags presence publishes and what is kept, and AAMIO_TAGS st
   const hosted = cli(home, ["--host", "http://127.0.0.1:9", "whoami"]);
   assert.equal(JSON.parse(hosted.stdout).host, "http://127.0.0.1:9", "--host names the service, before AAMIO_HOST");
 });
+
+test("every module the command line reaches is in the package", () => {
+  // package.json names its files one by one. src/node-doctor.js was written and not named, and the packed command
+  // line stopped at its first import, on every command (the release check of 13 November 2026).
+  const files = new Set(pkg.files);
+  const reached = new Set();
+  const visit = (relative) => {
+    if (reached.has(relative)) return;
+    reached.add(relative);
+    const source = readFileSync(new URL("../" + relative, import.meta.url), "utf8");
+    for (const [, target] of source.matchAll(/(?:^|\n)\s*(?:import|export)\s[^;]*?from\s+"(\.{1,2}\/[^"]+)"/g)) {
+      const resolved = new URL(target, new URL("../" + relative, import.meta.url));
+      visit(fileURLToPath(resolved).slice(fileURLToPath(new URL("../", import.meta.url)).length).replaceAll("\\", "/"));
+    }
+  };
+  visit("bin/aamio.js");
+  const missing = [...reached].filter((path) => !files.has(path));
+  assert.deepEqual(missing, [], "reached and not in package.json's files");
+  assert.ok(reached.has("src/node-doctor.js") && reached.size > 10, [...reached].join(", "));
+});
