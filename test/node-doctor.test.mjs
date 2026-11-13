@@ -109,8 +109,16 @@ test("on Windows the real access list of a folder is read, and Get-Acl and icacl
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const withGetAcl = homeCheck(home);
   const withIcacls = homeCheck(home, { getAcl: getAclGone });
-  assert.match(withGetAcl.how, /read with Get-Acl/);
   assert.match(withIcacls.how, /read with icacls/);
+  // Where the PowerShell module behind Get-Acl does not load, as for a user
+  // whose policy keeps it out, the check falls back to icacls, as it should,
+  // and there is nothing to compare: the test was red there (a check of 13
+  // November 2026).
+  if (!/read with Get-Acl/.test(withGetAcl.how)) {
+    assert.match(withGetAcl.how, /read with icacls after Get-Acl was not available/);
+    t.diagnostic("Get-Acl does not load here, so only icacls was read");
+    return;
+  }
   assert.equal(withIcacls.private, withGetAcl.private, JSON.stringify([withGetAcl, withIcacls]));
   assert.deepEqual(withIcacls.findings.map((finding) => finding.who), withGetAcl.findings.map((finding) => finding.who));
 });
@@ -144,13 +152,20 @@ test("doctor answers as aamio-python and aamio-php do: the service, whether it f
   const answer = await said("doctor");
   assert.deepEqual(Object.keys(answer), ["client", "service", "compatibility", "storage", "archive", "outbox_pending"]);
   assert.deepEqual(answer.client, { name: "aamio-js", version: pkg.version, protocol: PROTOCOL });
-  assert.deepEqual([answer.service.reachable, answer.service.version, answer.service.revision], [true, "0.7.43", "fake"]);
+  assert.deepEqual([answer.service.reachable, answer.service.healthy, answer.service.status, answer.service.version, answer.service.revision], [true, true, 200, "0.7.43", "fake"]);
   assert.deepEqual([answer.compatibility.verdict, answer.compatibility.missing], ["full", []]);
   assert.deepEqual([answer.storage.home, answer.archive.policy.mode, answer.outbox_pending], [home, "keep", 0]);
   // The service --host names is the one asked, and one that does not answer is said as such, never as a fit.
   const elsewhere = await said("--host", "http://127.0.0.1:9", "doctor");
-  assert.deepEqual([elsewhere.service.host, elsewhere.service.reachable, elsewhere.compatibility.verdict], ["http://127.0.0.1:9", false, "unknown"]);
-  assert.match(elsewhere.service.problem, /^no answer from \/health \(0\)/);
+  assert.deepEqual([elsewhere.service.host, elsewhere.service.reachable, elsewhere.service.healthy, elsewhere.service.status, elsewhere.compatibility.verdict], ["http://127.0.0.1:9", false, false, 0, "unknown"]);
+  assert.match(elsewhere.service.problem, /^no answer from \/health, so the service's version and health were not read/);
+  // A service that answers /health with 503 is reachable and not healthy, said apart from whether this client fits it,
+  // which the descriptor still says. It was said as no answer (a check of 13 November 2026).
+  fake.healthStatus = 503;
+  const unwell = await said("doctor");
+  assert.deepEqual([unwell.service.reachable, unwell.service.healthy, unwell.service.status, unwell.compatibility.verdict], [true, false, 503, "full"]);
+  assert.match(unwell.service.problem, /^\/health answered 503 and not 200: the service is reachable and not healthy/);
+  fake.healthStatus = 200;
   // A service that declares no capabilities is partial, never full.
   fake.descriptor = { version: "0.7.0" };
   assert.equal((await said("doctor")).compatibility.verdict, "partial");

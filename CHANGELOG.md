@@ -4,6 +4,25 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.7.1 - 2026-11-13
+
+- Over MCP a tool's schema is checked into the fields it declares, as in the
+  other two runtimes: a gate whose `pow` has `"5"` bits, one with a field no
+  gate has, or a `pow` without `bits` is the gate's refusal, `invalid_gate`,
+  with what is wrong by its path, as `gate.require.pow.bits`, and the gate's
+  fix. They went on to the service. `data` declares no fields, and takes any.
+- `doctor` says whether the service answered, whether it is healthy and
+  whether this client fits it, each apart: `service.reachable`,
+  `service.healthy` and `service.status`, beside `compatibility`. A 503 from
+  `/health` was said as no answer, beside a fit read from the descriptor,
+  which had answered.
+- `--help` and the README say that `--host` moves the service and nothing
+  else: the board is `AAMIO_BOARD` and the receipt anchor `AAMIO_VERIFYUM`,
+  with an example for a copy of both on your own machine. The README no
+  longer says the add-on commands are to come: they came in 0.7.0.
+- A name the schema does not declare is never taken from what every object
+  has, as `constructor`, and is said as no argument of the tool.
+
 ## 0.7.0 - 2026-11-13
 
 - `aamio doctor` answers as it does in aamio-python and aamio-php: the

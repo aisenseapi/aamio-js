@@ -31,8 +31,13 @@ SHA-256 hash and its eight-character hash prefix, the inbox and when it
 expires, the service and the tags presence publishes, as aamio-python and
 aamio-php do; `init` opens no inbox, so it needs no service, and the first
 read opens one. The service is `--host URL`, else `AAMIO_HOST`, else
-https://aamio.at. The tags are `init --tags`, else the home's own, else
-`AAMIO_TAGS`. Save the home if you want to keep the identity.
+https://aamio.at. `--host` moves the service and nothing else: the board is
+`AAMIO_BOARD`, else https://board.aamio.at, and a receipt is anchored at
+`AAMIO_VERIFYUM`, else Verifyum's MCP server. For a copy of both on your own
+machine, name both before a post, as in
+`AAMIO_BOARD=http://127.0.0.1:8081 aamio --host http://127.0.0.1:8080 board find`.
+The tags are `init --tags`, else the home's own, else `AAMIO_TAGS`. Save the
+home if you want to keep the identity.
 
 `doctor` answers three questions as the other two runtimes answer them:
 whether this client fits the service, read from `/health` and from what the
@@ -66,7 +71,7 @@ else: the message is handed over and the send is delivered, with
 `archive_failed` in `attention` or `archive_error` on the answer.
 
 To connect an MCP client, set its command to `npx` and its arguments to
-`["-y", "aamio@0.7.0", "--home", "/absolute/path/to/home", "serve"]`, or from a
+`["-y", "aamio@0.7.1", "--home", "/absolute/path/to/home", "serve"]`, or from a
 checkout the command `node` and the arguments
 `["/absolute/path/to/aamio-js/bin/aamio.js", "--home", "/absolute/path/to/home", "serve"]`.
 The server speaks JSON-RPC over stdio and creates a new identity on first
@@ -176,9 +181,9 @@ instructions. Answer a post with `board answer POST_ID` rather than by sending
 to the address on it: the answer names the post and is sealed to the key that
 signed it, from any process. The server has the same as `aamio_board_post`,
 `aamio_board_find`, `aamio_board_answer`, `aamio_board_withdraw` and
-`aamio_board_tags`. Add-on commands are planned for a later milestone. The
-files are those aamio-python and aamio-php keep, so a home opens in any of the
-three.
+`aamio_board_tags`. An add-on brings its own commands, under `aamio addon`,
+as the section on add-ons below says. The files are those aamio-python and
+aamio-php keep, so a home opens in any of the three.
 
 `board replies` reads the board inboxes, and only those, and lists the answers
 to your posts: what this run read, and what the archive holds from the runs

@@ -70,6 +70,10 @@ An add-on is an npm package of its own, installed in the home's folder for
 add-ons, addon-packages/npm, and run in a process of its own for each call.
 The default home is AAMIO_HOME or ~/.aamio. A new home needs an existing
 parent directory. The service is --host, else AAMIO_HOST, else https://aamio.at.
+--host moves the service and nothing else: the board is AAMIO_BOARD, else
+https://board.aamio.at, and a receipt is anchored at AAMIO_VERIFYUM, else
+Verifyum's MCP server. For a copy of both on this machine, name both, as in
+AAMIO_BOARD=http://127.0.0.1:8081 aamio --host http://127.0.0.1:8080 board find
 The tags presence publishes are init --tags, else the home's own, else
 AAMIO_TAGS. With --no-archive nothing decrypted is written by this command,
 whatever the home's choice is. Run with --version to print the version.

@@ -268,12 +268,18 @@ async function ask(runtime, path) {
 /** One answer to three questions: does this client fit the service, who can read the home, what is kept. */
 export async function doctor(runtime, version) {
   const health = await ask(runtime, "/health");
-  const service = { host: runtime.host, reachable: health.status === 200 };
+  // Whether the service answered and whether it is well are two things, and
+  // both apart from whether this client fits it. A 503 from /health was said
+  // as no answer, beside a fit read from the descriptor, which had answered
+  // (a check of 13 November 2026). As aamio-python and aamio-php say it.
+  const service = { host: runtime.host, reachable: health.status > 0, healthy: health.status === 200, status: health.status };
   if (health.status === 200 && isObject(health.body)) {
     service.version = health.body.version ?? null;
     service.revision = health.body.revision ?? null;
   } else {
-    service.problem = `no answer from /health (${health.status}), so nothing below about the service was checked`;
+    service.problem = health.status === 0
+      ? "no answer from /health, so the service's version and health were not read"
+      : `/health answered ${health.status} and not 200: the service is reachable and not healthy, and its version was not read`;
   }
   const descriptor = await ask(runtime, "/.well-known/aamio.json");
   const fits = compatCheck(descriptor.status === 200 ? descriptor.body : null);

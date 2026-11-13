@@ -523,9 +523,18 @@ test("over MCP: a channel is opened, handed over, listed and closed, and what go
     const refused = await call(owner, "aamio_open_channel", args);
     assert.deepEqual([refused.isError, refused.structuredContent.error_code], [true, code], JSON.stringify(args));
   }
-  for (const args of [{ label: "x" }, { ttl: 600 }, { label: "x", ttl: 10 }, { label: "x", ttl: 4000 }, { label: "x", ttl: 600, allow: "guest" }, { label: "x", ttl: 600, gate: "pow" }, { label: "x", ttl: 600, extra: 1 }]) {
+  for (const args of [{ label: "x" }, { ttl: 600 }, { label: "x", ttl: 10 }, { label: "x", ttl: 4000 }, { label: "x", ttl: 600, allow: "guest" }, { label: "x", ttl: 600, extra: 1 }]) {
     const unfit = await call(owner, "aamio_open_channel", args);
     assert.deepEqual([unfit.isError, unfit.structuredContent?.error_code], [true, "invalid_arguments"], JSON.stringify(args));
+  }
+  // A gate is checked into the fields it declares, as in aamio-python and aamio-php, and what is wrong inside it is the
+  // gate's refusal, with its fix: bits of "5" went on to the service, and a field no gate has was passed over.
+  for (const [gate, said] of [["pow", /^gate is not what aamio_open_channel takes: /], [{ require: { pow: { bits: "5" } } }, /^gate\.require\.pow\.bits is not what aamio_open_channel takes: \{"type":"integer"/],
+    [{ require: { pow: { bits: 5 }, extra: 1 } }, /^gate\.require has no field called extra$/], [{ require: { pow: {} } }, /^gate\.require\.pow needs bits$/], [{ advise: [] }, /^gate\.advise is not what/]]) {
+    const unfit = await call(owner, "aamio_open_channel", { label: "x", ttl: 600, gate });
+    assert.deepEqual([unfit.isError, unfit.structuredContent?.error_code, unfit.structuredContent?.given], [true, "invalid_gate", gate], JSON.stringify(gate));
+    assert.match(unfit.structuredContent.error, said);
+    assert.match(unfit.structuredContent.fix, /^Send a gate with require, advise or both/);
   }
 
   const closed = await call(owner, "aamio_close_channel", { label: "tender" });

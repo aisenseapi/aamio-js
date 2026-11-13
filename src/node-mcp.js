@@ -510,6 +510,8 @@ async function addPartner(runtime, args, ask) {
 
 /** What a call whose arguments do not fit is told to do, in the three runtimes alike. */
 const ARGUMENTS_FIX = "Check each argument against the tool's inputSchema and call again.";
+/** And one whose gate does not fit: there is no changing a gate once the channel is open. */
+const GATE_FIX = "Send a gate with require, advise or both, as in {\"require\": {\"pow\": {\"bits\": 20}, \"per_key\": 5}}, or leave gate out to take writes from anyone on the allowlist.";
 
 /**
  * Arguments as the tool's schema says: an object of known names, each of its
@@ -519,20 +521,51 @@ const ARGUMENTS_FIX = "Check each argument against the tool's inputSchema and ca
  */
 function wrongArguments(tool, args) {
   if (args === undefined) args = {};
-  if (!object(args)) return "arguments must be an object";
   const properties = tool.inputSchema.properties;
   for (const [name, value] of Object.entries(args)) {
-    const want = properties[name];
-    if (!want) return `${tool.name} takes no argument called ${name}`;
-    const ok = want.type === "string" ? typeof value === "string" && (!want.pattern || new RegExp(want.pattern).test(value)) && [...value].length >= (want.minLength ?? 0) && [...value].length <= (want.maxLength ?? Infinity) && (!want.enum || want.enum.includes(value))
-      : want.type === "integer" ? Number.isInteger(value) && value >= (want.minimum ?? -Infinity) && value <= (want.maximum ?? Infinity)
-        : want.type === "boolean" ? typeof value === "boolean"
-        : want.type === "object" ? object(value)
-          : want.type === "array" ? Array.isArray(value) && value.every((item) => typeof item === "string") && value.length <= (want.maxItems ?? Infinity) : false;
-    if (!ok) return `${name} is not what ${tool.name} takes: ${JSON.stringify(want)}`;
+    // Own names only: constructor or __proto__ is no argument of any tool.
+    if (!Object.hasOwn(properties, name)) return { path: name, message: `${tool.name} takes no argument called ${name}` };
+    const wrong = wrongValue(tool, name, properties[name], value);
+    if (wrong) return wrong;
   }
-  for (const name of tool.inputSchema.required ?? []) if (!(name in args)) return `${tool.name} needs ${name}`;
+  for (const name of tool.inputSchema.required ?? []) if (!Object.hasOwn(args, name)) return { path: name, message: `${tool.name} needs ${name}` };
   return null;
+}
+
+/**
+ * What is wrong with one value against its schema, named by its path, as the
+ * three runtimes say it; or null. An object whose fields the schema declares,
+ * as a gate's, is checked field by field: a pow of "5" bits went on to the
+ * service, and a field no gate has was passed over (a check of 13 November
+ * 2026). One that declares none, as data, takes any field.
+ */
+function wrongValue(tool, path, want, value) {
+  const ok = want.type === "string" ? typeof value === "string" && (!want.pattern || new RegExp(want.pattern).test(value)) && [...value].length >= (want.minLength ?? 0) && [...value].length <= (want.maxLength ?? Infinity) && (!want.enum || want.enum.includes(value))
+    : want.type === "integer" ? Number.isInteger(value) && value >= (want.minimum ?? -Infinity) && value <= (want.maximum ?? Infinity)
+      : want.type === "boolean" ? typeof value === "boolean"
+      : want.type === "object" ? object(value)
+        : want.type === "array" ? Array.isArray(value) && value.every((item) => typeof item === "string") && value.length <= (want.maxItems ?? Infinity) : false;
+  if (!ok) return { path, message: `${path} is not what ${tool.name} takes: ${JSON.stringify(want)}` };
+  if (want.type === "object" && object(want.properties)) {
+    for (const [key, inner] of Object.entries(value)) {
+      if (!Object.hasOwn(want.properties, key)) {
+        if (want.additionalProperties === false) return { path: `${path}.${key}`, message: `${path} has no field called ${key}` };
+        continue;
+      }
+      const wrong = wrongValue(tool, `${path}.${key}`, want.properties[key], inner);
+      if (wrong) return wrong;
+    }
+    for (const key of want.required ?? []) if (!Object.hasOwn(value, key)) return { path: `${path}.${key}`, message: `${path} needs ${key}` };
+  }
+  return null;
+}
+
+/** What does not fit, as the call's answer: inside a gate it is the gate's refusal, with its fix; anything else is invalid_arguments. */
+function unfit(tool, wrong, args) {
+  if (tool.name === "aamio_open_channel" && (wrong.path === "gate" || wrong.path.startsWith("gate."))) {
+    return { error: wrong.message, error_code: "invalid_gate", fix: GATE_FIX, given: args.gate };
+  }
+  return { error: wrong.message, error_code: "invalid_arguments", fix: ARGUMENTS_FIX };
 }
 
 /**
@@ -587,7 +620,7 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
   // of 13 November 2026).
   if (params.arguments !== undefined && !object(params.arguments)) return rpcError(id, -32602, "arguments must be an object");
   const wrong = wrongArguments(tool, params.arguments);
-  if (wrong) return complete(toolResult({ error: wrong, error_code: "invalid_arguments", fix: ARGUMENTS_FIX }, true));
+  if (wrong) return complete(toolResult(unfit(tool, wrong, params.arguments ?? {}), true));
   const args = params.arguments ?? {};
   try {
     const data = await runtime.serial(async () => {
@@ -611,7 +644,7 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
             try {
               checkGate(args.gate);
             } catch (wrong) {
-              throw new ToolRefusal({ error: wrong.message, error_code: "invalid_gate", fix: "Send a gate with require, advise or both, as in {\"require\": {\"pow\": {\"bits\": 20}, \"per_key\": 5}}, or leave gate out to take writes from anyone on the allowlist.", given: args.gate });
+              throw new ToolRefusal({ error: wrong.message, error_code: "invalid_gate", fix: GATE_FIX, given: args.gate });
             }
           }
           return runtime.channelOpen(args.label, { ttl: args.ttl, allow: args.allow ?? null, gate: args.gate ?? null, to: args.to ?? null, note: args.note ?? null });
