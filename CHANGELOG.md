@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## 0.7.0 - 2026-11-12
+## 0.7.0 - 2026-11-13
 
 - `aamio doctor` answers as it does in aamio-python and aamio-php: the
   service, read from `/health`, whether this client fits it, from what the
