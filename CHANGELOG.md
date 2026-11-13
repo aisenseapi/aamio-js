@@ -17,6 +17,12 @@ not what moved in the source.
   channels' messages still come back, as in aamio-python and aamio-php. One
   channel that threw rejected the whole read, and what the channels before it
   had handed over, their cursors saved, was lost.
+- A channel whose read throws leaves nothing of that read in memory: its
+  cursor, the hashes of what it took and the addresses it bound are as the
+  home has them, and the next read hands its messages over. One that threw
+  halfway through kept the hashes of the messages it had taken, the next
+  channel's save wrote them down, and the next read handed those messages over
+  marked `replay`, though they had never been handed over.
 - Over MCP, arguments holding such a number, or nested deeper than 64, are
   refused with `invalid_arguments` before any tool runs, an add-on's
   included, with the path of what is wrong.

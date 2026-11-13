@@ -103,6 +103,30 @@ test("a channel whose read throws is said, and the channels before it still hand
   assert.deepEqual((await owner.read()).map((m) => m.body.text), ["on the side"], "and the side's message waits for the next read");
 });
 
+// A channel that threw halfway through its messages kept the hashes of the ones
+// it had taken before it threw, the next channel's save wrote them down, and the
+// next read handed those messages over marked replay, never having handed them
+// over at all (the release check of 13 November 2026).
+test("a channel that throws on its second message keeps none of what it took, so the next read hands both over as new", async (t) => {
+  const fake = new FakeAamio();
+  const { owner, guest } = await pair(t, fake);
+  const side = await owner.channelOpen("side", { ttl: 600, allow: ["guest"] });
+  await write(fake, guest, side.w, JSON.stringify({ text: "first on the side" }));
+  await write(fake, guest, side.w, JSON.stringify({ text: "second on the side" }));
+  const real = owner.readEntry.bind(owner);
+  owner.readEntry = (channel, raw) => {
+    if (channel.label === "side" && raw?.seq === 2) throw new RangeError("the test made the second message fail");
+    return real(channel, raw);
+  };
+  assert.deepEqual(await owner.read(), [], "nothing from the side is handed over");
+  const told = await owner.attentionTaken();
+  assert.ok(told.some((note) => note.channel === "side" && note.state === "unread"), JSON.stringify(told));
+  owner.readEntry = real;
+  // The inbox is read first and written down, with whatever the side holds in memory.
+  const again = await owner.read();
+  assert.deepEqual(again.map((m) => [m.body.text, m.replay]), [["first on the side", false], ["second on the side", false]], "neither is marked a copy: neither was handed over before");
+});
+
 function cli(home, ...words) {
   return spawnSync(process.execPath, [bin, "--home", home, "--host", "http://127.0.0.1:9", ...words], { encoding: "utf8", env: { ...process.env, AAMIO_BOARD: "http://127.0.0.1:9" }, timeout: 60000 });
 }

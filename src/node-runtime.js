@@ -2495,12 +2495,16 @@ export class NodeRuntime {
     try {
       return await this.pollOnce(channel, wait, limit, true, maxBytes);
     } catch (error) {
-      if (!error?.notSaved) throw error;
       // What this read changed is undone in memory too: the cursor, the hashes
       // and the bindings stay as the file has them, and the messages wait at
-      // the service for the next read, which hands them over.
+      // the service for the next read, which hands them over. Whatever stopped
+      // the read: one that threw halfway through its messages kept the hashes of
+      // the ones it had taken, the next channel's save wrote them down, and the
+      // next read handed those messages over marked replay, never having handed
+      // them over at all (the release check of 13 November 2026).
       Object.assign(channel, { after: before.after, created_at: before.created_at, instance: before.instance, expire_at: before.expire_at, gone: before.gone, seen: before.seen, seen_from: before.seen_from });
       this.state.peers = before.peers;
+      if (!error?.notSaved) throw error;
       this.note(channel.label, "not_saved", `what this read found here could not be written down (${error.cause?.code || error.cause?.message}), so nothing from this channel was handed over. It is still there for the next read, and nothing was skipped.`, channel.w);
       return [];
     }
