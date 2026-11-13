@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { Keys } from "../src/aamio.js";
 import { initIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
-import { NodeRuntime } from "../src/node-runtime.js";
+import { NodeRuntime, checkPartner } from "../src/node-runtime.js";
 import { BOARD, FakeAamio } from "./fake-aamio.mjs";
 
 const HOST = "https://fake.aamio";
@@ -290,6 +290,15 @@ test("an address from the board, in a later process, is refused with the way tha
   await assert.rejects(b.send(post.w, { text: "straight to the address" }), (error) => error.code === "unknown_address" && /board answer POST_ID/.test(error.message));
   const answered = await b.boardAnswer(post.id, { text: "through the board" });
   assert.equal(b.outbox[answered.message_id].status, "delivered");
+});
+
+test("a partner's name is counted in characters, as aamio-python and aamio-php count it", () => {
+  // A character outside the basic plane is two units of a JavaScript string. Counted in units, a name of 33 such was
+  // refused here and taken there (a check of 13 November 2026).
+  const key = Keys.generate().public;
+  checkPartner("\u{1F600}".repeat(64), key);
+  assert.throws(() => checkPartner("\u{1F600}".repeat(65), key), (error) => error.code === "invalid_name");
+  assert.throws(() => checkPartner("a\tb", key), (error) => error.code === "invalid_name");
 });
 
 test("a partner's name and key and send --re are checked before a home is made", (t) => {

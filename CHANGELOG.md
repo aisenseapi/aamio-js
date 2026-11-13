@@ -28,6 +28,9 @@ not what moved in the source.
   script that reads the answer never saw. A home that cannot be opened is
   still said on standard error, and so is `trace` of a counterpart nothing is
   recorded about, as in the other two.
+- A partner's name is counted in characters, as aamio-python and aamio-php
+  count it. A character outside the basic plane counted twice, and a name of 33
+  emoji was refused here and taken there.
 - The outbox is settled from Node. `outbox retry [--id ID]` and
   `aamio_outbox_retry` send the stored bytes of a message again, with the same
   id, address and envelope, so a recipient that keeps what it has seen marks the

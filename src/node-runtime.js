@@ -108,7 +108,10 @@ export function remember(channel, digest, fromKey) {
   if (!channel.seen_from.includes(record)) channel.seen_from.push(record);
 }
 const ADDRESS = /^[a-z2-7]{20}$/;
-const NAME = /^[^\u0000-\u001f\u007f]{1,64}$/;
+// Counted in characters, as aamio-python and aamio-php count a name: without
+// the u flag a name of 33 emoji was 66 units here and refused, and taken there
+// (a check of 13 November 2026).
+const NAME = /^[^\u0000-\u001f\u007f]{1,64}$/u;
 
 // ------------------------------------------------------------- the outbox --
 //
