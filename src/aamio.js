@@ -523,12 +523,49 @@ const GATE_KNOWN = { require: ["per_key", "pow", "write_until"], advise: ["pow"]
 
 /** The inbox asks for something this client cannot or will not do, so nothing was sent. */
 export class GateStop extends Error {
-  constructor(reason, fix) {
+  /**
+   * reason is what the stop meant for a message that had not left: nothing was
+   * sent. why is only about the gate, and is what a stop after a post the inbox
+   * refused with 428 is told from, since that message went once. fix is what
+   * to do instead.
+   */
+  constructor(reason, fix, why = reason) {
     super(reason);
     this.name = "GateStop";
     this.reason = reason;
     this.fix = fix;
+    this.why = why;
   }
+}
+
+/**
+ * What a stop after a 428 says: the message went once and was refused, and why
+ * it was not sent again. Built from the stop's why and fix, never from its
+ * reason, which was written for a message that had not left (as aamio-php's
+ * Client::refusedOnce and aamio-python's refused_once).
+ */
+export function refusedOnce(stop) {
+  const why = String(stop.why ?? stop.reason ?? stop.message).replace(/[. ]+$/, "");
+  return `The message went once and the inbox refused it with 428, and it was not sent again. ${why.charAt(0).toUpperCase()}${why.slice(1)}. ${stop.fix}`;
+}
+
+/**
+ * Work that takes longer than a call may last is not started: the rule
+ * aamio-php's Gate::plan has, for a model on MCP whose host cuts a tool call
+ * after a minute or so. Every send did its work inside the call, however long
+ * it took, and the event loop with it: 26 bits is about four minutes here (a
+ * security review of 13 November 2026). budget is how long, in seconds, or
+ * null where the work may take what it needs. An estimate, not a promise: the
+ * work is a lottery, and one in a hundred takes about 4.6 times as long.
+ */
+export function withinBudget(plan, budget) {
+  if (budget === null || budget === undefined || !plan || !plan.bits || !(plan.expectedSeconds > budget)) return;
+  const why = `This inbox requires proof of work of ${plan.bits} bits, which takes about ${describeSeconds(plan.expectedSeconds)} on this machine, longer than a tool call is given here, so the work was not started`;
+  throw new GateStop(
+    `${why} and nothing was sent.`,
+    "Send it from the command line, where the work has the time it needs: the same bytes are kept under this message id, and aamio outbox retry sends them.",
+    why,
+  );
 }
 
 /** What work is computed over. key is the X-Key as sent, or empty for an unsigned message. */
@@ -672,6 +709,7 @@ export function gatePlan(gate, w, base = DEFAULT_BASE, secondsLeft = null) {
       throw new GateStop(
         `This inbox's gate has a part called ${bucket} that this client does not know, so it cannot tell whether a write would be refused, and sent nothing.`,
         `Update the aamio client, which may know it. ${where} shows the whole gate.`,
+        `this inbox's gate has a part called ${bucket} that this client does not know, so it cannot tell whether a write would be refused`,
       );
     }
     if (!conditions || typeof conditions !== "object") continue;
@@ -681,6 +719,7 @@ export function gatePlan(gate, w, base = DEFAULT_BASE, secondsLeft = null) {
         throw new GateStop(
           `This inbox requires ${name}, a condition this client does not know how to meet, so nothing was sent.`,
           `Update the aamio client, which may know it, or reach the owner another way. ${where} shows the whole gate.`,
+          `this inbox requires ${name}, a condition this client does not know how to meet`,
         );
       }
       notes.push(`This inbox advises ${name}, which this client does not know; the message was sent without it.`);
@@ -696,6 +735,7 @@ export function gatePlan(gate, w, base = DEFAULT_BASE, secondsLeft = null) {
       throw new GateStop(
         `This inbox requires proof of work of ${bits} bits, and this client computes at most ${POW_REQUIRE_MAX_BITS}, the most aamio lets any inbox require. Nothing was sent.`,
         "The inbox asks for more than the service allows, so no client will meet it. Reach the owner another way.",
+        `this inbox requires proof of work of ${bits} bits, and this client computes at most ${POW_REQUIRE_MAX_BITS}, the most aamio lets any inbox require`,
       );
     }
     const expected = bits >= ESTIMATE_FROM_BITS ? expectedSeconds(bits) : 0;
@@ -703,6 +743,7 @@ export function gatePlan(gate, w, base = DEFAULT_BASE, secondsLeft = null) {
       throw new GateStop(
         `This inbox requires proof of work of ${bits} bits, which takes about ${describeSeconds(expected)} on this machine, and it takes writes for ${describeSeconds(secondsLeft)} more. The work would not be done before it closes, so it was not started and nothing was sent.`,
         "Ask the owner for a longer inbox or less work, or send from a machine with more compute: aamio-wasm handed to setWorkSolver is about eighteen times faster than this loop.",
+        `this inbox requires proof of work of ${bits} bits, which takes about ${describeSeconds(expected)} on this machine, and it takes writes for ${describeSeconds(secondsLeft)} more. The work would not be done before it closes, so it was not started`,
       );
     }
     return { bits: bits > 0 ? bits : null, required: true, notes, expectedSeconds: expected };
@@ -1230,6 +1271,7 @@ export class Aamio {
     const key = headers["X-Key"] || "";
     const advice = await this.planFor(w);
     let notes = advice.notes;
+    withinBudget(advice, this.workBudget);
     if (advice.bits) headers["X-Work"] = this.work(w, key, text, advice.bits);
 
     let result;
@@ -1246,9 +1288,20 @@ export class Aamio {
       if (!gate) throw error;
       this.gates.set(w, gate);
       if (Number.isInteger(error.body.seconds_left)) this.gateLeft.set(w, [error.body.seconds_left, Date.now()]);
-      const asked = gatePlan(gate, w, this.base, this.secondsLeft(w));
+      let asked;
+      try {
+        asked = gatePlan(gate, w, this.base, this.secondsLeft(w));
+        withinBudget(asked, this.workBudget);
+        if (asked.bits && asked.bits !== advice.bits) headers["X-Work"] = this.work(w, key, text, asked.bits);
+      } catch (stop) {
+        if (!(stop instanceof GateStop)) throw stop;
+        // It went once and the inbox refused it with 428: that refusal is the
+        // answer, with why it was not sent again.
+        if (error.body && typeof error.body === "object") error.body = { ...error.body, fix: refusedOnce(stop) };
+        error.stop = stop.why;
+        throw error;
+      }
       if (!asked.bits || asked.bits === advice.bits) throw error;
-      headers["X-Work"] = this.work(w, key, text, asked.bits);
       notes = [...notes, ...asked.notes.filter((note) => !notes.includes(note))];
       result = await this.request("POST", "/" + w, { body: text, headers });
     }
@@ -1320,6 +1373,7 @@ export class Aamio {
       throw new GateStop(
         `The proof of work of ${bits} bits was not done before the inbox stops taking writes, so the work was stopped and nothing was sent.`,
         "The estimate before it started said it would fit, and this time it took longer, which happens: the work is a lottery. Ask the owner for a longer inbox, or send from a machine with more compute.",
+        `the proof of work of ${bits} bits was not done before the inbox stops taking writes, so the work was stopped`,
       );
     }
     return nonce;

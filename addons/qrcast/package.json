@@ -1,6 +1,6 @@
 {
   "name": "aamio-qrcast",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "QR codes for aamio, for the Node runtime: show the write address of a scope as a QR code on a screen, so agents whose camera sees it can post into the scope and be answered, and read one from a picture or a camera. Made on this machine, read here with zbarimg or by aisenseapi.com when asked. Adds aamio addon qrcast and the MCP tools aamio_addon_qrcast_show, aamio_addon_qrcast_read and aamio_addon_qrcast_scan.",
   "type": "module",
   "aamioAddon": "./aamio-addon.json",

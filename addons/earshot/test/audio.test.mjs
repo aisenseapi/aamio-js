@@ -4,7 +4,7 @@
 // addons/earshot/tests/process.inc.php.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import * as audio from "../src/audio.js";
@@ -107,6 +107,46 @@ test("a program is found on PATH by its full path, and a batch file is not one",
     await chmod(join(place, "plain"), 0o755);
     assert.equal(audio.which("plain", { env: { PATH: place } }), join(place, "plain"));
   }
+});
+
+test("a program is found by its full path, never in the working directory however PATH names it", async (t) => {
+  // A sox.exe in the working directory ran in place of the installed one, and a PATH that began with . gave back
+  // sox.exe, a name relative to wherever the agent was (a security review of 13 November 2026, a review of 14 November).
+  const root = await mkdtemp(join(tmpdir(), "aamio-earshot-where-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const installed = join(root, "Program Files", "sox");
+  const name = process.platform === "win32" ? "sox.exe" : "sox";
+  for (const folder of [installed, join(root, "work-a"), join(root, "work b")]) {
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, name), process.platform === "win32" ? "MZ" : "#!/bin/sh\n");
+    await chmod(join(folder, name), 0o755);
+  }
+  const separator = process.platform === "win32" ? ";" : ":";
+  for (const work of [join(root, "work-a"), join(root, "work b")]) {
+    for (const path of [[".", installed], ["", installed], [work, installed], [work + (process.platform === "win32" ? "\\" : "/"), installed], ["sox", installed]]) {
+      assert.equal(audio.which("sox", { env: { PATH: path.join(separator) }, cwd: work }), join(installed, name), `${path.join(separator)} from ${work}`);
+    }
+    assert.equal(audio.which("sox", { env: { PATH: [".", work].join(separator) }, cwd: work }), null, "nothing found is null, never the one in the working directory");
+  }
+  // As Windows names them, with files that are not there.
+  const files = new Set(["C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "C:\\work\\powershell.exe", "C:\\Tools\\sox.exe", "C:\\work\\sox.exe"]);
+  const isProgram = (path) => files.has(path.replace(/\//g, "\\"));
+  assert.equal(audio.which("powershell", { env: { PATH: "C:\\work", SystemRoot: "C:\\Windows" }, windows: true, hostWindows: true, cwd: "C:\\work", isProgram }), "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "powershell from the folder Windows keeps it in");
+  assert.equal(audio.which("sox", { env: { PATH: "C:sox;\\sox;C:\\work;C:\\Tools" }, windows: true, hostWindows: true, cwd: "C:\\work", isProgram }).replace(/\//g, "\\"), "C:\\Tools\\sox.exe", "C:folder and \\folder are not full paths");
+});
+
+test("what starts is the full path the lookup gave", async () => {
+  const started = [];
+  const start = async (command, seconds, program) => {
+    started.push([program, ...command.slice(1)]);
+    return null;
+  };
+  assert.equal(await audio.record(3, "C:\\heard.wav", { find: (name) => (name === "sox" ? "C:\\Program Files\\sox\\sox.exe" : null), start, system: "win32" }), "sox");
+  assert.equal(started[0][0], "C:\\Program Files\\sox\\sox.exe");
+  assert.deepEqual(started[0].slice(1, 5), ["-q", "-t", "waveaudio", "default"]);
+  const none = await caught(() => audio.record(3, "C:\\heard.wav", { find: () => null, start, system: "win32" }));
+  assert.ok(none instanceof audio.Unavailable && none.reason === "no_recorder" && none.fix.includes("winget install ChrisBagwell.SoX"));
+  assert.equal(started.length, 1, "a program that is not there starts nothing");
 });
 
 test("a program is run to its end, within its time, and says how it went", async () => {

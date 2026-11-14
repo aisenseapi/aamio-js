@@ -748,10 +748,17 @@ async function* lines(input) {
  * never sent, is passed over and not kept, so it cannot stop a later call
  * that uses the same id.
  */
+/** Seconds of proof of work one tool call may do. */
+export const WORK_BUDGET = 40;
+
 export async function serveMcp({ home, version, runtime = null, addons = [], input = process.stdin, output = process.stdout }) {
   // addons: the manifests of the add-ons enabled in this home, read before the
   // server started. Their tools stand beside the core's for as long as it runs.
   const session = { home, runtime, addons, tools: [...RUNTIME_TOOLS, ...toolsOf(RUNTIME_TOOLS, addons)], packageVersion: version, protocolVersion: "2025-03-26", capabilities: null, asked: 0, waiting: new Map() };
+  // A tool call is given forty seconds of work, as aamio-php's and
+  // aamio-python's servers give it: a host cuts a call after a minute or so,
+  // and work past that stops before it starts and says to use the command line.
+  if (runtime && (runtime.workBudget === undefined || runtime.workBudget === null)) runtime.workBudget = WORK_BUDGET;
   const queue = [];
   // Ids of the calls queued or being served, and those of them the client has cancelled.
   const open = new Map();

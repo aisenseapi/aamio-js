@@ -4,6 +4,36 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.7.3 - 2026-11-14
+
+- On Windows the process of an add-on gets `NoDefaultCurrentDirectoryInExePath=1`,
+  set last, after what its manifest declared, and whatever case it came in, so
+  a program it starts by a bare name is not looked for in the working
+  directory. The Windows tools the core starts itself (whoami and icacls in doctor) are started by their
+  place in System32 and never by a bare name: where System32 had no such tool,
+  the bare name was asked, which Windows looks for in the working directory
+  first.
+- Proof of work inside a call is held to the time a tool call has over MCP,
+  forty seconds, as in aamio-php and aamio-python: work estimated past it is
+  not started, for a send, a board answer, a channel handed over, a retry from
+  the outbox and a gate a 428 names, and the stop says to send from the
+  command line, where the work has the time it needs. Every send did its work
+  in the call, however long, with the event loop held: 26 bits is about four
+  minutes here. Where it is the inbox that closes first, the advice is a
+  longer inbox or more compute. The library's `send` keeps a `workBudget` its
+  caller sets.
+- A stop after a post the inbox refused with 428 is recorded as that refusal,
+  with why it was not sent again. It was recorded as a message that never
+  left, and it had gone once.
+- `doctor` says JSON `null` and a JSON string at `/health` as JSON that is not
+  aamio's health answer. They were said as an empty body and as a body that is
+  not JSON. What it says of the service's health is unchanged.
+- A channel opened with a gate that requires `per_key` and no `allow` is
+  refused here, before the service is asked, with a partner from the address
+  book as the example, or how to add one first. The service's advice for such
+  a gate, `allow: ["*"]`, is a list of keys, and here `allow` takes partner
+  names: the star was answered `unknown_partner`.
+
 ## 0.7.2 - 2026-11-13
 
 - A body is read as JSON only when every number in it is finite and it is

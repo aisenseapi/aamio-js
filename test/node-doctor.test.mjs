@@ -168,7 +168,10 @@ test("doctor answers as aamio-python and aamio-php do: the service, whether it f
   fake.healthStatus = 200;
   // What answers 200 at /health and is not aamio's health answer is reachable and not healthy, said with what came. A
   // 200 from a proxy or a login page was said as healthy, beside "answered 200 and not 200" (a check of 13 November 2026).
+  // JSON null and a JSON string are answers in JSON, and were said as an empty body and as no JSON (a review of 13
+  // November 2026): each of the seven is said as what it is.
   for (const [text, what] of [["<!doctype html><title>Sign in</title>", "a body that is not JSON"], ["", "an empty body"],
+    ["null", "JSON that is not aamio's health answer"], ['""', "JSON that is not aamio's health answer"], ['"ok"', "JSON that is not aamio's health answer"],
     ["[]", "JSON that is not aamio's health answer"], ['{"status": "ok"}', "JSON that is not aamio's health answer"]]) {
     fake.healthText = text;
     const page = await said("doctor");

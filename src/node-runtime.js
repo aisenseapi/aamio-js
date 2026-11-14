@@ -3,7 +3,7 @@ import { open, readFile, rename, stat as fsStat, unlink } from "node:fs/promises
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Aamio, AamioError, BOARD_POST_MARGIN, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
+import { Aamio, AamioError, BOARD_POST_MARGIN, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, refusedOnce, withinBudget, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
 import { DEFAULT_POLICY, appendRecord, archiveName, archiveNames, archiveStatus, archivedRecords, isSafeLabel, pruneArchive, readPolicy } from "./node-archive.js";
 import { readKeys } from "./node-identity.js";
 import { takeHome } from "./node-lock.js";
@@ -228,6 +228,19 @@ export function stopFields(error) {
 export const CHANNEL_TTL = 600;
 const CHANNEL_TTL_MIN = 30;
 const CHANNEL_TTL_MAX = 3600;
+
+export const PER_KEY_WHY = "a gate that requires per_key needs allow: messages are counted per signing key, and a channel without allow also takes writes nobody signed, which per_key cannot count";
+
+/**
+ * What to do about per_key without allow, with a name from the address book where there is one. The service's advice
+ * for such a gate is allow ["*"], a list of keys. Here allow takes partner names, and "*" was looked up as one and
+ * answered unknown_partner (a review of 13 November 2026). As aamio-python and aamio-php say it.
+ */
+export function perKeyFix(names) {
+  const named = names.find((name) => name);
+  if (named === undefined) return "Add the partners who may write to the address book first, with aamio partner add NAME KEY (aamio_partner_add over MCP), and name them in allow.";
+  return `Name the partners who may write in allow, as allow: ["${named}"] over MCP, or --allow ${named} on the command line, and open the channel again.`;
+}
 
 const GATE_SHAPE = 'A gate is an object with "require", "advise" or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}. require refuses a write that does not meet it; advise lets the write in and reports on it.';
 
@@ -1662,24 +1675,14 @@ export class NodeRuntime {
     }
     const headers = { "Content-Type": "application/json", "X-Key": this.keys.public, "X-Sig": this.keys.sign(threadSigningInput(entry.w, entry.envelope)) };
     let notes = [...(advice.notes || [])];
+    // How long work may take in this call: the time a tool call is given over
+    // MCP, and null on the command line, where it takes what it needs.
+    const budget = this.workBudget ?? null;
     let answer;
     try {
+      withinBudget(advice, budget);
       if (advice.bits) headers["X-Work"] = this.client.work(entry.w, this.keys.public, entry.envelope, advice.bits);
       answer = await this.post(entry.w, entry.envelope, headers);
-      // A 428 carries the gate. The work it asks is done and the same bytes
-      // go once more, never twice: each try costs a place in the rate window.
-      const gate = answer.status === 428 && isObject(answer.result) && isObject(answer.result.gate) ? answer.result.gate : null;
-      if (gate) {
-        this.client.gates.set(entry.w, gate);
-        if (Number.isInteger(answer.result.seconds_left)) this.client.gateLeft.set(entry.w, [answer.result.seconds_left, Date.now()]);
-        const asked = gatePlan(gate, entry.w, this.host, this.client.secondsLeft(entry.w));
-        if (asked.bits && asked.bits !== advice.bits) {
-          headers["X-Work"] = this.client.work(entry.w, this.keys.public, entry.envelope, asked.bits);
-          notes = [...notes, ...asked.notes.filter((n) => !notes.includes(n))];
-          entry.attempts += 1;
-          answer = await this.post(entry.w, entry.envelope, headers);
-        }
-      }
     } catch (error) {
       if (!(error instanceof GateStop)) throw error;
       // Nothing left this machine for this decision, unless an earlier attempt is still open.
@@ -1688,6 +1691,30 @@ export class NodeRuntime {
       entry.last_at = Math.floor(this.now());
       await this.saveOutbox();
       throw error;
+    }
+    // A 428 carries the gate. The work it asks is done and the same bytes go
+    // once more, never twice: each try costs a place in the rate window.
+    const gate = answer.status === 428 && isObject(answer.result) && isObject(answer.result.gate) ? answer.result.gate : null;
+    if (gate) {
+      this.client.gates.set(entry.w, gate);
+      if (Number.isInteger(answer.result.seconds_left)) this.client.gateLeft.set(entry.w, [answer.result.seconds_left, Date.now()]);
+      try {
+        const asked = gatePlan(gate, entry.w, this.host, this.client.secondsLeft(entry.w));
+        withinBudget(asked, budget);
+        if (asked.bits && asked.bits !== advice.bits) {
+          headers["X-Work"] = this.client.work(entry.w, this.keys.public, entry.envelope, asked.bits);
+          notes = [...notes, ...asked.notes.filter((n) => !notes.includes(n))];
+          entry.attempts += 1;
+          answer = await this.post(entry.w, entry.envelope, headers);
+        }
+      } catch (error) {
+        if (!(error instanceof GateStop)) throw error;
+        // It went once and the inbox refused it with 428, and that refusal is
+        // the answer, with why it was not sent again. A stop here was recorded
+        // as a message that never left, and it had gone (a review of 14
+        // November 2026).
+        answer = { status: answer.status, result: { ...answer.result, fix: refusedOnce(error) } };
+      }
     }
     if (notes.length) entry.gate_notes = notes;
     this.recordAnswer(entry, answer.status, answer.result);
@@ -1979,6 +2006,9 @@ export class NodeRuntime {
    * is given to nobody: after a restart this home could not read there.
    */
   async openChannelThread(label, keys, ttl, gate = null) {
+    if (!keys.length && isObject(gate) && isObject(gate.require) && "per_key" in gate.require) {
+      throw runtimeError("invalid_gate", `${PER_KEY_WHY}. ${perKeyFix(this.partners.map((p) => p.name))}`);
+    }
     let thread;
     try {
       thread = await this.client.open({ ttl, allow: keys.length ? keys : undefined, gate: gate ?? undefined });

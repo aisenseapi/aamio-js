@@ -72,7 +72,7 @@ const run = (asked, w = world()) => process_.handle(asked, w.seams);
 
 test("the probe names the add-on, and card makes the text without sound or network", async () => {
   assert.deepEqual(await process_.handle(request("probe", "probe")), { result: { ok: true, name: "earshot", version: process_.VERSION, aamio_addon: 2 }, exit_code: 0, is_error: false });
-  assert.equal(process_.VERSION, "0.3.3");
+  assert.equal(process_.VERSION, "0.3.4");
   const w = world();
   let said = await run(request("command", "card", { address: ADDRESS, name: "rom-42" }), w);
   assert.deepEqual(said, {

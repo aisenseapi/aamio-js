@@ -629,30 +629,40 @@ test("the screen is opened the way each system does it", async () => {
     ran.push(options === undefined ? [command, seconds] : [command, seconds, options]);
     return [code, "", code === 0 ? "" : "could not"];
   };
-  assert.equal(await screen.show("C:\\Temp\\card.png", { platform: "win32", environ: {}, run: run(0) }), "windows");
-  assert.deepEqual(ran[0], [["cmd.exe", "/d", "/s", "/c", '"start "" "C:\\Temp\\card.png""'], 15, { verbatim: true }], "Windows opens it with start, the title left empty and the path inside quotes of the line's own");
-  assert.equal(await screen.show("C:\\Users\\R&D\\Temp\\card.png", { platform: "win32", environ: { COMSPEC: "C:\\Windows\\system32\\cmd.exe" }, run: run(0) }), "windows");
-  assert.deepEqual(ran.pop()[0], ["C:\\Windows\\system32\\cmd.exe", "/d", "/s", "/c", '"start "" "C:\\Users\\R&D\\Temp\\card.png""'], "an ampersand in a folder's name stays inside the quotes");
+  // Each opener by the full path the lookup gave (a security review of 13 November 2026).
+  const openers = (name) => ({ cmd: "C:\\Windows\\System32\\cmd.exe", open: "/usr/bin/open", sh: "/bin/sh", "xdg-open": "/usr/bin/xdg-open" })[name] ?? null;
+  assert.equal(await screen.show("C:\\Temp\\card.png", { platform: "win32", environ: {}, which: openers, run: run(0) }), "windows");
+  assert.deepEqual(ran[0], [["C:\\Windows\\System32\\cmd.exe", "/d", "/s", "/c", '"start "" "C:\\Temp\\card.png""'], 15, { verbatim: true }], "Windows opens it with start through cmd by its full path, the title left empty and the path inside quotes of the line's own");
+  assert.equal(await screen.show("C:\\Users\\R&D\\Temp\\card.png", { platform: "win32", environ: { COMSPEC: "cmd.exe" }, which: openers, run: run(0) }), "windows");
+  assert.deepEqual(ran.pop()[0], ["C:\\Windows\\System32\\cmd.exe", "/d", "/s", "/c", '"start "" "C:\\Users\\R&D\\Temp\\card.png""'], "an ampersand in a folder's name stays inside the quotes, and a COMSPEC that names no full path is not what starts");
   for (const odd of ["C:\\Temp\\%TEMP%\\card.png", 'C:\\Temp\\a"b\\card.png']) {
-    const changed = await caught(() => screen.show(odd, { platform: "win32", environ: {}, run: run(0) }));
+    const changed = await caught(() => screen.show(odd, { platform: "win32", environ: {}, which: openers, run: run(0) }));
     assert.ok(changed instanceof Unreachable && changed.reason === "viewer_failed" && changed.fix.includes("which the command line would change"), odd);
   }
-  assert.equal(await screen.show("C:\\Users\\100%\\Temp\\card.png", { platform: "win32", environ: {}, run: run(0) }), "windows", "one percent sign names nothing");
+  assert.equal(await screen.show("C:\\Users\\100%\\Temp\\card.png", { platform: "win32", environ: {}, which: openers, run: run(0) }), "windows", "one percent sign names nothing");
   ran.pop();
   assert.equal(ran.length, 1, "what the command line would change was not handed to it");
-  assert.equal(await screen.show("/tmp/card.png", { platform: "darwin", environ: {}, run: run(0) }), "open");
-  assert.deepEqual(ran[1][0], ["open", "/tmp/card.png"]);
-  assert.equal(await screen.show("/tmp/card.png", { platform: "linux", environ: { WAYLAND_DISPLAY: "wayland-0" }, which: () => "/usr/bin/xdg-open", run: run(0) }), "xdg-open");
-  assert.deepEqual(ran[2][0], ["sh", "-c", 'xdg-open "$1" >/dev/null 2>&1 &', "sh", "/tmp/card.png"], "Linux with xdg-open in the background, the path as an argument and never in the script");
-  assert.equal(await screen.show("/tmp/card.png", { platform: "linux", environ: { DISPLAY: ":0" }, which: () => "/usr/bin/xdg-open", run: run(0) }), "xdg-open");
-  const none = await caught(() => screen.show("/tmp/card.png", { platform: "linux", environ: {}, which: () => "/usr/bin/xdg-open", run: run(0) }));
+  assert.equal(await screen.show("/tmp/card.png", { platform: "darwin", environ: {}, which: openers, run: run(0) }), "open");
+  assert.deepEqual(ran[1][0], ["/usr/bin/open", "/tmp/card.png"], "macOS with open, by its full path");
+  assert.equal(await screen.show("/tmp/card.png", { platform: "linux", environ: { WAYLAND_DISPLAY: "wayland-0" }, which: openers, run: run(0) }), "xdg-open");
+  assert.deepEqual(ran[2][0], ["/bin/sh", "-c", '"$1" "$2" >/dev/null 2>&1 &', "sh", "/usr/bin/xdg-open", "/tmp/card.png"], "Linux with xdg-open in the background, sh and xdg-open by their full paths, the path an argument and never in the script");
+  assert.equal(await screen.show("/tmp/card.png", { platform: "linux", environ: { DISPLAY: ":0" }, which: openers, run: run(0) }), "xdg-open");
+  const none = await caught(() => screen.show("/tmp/card.png", { platform: "linux", environ: {}, which: openers, run: run(0) }));
   const viewer = await caught(() => screen.show("/tmp/card.png", { platform: "linux", environ: { DISPLAY: ":0" }, which: () => null, run: run(0) }));
-  const failed = await caught(() => screen.show("C:\\card.png", { platform: "win32", environ: {}, run: run(1) }));
-  const mac = await caught(() => screen.show("/tmp/card.png", { platform: "darwin", environ: {}, run: run(1) }));
+  const failed = await caught(() => screen.show("C:\\card.png", { platform: "win32", environ: {}, which: openers, run: run(1) }));
+  const mac = await caught(() => screen.show("/tmp/card.png", { platform: "darwin", environ: {}, which: openers, run: run(1) }));
   assert.deepEqual([none.reason, viewer.reason, failed.reason, mac.reason], ["no_screen", "no_viewer", "viewer_failed", "viewer_failed"]);
   assert.ok([none, viewer, failed, mac].every((error) => error instanceof Unreachable && error.answered === false));
   assert.equal(failed.fix, "Windows could not open the picture: could not. Write the code to a file with --out (out over MCP) and show it another way.");
   assert.equal(ran.length, 6, "no display and no viewer start nothing");
+  const noCmd = await caught(() => screen.show("C:\\card.png", { platform: "win32", environ: {}, which: () => null, run: run(0) }));
+  const noOpen = await caught(() => screen.show("/tmp/card.png", { platform: "darwin", environ: {}, which: () => null, run: run(0) }));
+  assert.deepEqual([noCmd.reason, noOpen.reason], ["no_viewer", "no_viewer"]);
+  assert.equal(ran.length, 6, "an opener that is not found starts nothing");
+  const files = new Set(["C:\\work\\cmd.exe", "C:\\Windows\\System32\\cmd.exe", "C:\\work\\ffmpeg.exe", "C:\\Tools\\ffmpeg\\bin\\ffmpeg.exe"]);
+  const lookup = { windows: true, hostWindows: true, cwd: "C:\\work", isProgram: (path) => files.has(path.replace(/\//g, "\\")) };
+  assert.equal(programs.which("cmd", { PATH: ".;C:\\work", SYSTEMROOT: "C:\\Windows" }, lookup), "C:\\Windows\\System32\\cmd.exe", "cmd from the folder Windows keeps it in");
+  assert.equal(programs.which("ffmpeg", { PATH: ".;C:\\work;C:\\Tools\\ffmpeg\\bin" }, lookup).replace(/\//g, "\\"), "C:\\Tools\\ffmpeg\\bin\\ffmpeg.exe", "and ffmpeg from PATH, never the working directory");
 });
 
 // ------------------------------------------------------------------ zbarimg, faked

@@ -207,9 +207,19 @@ export const POW_ADVISE_MAX_BITS: number;
 
 /** The inbox asks for something this client cannot or will not do, so nothing was sent. */
 export class GateStop extends Error {
+  constructor(reason: string, fix: string, why?: string);
+  /** What the stop meant for a message that had not left: nothing was sent. */
   reason: string;
   fix: string;
+  /** Only about the gate: what a stop after a post the inbox refused with 428 is told from. */
+  why: string;
 }
+
+/** What a stop after a 428 says: the message went once and was refused, and why it was not sent again. */
+export function refusedOnce(stop: GateStop): string;
+
+/** Throws a GateStop when the plan's work is estimated past budget seconds; null or undefined is no budget. */
+export function withinBudget(plan: { bits: number | null; expectedSeconds?: number } | null | undefined, budget: number | null | undefined): void;
 
 export function powInput(w: string, key: string | null, bodySha256: string, nonce: string): string;
 export function powDigest(w: string, key: string | null, bodySha256: string, nonce: string): Uint8Array;
@@ -399,6 +409,8 @@ export class Aamio {
   gate(w: string): Promise<Gate>;
   /** How long w still takes writes, counted down from X-Seconds-Left on its gate, or null when the gate did not say. */
   secondsLeft(w: string): number | null;
+  /** Seconds of proof of work one send may do here, or null for as long as it needs. Work estimated past it is not started. */
+  workBudget?: number | null;
   /** The plan for w's gate, read again once before a no that rests on a gate read earlier. */
   planFor(w: string): Promise<{ bits: number | null; required: boolean; notes: string[]; expectedSeconds?: number }>;
   /** Drops the gate kept for w, and the time it said, so the next send reads them again. */

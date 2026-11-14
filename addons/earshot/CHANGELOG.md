@@ -6,6 +6,15 @@ aisenseapi/aamio-earshot, whose changelogs say what each version changed.
 Dates are the day the version was committed. Every entry says what changed for
 somebody using it.
 
+## 0.3.4 - 2026-11-14
+
+- Every program is looked for only in the folders `PATH` names by a full path,
+  never in the working directory, however `PATH` names it, and starts by the
+  full path found: PowerShell from the folder Windows keeps it in, a recorder
+  or a player, and on Windows only an `.exe`. A `PATH` that began with `.` gave
+  back `sox.exe`, a name relative to wherever the agent ran, so a `sox.exe`
+  there ran in place of the installed one.
+
 ## 0.3.3 - 2026-11-12
 
 - The first version for Node. The same add-on as aamio-earshot 0.3.3 for

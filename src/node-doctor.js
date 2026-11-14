@@ -4,7 +4,7 @@
 // aamio-python's (aamio/compat.py and aamio/storage.py), with the same verdicts and the same words, so the three
 // runtimes say the same of one home and one service.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -108,8 +108,9 @@ export function windowsAclFindings(lines, me) {
  * puts its own first, which answers /user with a usage error, and the second way read nothing.
  */
 function systemTool(...parts) {
-  const path = join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", ...parts);
-  return existsSync(path) ? path : parts[parts.length - 1];
+  // Never the bare name, which Windows looks for in the working directory first (a security review of 13 November
+  // 2026): where System32 has no such tool, starting it fails, as it should.
+  return join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", ...parts);
 }
 
 function run(command, args) {
@@ -253,15 +254,21 @@ async function ask(runtime, path) {
   try {
     const response = await runtime.client.fetch(runtime.client.base + path, { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
     const text = await response.text();
+    // Whether the text was JSON is kept beside what it gave: null and "" in JSON
+    // are answers, and were said as an empty body (a review of 13 November 2026).
     let body = null;
+    let json = false;
     try {
-      body = text ? JSON.parse(text) : null;
+      if (text) {
+        body = JSON.parse(text);
+        json = true;
+      }
     } catch {
       body = text;
     }
-    return { status: response.status, body };
+    return { status: response.status, body, json };
   } catch {
-    return { status: 0, body: null };
+    return { status: 0, body: null, json: false };
   }
 }
 
@@ -271,9 +278,8 @@ async function ask(runtime, path) {
  * it is. A 200 from a proxy or a login page in front of the host was said as
  * healthy, beside "answered 200 and not 200" (a check of 13 November 2026).
  */
-function notHealth(body) {
-  if (body === null || body === "") return "an empty body";
-  if (typeof body === "string") return "a body that is not JSON";
+function notHealth(body, json) {
+  if (!json) return body === null || body === "" ? "an empty body" : "a body that is not JSON";
   if (!isObject(body) || body.service !== "aamio" || body.status !== "ok") return "JSON that is not aamio's health answer";
   return null;
 }
@@ -285,7 +291,7 @@ export async function doctor(runtime, version) {
   // both apart from whether this client fits it. A 503 from /health was said
   // as no answer, beside a fit read from the descriptor, which had answered
   // (a check of 13 November 2026). As aamio-python and aamio-php say it.
-  const unlike = health.status === 200 ? notHealth(health.body) : null;
+  const unlike = health.status === 200 ? notHealth(health.body, health.json) : null;
   const service = { host: runtime.host, reachable: health.status > 0, healthy: health.status === 200 && unlike === null, status: health.status };
   if (service.healthy) {
     service.version = health.body.version ?? null;

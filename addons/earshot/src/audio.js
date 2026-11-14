@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 /*
  * Playing a WAV file and recording one, on the machine the add-on runs on.
@@ -66,24 +66,60 @@ function isProgram(candidate, windows) {
   }
 }
 
+
+// Programs Windows brings, where Windows keeps them.
+const SYSTEM = { cmd: ["System32"], powershell: ["System32", "WindowsPowerShell", "v1.0"] };
+
+/** A full path on this machine: with a drive and a root, or a share, on Windows; from the root elsewhere. C:folder and \folder are not. */
+export function isAbsolute(folder, hostWindows = process.platform === "win32") {
+  if (hostWindows) return /^[A-Za-z]:[\\/]/.test(folder) || /^[\\/]{2}[^\\/]+[\\/]+[^\\/]+/.test(folder);
+  return folder.startsWith("/");
+}
+
+function sameFolder(folder, here, hostWindows) {
+  const normal = (path) => {
+    const flat = (hostWindows ? path.replace(/\//g, "\\") : path).replace(hostWindows ? /\\+$/ : /\/+$/, "");
+    return hostWindows ? flat.toLowerCase() : flat;
+  };
+  if (normal(folder) === normal(here)) return true;
+  try {
+    return normal(realpathSync(folder)) === normal(realpathSync(here));
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The full path of a program on PATH, or null. On Windows a program is an
- * .exe or a .com: a batch file needs a shell to run, and nothing here is
- * started through one.
+ * The full path of a program, or null. It looks only in the folders PATH names
+ * by a full path, leaves out the working directory however PATH names it, and
+ * gives back the full path, which is what is started: a sox.exe in the folder
+ * the agent ran from was the one that ran, and a PATH that began with . gave
+ * back sox.exe, a name relative to wherever the agent was (a security review
+ * of 13 November 2026, a review of 14 November). On Windows a program is an
+ * .exe, since a batch file needs a shell and nothing here is started through
+ * one, and cmd and powershell come from the folder Windows keeps them in.
  */
-export function which(name, { env = process.env, windows = process.platform === "win32" } = {}) {
-  const path = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
-  const endings = windows ? ["", ".exe", ".com"] : [""];
-  for (const folder of String(path).split(windows ? ";" : delimiter)) {
-    if (folder === "") continue;
-    for (const ending of endings) {
-      if (windows && ending === "" && !/\.(?:exe|com)$/i.test(name)) continue;
-      const candidate = join(folder.replace(/^"|"$/g, ""), name + ending);
-      if (isProgram(candidate, windows)) return candidate;
-    }
+export function findProgram(name, { env = process.env, windows = process.platform === "win32", cwd = process.cwd(), hostWindows = process.platform === "win32", isProgram: isProgramHere = isProgram } = {}) {
+  const get = (wanted) => Object.entries(env).find(([key]) => key.toUpperCase() === wanted)?.[1];
+  const file = windows && !/\.exe$/i.test(name) ? name + ".exe" : name;
+  const system = windows ? SYSTEM[name.toLowerCase()] : undefined;
+  if (system) {
+    const root = String(get("SYSTEMROOT") || "C:\\Windows");
+    const candidate = [root.replace(/[\\/]+$/, ""), ...system, file].join("\\");
+    if (isAbsolute(root, hostWindows) && isProgramHere(candidate, windows)) return candidate;
+  }
+  for (let folder of String(get("PATH") ?? "").split(windows ? ";" : ":")) {
+    folder = folder.trim();
+    if (windows) folder = folder.replace(/^"|"$/g, "");
+    if (folder === "" || !isAbsolute(folder, hostWindows) || sameFolder(folder, cwd, hostWindows)) continue;
+    const candidate = join(folder, file);
+    if (isProgramHere(candidate, windows)) return candidate;
   }
   return null;
 }
+
+/** The same lookup, by the name it has had here. The same as the QRCast add-on's, and as aamio-python's and aamio-php's add-ons find their programs. */
+export const which = findProgram;
 
 function lastLine(text) {
   const lines = String(text ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);

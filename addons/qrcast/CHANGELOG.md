@@ -5,6 +5,15 @@ committed; it is tagged on release, and the two are the same day. Every entry
 says what changed for somebody using it. The version is the one the add-on has
 for aamio-python and aamio-php, and a number says the same of all three.
 
+## 0.1.3 - 2026-11-14
+
+- zbarimg, ffmpeg and the openers of a picture start by their full path:
+  `cmd` from the folder Windows keeps it in, and `open`, `sh` and `xdg-open`
+  from the folders `PATH` names by a full path, never the working directory.
+  `COMSPEC` is no longer what starts. A `PATH` that began with `.` gave back a
+  name relative to wherever the agent ran. winget's link folder is looked in
+  only through a `LOCALAPPDATA` that is a full path.
+
 ## 0.1.2 - 2026-11-12
 
 - The first version for Node. `aamio addon qrcast card`, `show`, `read` and

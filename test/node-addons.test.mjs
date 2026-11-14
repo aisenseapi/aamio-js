@@ -482,9 +482,12 @@ test("only the environment the manifest declares is passed, and none of it to th
   const [manifest] = await loaded(home, core);
   const answer = (await run(manifest, "command", "ping", {})).result;
   assert.deepEqual([answer.passthru, answer.secret, answer.home_env, answer.addons_env, answer.addon_env], ["declared", null, null, null, "2"]);
-  const env = childEnvironment(manifest, true, { Path: "p", HTTPS_PROXY: "http://user:word@proxy", https_proxy: "x", NODE_USE_ENV_PROXY: "1", NODE_OPTIONS: "--inspect", GITHUB_TOKEN: "t", AAMIO_HOME: home, AAMIO_TEST_PASSTHRU: "d", LANG: "nb_NO.UTF-8" });
+  const env = childEnvironment(manifest, true, { Path: "p", HTTPS_PROXY: "http://user:word@proxy", https_proxy: "x", NODE_USE_ENV_PROXY: "1", NODE_OPTIONS: "--inspect", GITHUB_TOKEN: "t", AAMIO_HOME: home, AAMIO_TEST_PASSTHRU: "d", LANG: "nb_NO.UTF-8" }, false);
   assert.deepEqual(env, { Path: "p", HTTPS_PROXY: "http://user:word@proxy", https_proxy: "x", NODE_USE_ENV_PROXY: "1", AAMIO_TEST_PASSTHRU: "d", LANG: "nb_NO.UTF-8", AAMIO_ADDON: "2" });
-  assert.deepEqual(Object.keys(childEnvironment(manifest, false, { AAMIO_TEST_PASSTHRU: "d", AAMIO_ADDON: "9" })), ["AAMIO_ADDON"]);
+  assert.deepEqual(Object.keys(childEnvironment(manifest, false, { AAMIO_TEST_PASSTHRU: "d", AAMIO_ADDON: "9" }, false)), ["AAMIO_ADDON"]);
+  // On Windows the process is told not to look in the working directory for a program it starts by a bare name,
+  // set last whatever case it came in (a security review of 13 November 2026).
+  assert.deepEqual(childEnvironment(manifest, true, { Path: "p", nodefaultcurrentdirectoryinexepath: "0", AAMIO_TEST_PASSTHRU: "d" }, true), { Path: "p", AAMIO_TEST_PASSTHRU: "d", AAMIO_ADDON: "2", NoDefaultCurrentDirectoryInExePath: "1" });
 });
 
 test("at most two calls of one add-on at once, and twenty a minute", () => {

@@ -101,13 +101,25 @@ function failure(manifest, reason, fix) {
 }
 
 /** What the process gets of the environment: the short list, and what its manifest declared it reads, when set and when this is a call and not the probe at enable. Never the home or the user's rest. */
-export function childEnvironment(manifest, declared, from = process.env) {
+// Set for the process on Windows, so that a program it starts by a bare name
+// is not looked for in the working directory.
+export const NO_CURRENT_DIRECTORY = "NoDefaultCurrentDirectoryInExePath";
+
+export function childEnvironment(manifest, declared, from = process.env, windows = process.platform === "win32") {
   const env = {};
   for (const [key, value] of Object.entries(from)) {
     if (value === undefined) continue;
     if (ENVIRONMENT.has(key.toUpperCase()) || (declared && manifest.environment.includes(key))) env[key] = value;
   }
   env.AAMIO_ADDON = "2";
+  // Last, after what the manifest declared, and whatever case it came in: on
+  // Windows the process does not look in the working directory for a program
+  // it starts by a bare name (a security review of 13 November 2026). The
+  // add-ons start theirs by a full path as well; this is for anything else.
+  if (windows) {
+    for (const key of Object.keys(env)) if (key.toUpperCase() === NO_CURRENT_DIRECTORY.toUpperCase()) delete env[key];
+    env[NO_CURRENT_DIRECTORY] = "1";
+  }
   return env;
 }
 

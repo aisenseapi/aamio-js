@@ -53,7 +53,8 @@ export function findFfmpeg(which = programs.which, platform = programs.platform(
   const found = which("ffmpeg");
   if (found !== null) return found;
   const base = environ.LOCALAPPDATA;
-  if (platform === "win32" && typeof base === "string" && base !== "") {
+  // A LOCALAPPDATA that is no full path would be the working directory.
+  if (platform === "win32" && typeof base === "string" && base !== "" && programs.isAbsolute(base)) {
     const link = join(base, ...WINGET_LINK);
     if (isFile(link)) return link;
   }

@@ -26,23 +26,33 @@ export async function show(path, { platform = programs.platform(), environ = pro
     // The title start takes first is left empty, so the path is never read as one, and the path is inside quotes
     // of this line's own, whatever is in it: an ampersand in a folder's name is part of the name and not the end
     // of the command. /s takes the outer pair of quotes away and leaves the rest as it is written.
-    const [code, , err] = await run([environ.COMSPEC || environ.ComSpec || "cmd.exe", "/d", "/s", "/c", `"start "" "${path}""`], WAIT, { verbatim: true });
+    // cmd from the folder Windows keeps it in, by its full path: by a bare name
+    // it was looked for in the working directory first (a security review of 13
+    // November 2026).
+    const cmd = which("cmd", environ);
+    if (cmd === null) throw new Unreachable("no_viewer", `Nothing here opens a picture: cmd is not where Windows keeps it. ${OTHER_WAY}`);
+    const [code, , err] = await run([cmd, "/d", "/s", "/c", `"start "" "${path}""`], WAIT, { verbatim: true });
     if (code !== 0) throw new Unreachable("viewer_failed", `Windows could not open the picture: ${programs.lastLine(err)}. ${OTHER_WAY}`);
     return "windows";
   }
   if (platform === "darwin") {
-    const [code, , err] = await run(["open", path], WAIT);
+    const open = which("open", environ);
+    if (open === null) throw new Unreachable("no_viewer", `Nothing here opens a picture: open is not in any folder PATH names. ${OTHER_WAY}`);
+    const [code, , err] = await run([open, path], WAIT);
     if (code !== 0) throw new Unreachable("viewer_failed", `open could not open the picture: ${programs.lastLine(err)}. ${OTHER_WAY}`);
     return "open";
   }
   if (!environ.DISPLAY && !environ.WAYLAND_DISPLAY) {
     throw new Unreachable("no_screen", "This machine has no screen the add-on can reach: neither DISPLAY nor WAYLAND_DISPLAY is set. Write the code to a file with --out (out over MCP) and show it where it can be seen.");
   }
-  if (which("xdg-open") === null) {
+  const xdg = which("xdg-open", environ);
+  if (xdg === null) {
     throw new Unreachable("no_viewer", `Nothing here opens a picture: xdg-open is missing. Install xdg-utils, or write the code to a file with --out (out over MCP) and show it another way.`);
   }
-  // The path is an argument to the script and never part of it.
-  const [code, , err] = await run(["sh", "-c", 'xdg-open "$1" >/dev/null 2>&1 &', "sh", path], WAIT);
+  const sh = which("sh", environ);
+  if (sh === null) throw new Unreachable("no_viewer", `Nothing here opens a picture: sh is not in any folder PATH names. ${OTHER_WAY}`);
+  // Both by their full paths, and the path of the picture an argument to the script, never part of it.
+  const [code, , err] = await run([sh, "-c", '"$1" "$2" >/dev/null 2>&1 &', "sh", xdg, path], WAIT);
   if (code !== 0) throw new Unreachable("viewer_failed", `xdg-open could not be started: ${programs.lastLine(err)}. ${OTHER_WAY}`);
   return "xdg-open";
 }

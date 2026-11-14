@@ -1,0 +1,30 @@
+// per_key without allow, answered here with a name from the address book. The service's advice for such a gate is
+// allow ["*"], a list of keys. Here allow takes partner names, and "*" was answered unknown_partner (a review of 13
+// November 2026). The service is not asked.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Keys } from "../src/aamio.js";
+import { initIdentity } from "../src/node-identity.js";
+import { NodeRuntime } from "../src/node-runtime.js";
+import { BOARD, FakeAamio } from "./fake-aamio.mjs";
+
+test("per_key without allow is answered here with a name from the address book, and the service is not asked", async (t) => {
+  const fake = new FakeAamio();
+  const root = await mkdtemp(join(tmpdir(), "aamio-node-perkey-"));
+  const home = join(root, "home");
+  await initIdentity(home);
+  const runtime = await NodeRuntime.open({ home, host: "https://fake.aamio", board: BOARD, fetch: (url, init) => fake.fetch(url, init), clock: () => fake.time });
+  t.after(async () => {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  runtime.client.open = async () => assert.fail("the service was asked");
+  const gate = { require: { per_key: 5 } };
+  await assert.rejects(runtime.channelOpen("deal", { gate }), (error) => error.code === "invalid_gate" && error.message.includes("aamio partner add NAME KEY") && !error.message.includes("*"));
+  await runtime.partnerAdd("bob", Keys.generate().public);
+  await assert.rejects(runtime.channelOpen("deal", { gate }), (error) => error.message.includes('allow: ["bob"] over MCP, or --allow bob on the command line'));
+  await assert.rejects(runtime.channelOpen("deal", { allow: ["*"], gate }), (error) => error.code === "unknown_partner");
+});
