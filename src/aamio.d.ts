@@ -213,13 +213,20 @@ export class GateStop extends Error {
   fix: string;
   /** Only about the gate: what a stop after a post the inbox refused with 428 is told from. */
   why: string;
+  /** True when the stop was the budget of the call, not the inbox. */
+  budget?: boolean;
 }
 
 /** What a stop after a 428 says: the message went once and was refused, and why it was not sent again. */
 export function refusedOnce(stop: GateStop): string;
 
-/** Throws a GateStop when the plan's work is estimated past budget seconds; null or undefined is no budget. */
-export function withinBudget(plan: { bits: number | null; expectedSeconds?: number } | null | undefined, budget: number | null | undefined): void;
+/** Throws a GateStop, with budget true, when the plan's work is estimated past budget seconds; null or undefined is no budget. fix is the advice, BUDGET_FIX unless given. */
+export function withinBudget(plan: { bits: number | null; expectedSeconds?: number } | null | undefined, budget: number | null | undefined, fix?: string): void;
+
+/** The advice after a stop at the budget where a runtime stopped it: do it again from the command line. */
+export const BUDGET_FIX: string;
+/** The advice after a stop at the budget in the library's own send: raise workBudget or leave it unset. */
+export const LIBRARY_BUDGET_FIX: string;
 
 export function powInput(w: string, key: string | null, bodySha256: string, nonce: string): string;
 export function powDigest(w: string, key: string | null, bodySha256: string, nonce: string): Uint8Array;

@@ -239,7 +239,11 @@ export const PER_KEY_WHY = "a gate that requires per_key needs allow: messages a
 export function perKeyFix(names) {
   const named = names.find((name) => name);
   if (named === undefined) return "Add the partners who may write to the address book first, with aamio partner add NAME KEY (aamio_partner_add over MCP), and name them in allow.";
-  return `Name the partners who may write in allow, as allow: ["${named}"] over MCP, or --allow ${named} on the command line, and open the channel again.`;
+  // As JSON writes it, and on the command line only a name no shell changes: a
+  // name with a space or a quote was given unquoted, and was not one argument or
+  // not JSON (a review of 14 November 2026).
+  const line = /^[A-Za-z0-9._-]+$/.test(named) ? `--allow ${named} on the command line` : named.includes(",") ? "on the command line --allow takes names apart at commas, so this one is named over MCP" : "--allow on the command line with the name quoted as your shell quotes it";
+  return `Name the partners who may write in allow, as allow: ${JSON.stringify([named])} over MCP, or ${line}, and open the channel again.`;
 }
 
 const GATE_SHAPE = 'A gate is an object with "require", "advise" or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}. require refuses a write that does not meet it; advise lets the write in and reports on it.';
@@ -1660,6 +1664,11 @@ export class NodeRuntime {
     // What an earlier attempt left open stays open, whatever this one is
     // answered: read here, before the status is written over.
     if (outboxOpen(entry)) entry.ever_open = true;
+    // And what an earlier attempt left, for a stop before this one posts: it
+    // settles nothing about them, so a message that could be sent again still
+    // can, and a retry from the command line finds it (a review of 14 November
+    // 2026). Only a message that had not left before is stopped.
+    const before = entry.attempts ? entry.status : null;
     entry.attempts = (entry.attempts || 0) + 1;
     entry.status = "sending";
     try {
@@ -1686,7 +1695,7 @@ export class NodeRuntime {
     } catch (error) {
       if (!(error instanceof GateStop)) throw error;
       // Nothing left this machine for this decision, unless an earlier attempt is still open.
-      entry.status = entry.ever_open ? "unknown" : "stopped";
+      entry.status = entry.ever_open ? "unknown" : before && before !== "sending" && before !== "working" ? before : "stopped";
       entry.error = error.reason ?? error.message;
       entry.last_at = Math.floor(this.now());
       await this.saveOutbox();
@@ -1790,6 +1799,8 @@ export class NodeRuntime {
           // attempt left open, are said beside the gate's own words.
           if (error instanceof GateStop) {
             Object.assign(error, { message_id: entry.id, outcome: outboxOutcome(entry) });
+            // The message is kept as it was, and the command line can send it.
+            if (error.budget) error.fix = `Message ${entry.id} is kept as it was, with the same bytes: aamio outbox retry --id ${entry.id} on the command line sends them again, with the work done there.`;
             if (outboxOpen(entry)) error.earlier_attempt = `This stop is about this attempt only. ${EARLIER_ATTEMPT} When the gate can be met, ${RETRY_SAME_ID}`;
           }
         }
@@ -2065,8 +2076,11 @@ export class NodeRuntime {
     let handover = null;
     if (handing) {
       const { w: replyTo, key } = await this.recipient(to);
-      // The gate of the inbox the address goes to, read as a send reads it.
+      // The gate of the inbox the address goes to, read as a send reads it,
+      // and held to the budget before anything is opened: a channel was opened
+      // and then left with nobody told its address (a review of 14 November 2026).
       const advice = await this.client.planFor(replyTo);
+      withinBudget(advice, this.workBudget ?? null);
       this.handoverFits(key, ttl, note);
       if (!keys.includes(key)) keys.push(key);
       handover = { replyTo, key, advice };
@@ -2114,6 +2128,7 @@ export class NodeRuntime {
     let advice = null;
     if (handing) {
       advice = await this.client.planFor(replyTo);
+      withinBudget(advice, this.workBudget ?? null);
       this.handoverFits(theirs, ttl, note);
     }
     const channel = await this.openChannelThread(name, [theirs], ttl);

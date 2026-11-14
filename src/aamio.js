@@ -558,15 +558,24 @@ export function refusedOnce(stop) {
  * null where the work may take what it needs. An estimate, not a promise: the
  * work is a lottery, and one in a hundred takes about 4.6 times as long.
  */
-export function withinBudget(plan, budget) {
+export function withinBudget(plan, budget, fix = BUDGET_FIX) {
   if (budget === null || budget === undefined || !plan || !plan.bits || !(plan.expectedSeconds > budget)) return;
   const why = `This inbox requires proof of work of ${plan.bits} bits, which takes about ${describeSeconds(plan.expectedSeconds)} on this machine, longer than a tool call is given here, so the work was not started`;
-  throw new GateStop(
-    `${why} and nothing was sent.`,
-    "Send it from the command line, where the work has the time it needs: the same bytes are kept under this message id, and aamio outbox retry sends them.",
-    why,
-  );
+  const stop = new GateStop(`${why} and nothing was sent.`, fix, why);
+  // Said, so that a retry can tell its own advice from the gate's (a review of 14 November 2026).
+  stop.budget = true;
+  throw stop;
 }
+
+/**
+ * What to do after a stop at the budget, where it came. A stop before the first post sent nothing, and one after
+ * a 428 left a refusal: neither is in the outbox to be sent again, so the advice is to do the same where the work
+ * has the time it needs. It told everyone that aamio outbox retry sends the stored bytes, which it does not do for
+ * either (a review of 14 November 2026). A retry of a message whose earlier attempt is still open says otherwise,
+ * with its id; and the library, which has no outbox, says its own.
+ */
+export const BUDGET_FIX = "Do it again from the command line, where the work has the time it needs: the command line is not held to the time of a tool call.";
+export const LIBRARY_BUDGET_FIX = "Send it with a larger workBudget, or with none, where the work may take the time it needs.";
 
 /** What work is computed over. key is the X-Key as sent, or empty for an unsigned message. */
 export const powInput = (w, key, bodySha256, nonce) => "aamio-pow-v1\n" + w + "\n" + (key || "") + "\n" + bodySha256 + "\n" + nonce;
@@ -1271,7 +1280,7 @@ export class Aamio {
     const key = headers["X-Key"] || "";
     const advice = await this.planFor(w);
     let notes = advice.notes;
-    withinBudget(advice, this.workBudget);
+    withinBudget(advice, this.workBudget, LIBRARY_BUDGET_FIX);
     if (advice.bits) headers["X-Work"] = this.work(w, key, text, advice.bits);
 
     let result;
@@ -1291,7 +1300,7 @@ export class Aamio {
       let asked;
       try {
         asked = gatePlan(gate, w, this.base, this.secondsLeft(w));
-        withinBudget(asked, this.workBudget);
+        withinBudget(asked, this.workBudget, LIBRARY_BUDGET_FIX);
         if (asked.bits && asked.bits !== advice.bits) headers["X-Work"] = this.work(w, key, text, asked.bits);
       } catch (stop) {
         if (!(stop instanceof GateStop)) throw stop;

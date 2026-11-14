@@ -18,6 +18,8 @@ import { BOARD, FakeAamio } from "./fake-aamio.mjs";
 const HOST = "https://fake.aamio";
 const w = "q".repeat(20);
 const heavy = { require: { pow: { bits: 24, covers: 1 } } };
+// Estimated, so past a budget of TINY, and done in about a second here.
+const heavy18 = { require: { pow: { bits: 18, covers: 1 } } };
 // A budget no work of 24 bits fits in, on any machine, so no test rests on its speed or on luck.
 const TINY = 0.000001;
 
@@ -59,7 +61,7 @@ test("a gate a 428 names is held to the budget, and the one post that went is th
   const answer = await runtime.deliver(entry, gatePlan({}, w, HOST, 3600));
   assert.equal(posts.length, 1);
   assert.equal(answer.status, 428);
-  assert.match(answer.result.fix, /^The message went once and the inbox refused it with 428, and it was not sent again\. This inbox requires proof of work of 24 bits.*longer than a tool call is given here, so the work was not started\. Send it from the command line/);
+  assert.match(answer.result.fix, /^The message went once and the inbox refused it with 428, and it was not sent again\. This inbox requires proof of work of 24 bits.*longer than a tool call is given here, so the work was not started\. Do it again from the command line/);
   assert.ok(!answer.result.fix.includes("nothing was sent"), "a message that went is never said to have sent nothing");
   assert.equal(entry.status, "refused", "recorded as the refusal it was, not as a message that never left");
 });
@@ -79,7 +81,7 @@ test("a retry stopped before it posts leaves an unknown unknown, with its id and
   runtime.client.gates.set(w, heavy);
   runtime.client.gateLeft.set(w, [3600, Date.now()]);
   runtime.workBudget = TINY;
-  await assert.rejects(runtime.outboxRetry(), (error) => error instanceof GateStop && error.message_id === entry.id && error.reason.includes("not started"));
+  await assert.rejects(runtime.outboxRetry(), (error) => error instanceof GateStop && error.message_id === entry.id && error.reason.includes("not started") && error.fix === `Message ${entry.id} is kept as it was, with the same bytes: aamio outbox retry --id ${entry.id} on the command line sends them again, with the work done there.`);
   assert.deepEqual(posts, []);
   assert.equal(entry.status, "unknown");
   assert.equal(entry.ever_open, true);
@@ -114,8 +116,8 @@ test("the library's send keeps a budget its caller sets, before the work and aft
   };
   const client = new Aamio({ keys: Keys.generate(), fetch });
   client.workBudget = TINY;
-  await assert.rejects(client.send(w, "hello"), (error) => error instanceof GateStop && error.reason.includes("not started"));
-  assert.equal(posts.length, 0);
+  await assert.rejects(client.send(w, "hello"), (error) => error instanceof GateStop && error.reason.includes("not started") && error.fix.includes("workBudget") && !error.fix.includes("outbox"));
+  assert.equal(posts.length, 0, "and the library, which has no outbox, says what its caller can do");
   gateNext = {};
   client.forgetGate(w);
   await assert.rejects(client.send(w, "hello"), (error) => error instanceof AamioError && error.status === 428 && String(error.body.fix).startsWith("The message went once and the inbox refused it with 428") && error.stop.includes("longer than a tool call"));
@@ -136,4 +138,76 @@ test("the MCP server gives a tool call forty seconds of work", async (t) => {
   await serveMcp({ home, version: "test", runtime, input: Readable.from([]), output: new PassThrough() });
   assert.equal(WORK_BUDGET, 40);
   assert.equal(runtime.workBudget, 40);
+});
+
+
+test("the advice after a stop at the budget can be followed", async (t) => {
+  // The advice was that aamio outbox retry sends the stored bytes, and a retry sends neither a message stopped before it
+  // left nor one an inbox refused with 428 (a review of 14 November 2026). Those two are done again, and go; a retry of
+  // a message still open, or one a rate window turned away, is told its id and sent with the same bytes.
+  const { runtime, posts, entry } = await runtimeFor(t);
+  runtime.workBudget = TINY;
+  await assert.rejects(runtime.deliver(entry, gatePlan(heavy18, w, HOST, 3600)), (error) => error instanceof GateStop && !error.fix.includes("outbox retry") && error.fix.startsWith("Do it again from the command line"));
+  assert.equal(entry.status, "stopped");
+  assert.deepEqual(await runtime.outboxRetry(entry.id), [], "a stopped message is no retry's, which is why the advice does not say so");
+  runtime.workBudget = null;
+  const again = await runtime.outboxAdd(w, Keys.generate().public, "sealed again", { text: "x" });
+  assert.equal((await runtime.deliver(again, gatePlan(heavy18, w, HOST, 3600))).status, 201, "done again from the command line, it goes");
+  assert.equal(typeof posts.at(-1), "string");
+
+  // A retry of a message still open and of one a rate window turned away: kept as they were, then sent with the same bytes.
+  const open = await runtime.outboxAdd("v".repeat(20), Keys.generate().public, "open bytes", { text: "o" });
+  Object.assign(open, { status: "unknown", ever_open: true, attempts: 1, last_status: 0 });
+  const later = await runtime.outboxAdd("x".repeat(20), Keys.generate().public, "later bytes", { text: "l" });
+  Object.assign(later, { status: "refused", attempts: 1, last_status: 429 });
+  for (const one of [open, later]) {
+    runtime.client.gates.set(one.w, heavy18);
+    runtime.client.gateLeft.set(one.w, [3600, Date.now()]);
+  }
+  runtime.workBudget = TINY;
+  const sentBefore = posts.length;
+  for (const one of [open, later]) {
+    await assert.rejects(runtime.outboxRetry(one.id), (error) => error instanceof GateStop && error.fix.includes(`aamio outbox retry --id ${one.id}`));
+  }
+  assert.deepEqual([open.status, later.status, posts.length], ["unknown", "refused", sentBefore], "a stop before the post changes nothing about what the attempts before it left");
+  runtime.workBudget = null;
+  for (const one of [open, later]) {
+    const [row] = await runtime.outboxRetry(one.id);
+    assert.equal(row.status, "delivered", one.id);
+  }
+  assert.equal(posts.length, sentBefore + 2);
+});
+
+test("a channel is not opened when the address it goes to asks for more work than the call may take", async (t) => {
+  // channelOpen and channelOpenWith read the plan and held it to the budget only after the channel was open: one new
+  // channel and one new thread, and no message (a review of 14 November 2026).
+  const fake = new FakeAamio();
+  const root = await mkdtemp(join(tmpdir(), "aamio-node-budget-channel-"));
+  const opened = [];
+  t.after(async () => {
+    for (const one of opened) await one.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const open = async (name) => {
+    const home = join(root, name);
+    await initIdentity(home);
+    const runtime = await NodeRuntime.open({ home, host: HOST, board: BOARD, fetch: (url, init) => fake.fetch(url, init), clock: () => fake.time });
+    opened.push(runtime);
+    return runtime;
+  };
+  const owner = await open("owner");
+  const guest = await open("guest");
+  await owner.partnerAdd("guest", guest.keys.public);
+  await guest.partnerAdd("owner", owner.keys.public);
+  await owner.read();
+  await guest.read();
+  const guestInbox = guest.state.channels.find((channel) => channel.label === "inbox").w;
+  fake.gates.set(guestInbox, heavy);
+  owner.workBudget = TINY;
+  const threads = fake.threads.size;
+  const channels = owner.state.channels.length;
+  await assert.rejects(owner.channelOpen("budget-check", { to: "guest" }), (error) => error instanceof GateStop && error.reason.includes("not started"));
+  await assert.rejects(owner.channelOpenWith(guest.keys.public, { replyTo: guestInbox }), (error) => error instanceof GateStop && error.reason.includes("not started"));
+  assert.equal(fake.threads.size, threads, "no thread was opened");
+  assert.equal(owner.state.channels.length, channels, "and no channel kept here");
 });

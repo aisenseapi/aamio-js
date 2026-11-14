@@ -16,12 +16,19 @@ not what moved in the source.
 - Proof of work inside a call is held to the time a tool call has over MCP,
   forty seconds, as in aamio-php and aamio-python: work estimated past it is
   not started, for a send, a board answer, a channel handed over, a retry from
-  the outbox and a gate a 428 names, and the stop says to send from the
-  command line, where the work has the time it needs. Every send did its work
+  the outbox and a gate a 428 names, and the stop says to do it again from the
+  command line, where the work has the time it needs. A retry that stops
+  before it posts leaves the message as it was and names it, so that `aamio
+  outbox retry --id` sends the same bytes there. A channel whose address asks
+  for more work than the call may take is not opened. Every send did its work
   in the call, however long, with the event loop held: 26 bits is about four
   minutes here. Where it is the inbox that closes first, the advice is a
   longer inbox or more compute. The library's `send` keeps a `workBudget` its
-  caller sets.
+  caller sets, and says to raise it or leave it unset.
+- On Linux the lock of a home and of its add-ons starts `flock` by its full
+  path, from the folders `PATH` names by a full path and never the working
+  directory. By a bare name it was looked for in an empty or a relative entry
+  of `PATH` too.
 - A stop after a post the inbox refused with 428 is recorded as that refusal,
   with why it was not sent again. It was recorded as a message that never
   left, and it had gone once.
@@ -32,7 +39,8 @@ not what moved in the source.
   refused here, before the service is asked, with a partner from the address
   book as the example, or how to add one first. The service's advice for such
   a gate, `allow: ["*"]`, is a list of keys, and here `allow` takes partner
-  names: the star was answered `unknown_partner`.
+  names: the star was answered `unknown_partner`. The example is written as
+  JSON, and as a command line only for a name no shell changes.
 
 ## 0.7.2 - 2026-11-13
 

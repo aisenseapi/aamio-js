@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, realpathSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
@@ -68,13 +68,45 @@ async function holdWithOpen(home, path, flags, busy) {
   return { release: () => handle.close() };
 }
 
+/**
+ * flock by its full path, from the folders PATH names by a full path and never the working directory, however PATH
+ * names it. By a bare name it was looked for in every folder PATH names, an empty or a relative one too, so a flock in
+ * the working directory could be what ran (a review of 14 November 2026). A path given is used as it is.
+ */
+export function flockPath(name, env = process.env, cwd = process.cwd()) {
+  if (name.includes("/")) return name;
+  const real = (path) => {
+    try {
+      return realpathSync(path).replace(/\/+$/, "");
+    } catch {
+      return null;
+    }
+  };
+  const here = real(cwd) ?? String(cwd).replace(/\/+$/, "");
+  for (const folder of String(env.PATH ?? "").split(":")) {
+    if (!folder.startsWith("/")) continue;
+    const where = real(folder);
+    if (where === null || where === here) continue;
+    const candidate = join(folder, name);
+    try {
+      const found = statSync(candidate);
+      if (found.isFile() && (found.mode & 0o111) !== 0) return candidate;
+    } catch {
+      // Not in this folder: the next one.
+    }
+  }
+  return null;
+}
+
 /** Pass Node's descriptor as fd 3. flock(1) exits before the caller starts serving. */
 async function holdWithFlock(home, path, command) {
   const conflict = 42; // Outside util-linux's sysexits range and distinct from generic failure (1).
+  const program = flockPath(command);
+  if (program === null) throw unavailable(home, path, "the flock command was not found: install util-linux");
   let handle;
   try {
     handle = await open(path, constants.O_RDWR | constants.O_CREAT, 0o600);
-    const child = spawn(command, ["-x", "-n", "-E", String(conflict), "3"], {
+    const child = spawn(program, ["-x", "-n", "-E", String(conflict), "3"], {
       stdio: ["ignore", "ignore", "pipe", handle.fd],
     });
     let diagnostic = "";

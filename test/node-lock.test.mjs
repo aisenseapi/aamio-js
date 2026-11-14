@@ -6,12 +6,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { initIdentity } from "../src/node-identity.js";
-import { holdOwnerLock, OWNER_LOCK, PID_FILE, takeHome } from "../src/node-lock.js";
+import { flockPath, holdOwnerLock, OWNER_LOCK, PID_FILE, takeHome } from "../src/node-lock.js";
 
 const bin = fileURLToPath(new URL("../bin/aamio.js", import.meta.url));
 const workspace = fileURLToPath(new URL("../../", import.meta.url));
@@ -201,6 +201,33 @@ test("on Linux, Node still owns the lock after flock exits", { skip: process.pla
   }
   const next = await holdOwnerLock(path);
   await next.release();
+});
+
+test("on Linux, flock is never the one in the working directory, and the lock still keeps a second holder out", { skip: process.platform !== "linux" }, async (t) => {
+  // By a bare name flock was looked for in every folder PATH names, an empty or a relative one too (a review of 14
+  // November 2026). Here a harmless flock in the working directory leaves a mark if it is ever run.
+  const path = await mkdtemp(join(tmpdir(), "aamio-lock-flock-"));
+  t.after(() => rm(path, { recursive: true, force: true }));
+  const work = join(path, "work");
+  await mkdir(work);
+  const mark = join(path, "planted-ran");
+  await writeFile(join(work, "flock"), `#!/bin/sh\ntouch "${mark}"\nexit 0\n`, { mode: 0o755 });
+  const before = { path: process.env.PATH, cwd: process.cwd() };
+  process.env.PATH = [".", "", work, before.path].join(":");
+  process.chdir(work);
+  t.after(() => {
+    process.env.PATH = before.path;
+    process.chdir(before.cwd);
+  });
+  const found = flockPath("flock");
+  assert.ok(found !== null && found.startsWith("/") && !found.startsWith(work), found);
+  const home = join(path, "home");
+  await mkdir(home);
+  const holder = await holdOwnerLock(home);
+  assert.ok(holder, "the lock is taken with the real flock");
+  assert.equal(await holdOwnerLock(home), null, "and a second holder is kept out by the system's lock");
+  await holder.release();
+  assert.ok(!existsSync(mark), "the flock in the working directory never ran");
 });
 
 test("on Linux, a generic flock failure is reported as unavailable", { skip: process.platform !== "linux" }, async (t) => {
