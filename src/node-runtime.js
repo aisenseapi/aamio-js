@@ -260,12 +260,24 @@ export function checkGate(gate) {
  * 2026).
  */
 export const BODY_MAX_DEPTH = 64;
+// How far back from the end of a channel's archive a read looks for a delivery
+// an earlier process wrote down and did not get past with its cursor.
+const ARCHIVE_TAIL_BYTES = 16 * 1024 * 1024;
+
+/** One step of a path: a member name with half a pair in it is written escaped, so the path can be printed. */
+function segment(key) {
+  return key.isWellFormed() ? key : JSON.stringify(key).slice(1, -1);
+}
 
 /**
  * [path, what] for the first part of value no reader can hold, in document
- * order, or null: "not finite" for a number such as 1e999, and "too deep" for
- * arrays and objects nested deeper than limit. The path names keys and indices
- * with dots, and is "" for value itself.
+ * order, or null: "not finite" for a number such as 1e999, "too deep" for
+ * arrays and objects nested deeper than limit, and "half a pair" for a string
+ * or member name with half of a UTF-16 surrogate pair in it, as "\\ud800"
+ * decodes to: JSON can write it and UTF-8 cannot carry it, so it went out as
+ * U+FFFD in its place, and aamio-php reads no such body as JSON (the release
+ * check of 14 November 2026). The path names keys and indices with dots, and
+ * is "" for value itself.
  */
 export function unfitJson(value, limit = BODY_MAX_DEPTH) {
   const stack = [[value, "", 0]];
@@ -275,10 +287,19 @@ export function unfitJson(value, limit = BODY_MAX_DEPTH) {
       if (!Number.isFinite(node)) return [path, "not finite"];
       continue;
     }
+    if (typeof node === "string") {
+      if (!node.isWellFormed()) return [path, "half a pair"];
+      continue;
+    }
     if (node === null || typeof node !== "object") continue;
     if (level + 1 > limit) return [path, "too deep"];
     const items = Array.isArray(node) ? node.map((child, index) => [String(index), child]) : Object.entries(node);
-    for (const [key, child] of items.reverse()) stack.push([child, path ? `${path}.${key}` : key, level + 1]);
+    for (const [key, child] of items.reverse()) {
+      const where = path ? `${path}.${segment(key)}` : segment(key);
+      stack.push([child, where, level + 1]);
+      // The member name, where it stands: before its value.
+      if (!Array.isArray(node)) stack.push([key, where, level + 1]);
+    }
   }
   return null;
 }
@@ -287,6 +308,7 @@ export function unfitJson(value, limit = BODY_MAX_DEPTH) {
 export function unfitText([path, what]) {
   const where = path || "arguments";
   if (what === "not finite") return `${where} is a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it`;
+  if (what === "half a pair") return `${where} holds half of a UTF-16 surrogate pair, as "\\ud800" is: JSON can write it, and UTF-8 cannot carry it`;
   return `${where} is nested deeper than ${BODY_MAX_DEPTH}: a reader hands a message nested that deep over as text`;
 }
 
@@ -433,6 +455,12 @@ export class NodeRuntime {
     // Messages the archive holds from a read whose cursor could not be
     // written: read again, they are not written down a second time.
     this.writtenDown = new Set();
+    // What earlier processes wrote to each channel's archive, from the end of
+    // the file, by file name: read once a process.
+    this.archiveBefore = new Map();
+    // How often a delivery was handed over here with a row an earlier process
+    // had written: copies held here that wrote none, by board replies' key.
+    this.rowsReused = new Map();
     this.host = host.replace(/\/+$/, "");
     // Where a receipt's root is anchored, as aamio-python reads it: AAMIO_VERIFYUM.
     this.verifyum = String(verifyum).replace(/\/+$/, "");
@@ -585,6 +613,50 @@ export class NodeRuntime {
     await appendRecord(this.home, archiveName(label), record);
     if (this.now() - this.prunedAt > 3600) await this.prune();
     return true;
+  }
+
+  /**
+   * What earlier processes wrote to this channel's archive, from the end of
+   * the file, as deliveries: read once a process. The end is enough: what an
+   * earlier process wrote and did not get past with its cursor was written
+   * last, and a read takes at most a thread's megabyte of messages.
+   */
+  async archivedBefore(label) {
+    const name = archiveName(label);
+    if (this.archiveBefore.has(name)) return this.archiveBefore.get(name);
+    const found = new Set();
+    let handle = null;
+    try {
+      handle = await open(join(this.home, "archive", name + ".jsonl"), "r");
+      const { size } = await handle.stat();
+      const start = Math.max(0, size - ARCHIVE_TAIL_BYTES);
+      const buffer = Buffer.alloc(size - start);
+      let filled = 0;
+      while (filled < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, start + filled);
+        if (bytesRead === 0) break;
+        filled += bytesRead;
+      }
+      const lines = buffer.subarray(0, filled).toString("utf8").split("\n");
+      if (start > 0) lines.shift();
+      for (const line of lines) {
+        let row;
+        try {
+          row = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (isObject(row) && row.kind === "received" && typeof row.w === "string" && typeof row.instance === "string" && Number.isInteger(row.seq) && typeof row.sha256 === "string") {
+          found.add([row.w, row.instance, row.seq, row.sha256].join("\u0000"));
+        }
+      }
+    } catch {
+      // No archive for it yet, or one that cannot be read: there is no row to use again.
+    } finally {
+      await handle?.close();
+    }
+    this.archiveBefore.set(name, found);
+    return found;
   }
 
   /** The same for a record of something that is done already: what went wrong is given back, said in attention, and never thrown. */
@@ -2332,6 +2404,9 @@ export class NodeRuntime {
     // and the copies held here are later readings of it.
     const stored = count(rows.map(one));
     const written = count(held.filter((entry) => entry.archived !== false).map(one));
+    // A copy held here whose row an earlier process wrote wrote none: it is a
+    // later reading of that row (the release check of 14 November 2026).
+    for (const [delivery, times] of this.rowsReused) if (written.has(delivery)) written.set(delivery, Math.max(0, written.get(delivery) - times));
     const earlier = new Set([...stored].filter(([delivery, rowsOfIt]) => rowsOfIt > (written.get(delivery) ?? 0)).map(([delivery]) => delivery));
     const out = [];
     const skipped = [];
@@ -2746,13 +2821,29 @@ export class NodeRuntime {
       if (typeof channel.instance === "string") row.instance = channel.instance;
       const delivery = this.deliveryOf(channel, entry);
       if (this.archiveEnabled) {
+        if (delivery !== null && !this.writtenDown.has(delivery) && typeof channel.instance === "string" && (await this.archivedBefore(channel.label)).has(delivery)) {
+          // Written down by an earlier process that stopped before its cursor:
+          // the row holds the same message and is used again, where it was
+          // written a second time (the release check of 14 November 2026). A
+          // row without the thread's instance, from a version before it was
+          // kept, could be another delivery, so both are kept.
+          this.writtenDown.add(delivery);
+          const shown = [channel.w, channel.instance, entry.seq].join("\u0000");
+          this.rowsReused.set(shown, (this.rowsReused.get(shown) ?? 0) + 1);
+        }
         if (delivery !== null && this.writtenDown.has(delivery)) {
-          // Written down at a read whose cursor could not be saved, by this process.
+          // Written down at a read that did not get as far as its cursor, by this process or an earlier one.
           entry.archived = true;
         } else {
           try {
             entry.archived = (await this.archive(channel.label, row)) !== false;
-            if (entry.archived && delivery !== null) written.push(delivery);
+            if (entry.archived && delivery !== null) {
+              written.push(delivery);
+              // Known at once: a read that throws before its cursor is written
+              // reads it again, and wrote it down a second time (the release
+              // check of 14 November 2026).
+              this.writtenDown.add(delivery);
+            }
           } catch (error) {
             entry.archived = false;
             said.push(["archive_failed", `message ${entry.seq} was handed over and could not be written to the archive: ${error.code || error.name}: ${error.message}. The archive does not have it.`]);

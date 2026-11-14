@@ -23,6 +23,16 @@ not what moved in the source.
   halfway through kept the hashes of the messages it had taken, the next
   channel's save wrote them down, and the next read handed those messages over
   marked `replay`, though they had never been handed over.
+- Half of a UTF-16 surrogate pair, as `"\ud800"` decodes to, makes a body text,
+  as aamio-php reads it, and is refused in MCP arguments and in `--data` and
+  `--gate`. UTF-8 cannot carry it, and it went out as U+FFFD in its place.
+- A delivery is written to the archive once. One read again after a read that
+  failed, or after a cursor that could not be written, uses the row that is
+  there, in the next process too when the row is among the last 16 MiB of its
+  channel's archive and holds the same message. A row written without the
+  thread's instance, by a version before it was kept, is not taken for it, so
+  such a delivery can stand there twice. Board replies lists a row used again
+  as it was first written down.
 - Over MCP, arguments holding such a number, or nested deeper than 64, are
   refused with `invalid_arguments` before any tool runs, an add-on's
   included, with the path of what is wrong.

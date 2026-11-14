@@ -261,8 +261,8 @@ test("a message is written down before the cursor is, and once: a read that cann
   assert.deepEqual([got.body.text, got.replay, got.archived], ["read twice, written once", false, true]);
   assert.equal((await lines(homeA, "inbox")).length, 1, "the process that wrote it down does not write it down again");
 
-  // A process of its own cannot know, and writes the row again. Whoever lists the archive knows one delivery by its
-  // address, its thread's instance and its seq.
+  // A process of its own finds the row at the end of the channel's archive and uses it again: one delivery, one row,
+  // known by its address, its thread's instance, its seq and its hash (the release check of 14 November 2026).
   await sender.send("receiver", { text: "across two processes" });
   failSaving(receiver, "state.json");
   assert.deepEqual(await receiver.read(), []);
@@ -271,7 +271,7 @@ test("a message is written down before the cursor is, and once: a read that cann
   const [late] = await again.read();
   assert.deepEqual([late.body.text, late.replay, late.archived], ["across two processes", false, true]);
   const rows = (await lines(homeA, "inbox")).filter((r) => r.body.text === "across two processes");
-  assert.deepEqual(rows.map((r) => [r.w, r.instance, r.seq]), [[late.w, again.channel("inbox").instance, late.seq], [late.w, again.channel("inbox").instance, late.seq]]);
+  assert.deepEqual(rows.map((r) => [r.w, r.instance, r.seq]), [[late.w, again.channel("inbox").instance, late.seq]]);
 });
 
 test("an archive that cannot be written costs the record and nothing else: the message is handed over, the send delivered, the post made", async (t) => {

@@ -218,8 +218,8 @@ test("one delivery is one row: read again after a read that could not be saved, 
   const once = await poster.boardReplies();
   assert.deepEqual(once.map((m) => [m.body.text, m.from_key, m.replay]), [["the same words", first.keys.public, false], ["the same words", second.keys.public, false]]);
 
-  // Across two processes the second cannot know and writes the rows again: still one row for each delivery, and
-  // the row that stands is the one written down first, with the mark it first came with.
+  // Across two processes the second finds the row the first wrote and uses it again: one row for each delivery, the
+  // one written down first, with the mark it first came with (the release check of 14 November 2026).
   const third = Keys.generate();
   await put(fake, posted.inbox, third.seal(poster.keys.public, JSON.stringify({ post: posted.post.id, text: "a third answer" })), third);
   failSaving(poster, "state.json");
@@ -227,7 +227,7 @@ test("one delivery is one row: read again after a read that could not be saved, 
   await poster.close();
   const again = await open(homeA);
   assert.deepEqual(texts(await again.boardPoll()), ["a third answer"]);
-  assert.equal((await archived(homeA, "board")).filter((row) => row.kind === "received" && row.body.text === "a third answer").length, 2);
+  assert.equal((await archived(homeA, "board")).filter((row) => row.kind === "received" && row.body.text === "a third answer").length, 1);
   const listed = await again.boardReplies();
   assert.deepEqual(listed.map((m) => [m.body.text, m.replay, m.from_archive ?? false]), [["the same words", false, true], ["the same words", false, true], ["a third answer", false, true]]);
 

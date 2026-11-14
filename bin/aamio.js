@@ -240,6 +240,9 @@ function jsonData(value) {
  */
 function holdable(parsed, option, limit) {
   const unreadable = unfitJson(parsed, limit);
+  if (unreadable && unreadable[1] === "half a pair") {
+    throw Object.assign(new Error(`${option} holds half of a UTF-16 surrogate pair, as "\\ud800" is: JSON can write it, and UTF-8 cannot carry it.`), { code: "usage" });
+  }
   if (unreadable && unreadable[1] === "not finite") {
     throw Object.assign(new Error(`${option} holds a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it.`), { code: "usage" });
   }
