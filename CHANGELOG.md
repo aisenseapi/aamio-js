@@ -35,7 +35,9 @@ not what moved in the source.
   as it was first written down. The rows used again are the ones the archive's
   reader counts, past a byte order mark and in UTF-8, and the end of the file
   is read again once a prune has replaced it: a row a prune had removed was
-  still taken as there.
+  still taken as there. What this process wrote at a read whose cursor was not
+  written is looked for in the file again after a prune too, so `archived` is
+  the row that is there.
 - Over MCP, arguments holding such a number, or nested deeper than 64, are
   refused with `invalid_arguments` before any tool runs, an add-on's
   included, with the path of what is wrong.

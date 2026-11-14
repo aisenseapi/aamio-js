@@ -207,3 +207,22 @@ test("a row a prune removed is written again, never taken as there", async (t) =
   assert.deepEqual((await again.read()).map((m) => [m.body.text, m.archived]), [["first", true]]);
   assert.deepEqual(await written(home), [[1], 1], "written again: the archive has what the message says");
 });
+
+test("after a cursor that could not be written and a prune, the mark is the row that is there", async (t) => {
+  const fake = new FakeAamio();
+  const { root, open } = await homes(t, fake);
+  const owner = await open("a");
+  const guest = await open("b");
+  await owner.partnerAdd("guest", guest.keys.public);
+  await owner.read();
+  const side = await owner.channelOpen("side", { ttl: 600, allow: ["guest"] });
+  await write(fake, guest, side.w, JSON.stringify({ text: "first" }));
+  // The inbox is read first: both saves of the read fail, the side's with its message written down.
+  failSaving(owner, "state.json", 2);
+  assert.deepEqual(await owner.read(), []);
+  assert.deepEqual(await rows(join(root, "a"), "side"), [1]);
+  await owner.archivePrune({ everything: true });
+  assert.deepEqual(await rows(join(root, "a"), "side"), []);
+  assert.deepEqual((await owner.read()).map((m) => [m.body.text, m.archived]), [["first", true]]);
+  assert.deepEqual(await rows(join(root, "a"), "side"), [1], "the mark is the row that is there: it is written again");
+});

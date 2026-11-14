@@ -454,7 +454,8 @@ export class NodeRuntime {
     this.received = new Map();
     // Messages the archive holds from a read whose cursor could not be
     // written: read again, they are not written down a second time.
-    this.writtenDown = new Set();
+    // By delivery, the name of the archive file each went to.
+    this.writtenDown = new Map();
     // What earlier processes wrote to each channel's archive, from the end of
     // the file, by file name: read once a process.
     this.archiveBefore = new Map();
@@ -580,7 +581,7 @@ export class NodeRuntime {
     for (const channel of this.state.channels.filter(gone)) {
       this.received.delete(channel.w);
       // And what was written down of it at a read that could not be saved: it will not be read again.
-      for (const delivery of this.writtenDown) if (delivery.startsWith(channel.w + "\u0000")) this.writtenDown.delete(delivery);
+      for (const delivery of [...this.writtenDown.keys()]) if (delivery.startsWith(channel.w + "\u0000")) this.writtenDown.delete(delivery);
     }
     this.state.channels = this.state.channels.filter((channel) => !gone(channel));
   }
@@ -600,8 +601,11 @@ export class NodeRuntime {
     this.prunedAt = this.now();
     try {
       await pruneArchive(this.home, policy, { now: this.now() });
-      // What the end of each file held may be gone with it.
+      // What the end of each file held may be gone with it, and with it a row
+      // this process wrote at a read whose cursor was not written: the next
+      // read looks in the file again.
       this.archiveBefore.clear();
+      this.writtenDown.clear();
     } catch (error) {
       this.note("archive", "unpruned", `the archive was not pruned: ${error.code || error.name}: ${error.message}. It keeps growing, and what is in it stays readable to whoever can read this folder.`);
     }
@@ -648,6 +652,9 @@ export class NodeRuntime {
     const size = found === null ? 0 : Number(found.size);
     const held = this.archiveBefore.get(name);
     if (held && held.version === version && size >= held.size) return held.rows;
+    // Another file now, or a shorter one: what this process wrote to it at a
+    // read that did not get past its cursor is looked for in it again.
+    if (held) for (const [delivery, at] of [...this.writtenDown]) if (at === name) this.writtenDown.delete(delivery);
     const rows = new Set();
     if (found !== null) {
       let handle = null;
@@ -735,6 +742,7 @@ export class NodeRuntime {
   async archivePrune({ everything = false } = {}) {
     const gone = await pruneArchive(this.home, this.archivePolicy, { now: this.now(), everything });
     this.archiveBefore.clear();
+    this.writtenDown.clear();
     return { ...(await this.archiveStatus()), removed: gone.removed };
   }
 
@@ -2864,13 +2872,17 @@ export class NodeRuntime {
       if (typeof channel.instance === "string") row.instance = channel.instance;
       const delivery = this.deliveryOf(channel, entry);
       if (this.archiveEnabled) {
-        if (delivery !== null && !this.writtenDown.has(delivery) && typeof channel.instance === "string" && (await this.archivedBefore(channel.label)).has(delivery)) {
+        // The file first: one that is another now, or shorter, makes this
+        // process forget what it wrote to it, and that is looked for in it
+        // again (the third release check of 14 November 2026).
+        const before = delivery !== null && typeof channel.instance === "string" ? await this.archivedBefore(channel.label) : new Set();
+        if (delivery !== null && !this.writtenDown.has(delivery) && before.has(delivery)) {
           // Written down by an earlier process that stopped before its cursor:
           // the row holds the same message and is used again, where it was
           // written a second time (the release check of 14 November 2026). A
           // row without the thread's instance, from a version before it was
           // kept, could be another delivery, so both are kept.
-          this.writtenDown.add(delivery);
+          this.writtenDown.set(delivery, archiveName(channel.label));
           const shown = [channel.w, channel.instance, entry.seq].join("\u0000");
           this.rowsReused.set(shown, (this.rowsReused.get(shown) ?? 0) + 1);
         }
@@ -2885,7 +2897,7 @@ export class NodeRuntime {
               // Known at once: a read that throws before its cursor is written
               // reads it again, and wrote it down a second time (the release
               // check of 14 November 2026).
-              this.writtenDown.add(delivery);
+              this.writtenDown.set(delivery, archiveName(channel.label));
             }
           } catch (error) {
             entry.archived = false;
@@ -2939,7 +2951,7 @@ export class NodeRuntime {
     try {
       await this.saveRead();
     } catch (error) {
-      for (const delivery of written) this.writtenDown.add(delivery);
+      for (const delivery of written) this.writtenDown.set(delivery, archiveName(channel.label));
       throw error;
     }
     for (const [state, what] of said) this.note(channel.label, state, what, channel.w);
