@@ -8,7 +8,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -141,4 +142,68 @@ test("after a restart a delivery an earlier process wrote down is one row, and h
   owner = await open("a", false);
   assert.deepEqual((await owner.read()).map((m) => [m.body.text, m.archived]), [["first", true], ["second", true]], "the next process hands them over");
   assert.deepEqual(await rows(join(root, "a"), "side"), [1, 2], "and the archive still holds each once");
+});
+
+/** A home whose side channel holds texts at the service, read by nobody yet, and the rows an earlier process would have written for them. */
+async function crafted(t, texts) {
+  const fake = new FakeAamio();
+  const { root, open } = await homes(t, fake);
+  const first = await open("a");
+  const guest = await open("b");
+  await first.partnerAdd("guest", guest.keys.public);
+  await first.read();
+  const side = await first.channelOpen("side", { ttl: 600, allow: ["guest"] });
+  const rows = [];
+  for (const [index, text] of texts.entries()) {
+    const body = JSON.stringify({ text });
+    await write(fake, guest, side.w, body);
+    rows.push(Buffer.from(JSON.stringify({ kind: "received", channel: "side", w: side.w, instance: fake.threads.get(side.w).instance, seq: index + 1, sha256: createHash("sha256").update(body).digest("hex"), body: { text } }), "utf8"));
+  }
+  await first.close();
+  await mkdir(join(root, "a", "archive"), { recursive: true });
+  return { home: join(root, "a"), rows, open };
+}
+
+/** The seq of every row the archive's reader counts for the side channel, and how many lines the file has. */
+async function written(home) {
+  const lines = (await readFile(join(home, "archive", "side.jsonl"))).toString("latin1").split("\n").filter(Boolean).map((line) => Buffer.from(line, "latin1"));
+  const seqs = [];
+  for (const [number, line] of lines.entries()) {
+    try {
+      const raw = number === 0 && line[0] === 0xef && line[1] === 0xbb && line[2] === 0xbf ? line.subarray(3) : line;
+      const row = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+      if (row.kind === "received") seqs.push(row.seq);
+    } catch {
+      // not a row the reader counts
+    }
+  }
+  return [seqs.sort((a, b) => a - b), lines.length];
+}
+
+for (const [name, expected] of [["a byte order mark", [[1, 2], 2]], ["a line that is not UTF-8", [[1, 2], 3]], ["a line that starts where the end starts", [[1, 1, 2], 3]]]) {
+  test(`the rows used again are the ones the archive reader counts: ${name}`, async (t) => {
+    const { home, rows, open } = await crafted(t, ["first", "second"]);
+    if (name === "a line that is not UTF-8") rows[0] = Buffer.from(rows[0].toString("latin1").replace('"first"', '"fir\xffst"'), "latin1");
+    const mark = name === "a byte order mark" ? Buffer.from([0xef, 0xbb, 0xbf]) : Buffer.alloc(0);
+    await writeFile(join(home, "archive", "side.jsonl"), Buffer.concat([mark, rows[0], Buffer.from("\n"), rows[1], Buffer.from("\n")]));
+    const again = await open("a", false);
+    if (name === "a line that starts where the end starts") again.archiveTailBytes = rows[1].length + 1;
+    assert.deepEqual((await again.read()).map((m) => [m.body.text, m.archived]), [["first", true], ["second", true]]);
+    assert.deepEqual(await written(home), expected);
+  });
+}
+
+test("a row a prune removed is written again, never taken as there", async (t) => {
+  const { home, rows, open } = await crafted(t, ["first"]);
+  const path = join(home, "archive", "side.jsonl");
+  await writeFile(path, Buffer.concat([rows[0], Buffer.from("\n")]));
+  const again = await open("a", false);
+  assert.deepEqual((await again.read()).map((m) => [m.body.text, m.archived]), [["first", true]]);
+  assert.deepEqual(await written(home), [[1], 1], "the row an earlier process wrote is used");
+  // A prune writes the file again beside itself and renames it over: here, without the row.
+  await writeFile(path + ".tmp", "");
+  await rename(path + ".tmp", path);
+  again.channel("side").after = 0;
+  assert.deepEqual((await again.read()).map((m) => [m.body.text, m.archived]), [["first", true]]);
+  assert.deepEqual(await written(home), [[1], 1], "written again: the archive has what the message says");
 });

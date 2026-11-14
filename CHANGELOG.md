@@ -32,7 +32,10 @@ not what moved in the source.
   channel's archive and holds the same message. A row written without the
   thread's instance, by a version before it was kept, is not taken for it, so
   such a delivery can stand there twice. Board replies lists a row used again
-  as it was first written down.
+  as it was first written down. The rows used again are the ones the archive's
+  reader counts, past a byte order mark and in UTF-8, and the end of the file
+  is read again once a prune has replaced it: a row a prune had removed was
+  still taken as there.
 - Over MCP, arguments holding such a number, or nested deeper than 64, are
   refused with `invalid_arguments` before any tool runs, an add-on's
   included, with the path of what is wrong.

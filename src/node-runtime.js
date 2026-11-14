@@ -1,4 +1,4 @@
-import { open, readFile, rename, unlink } from "node:fs/promises";
+import { open, readFile, rename, stat as fsStat, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -461,6 +461,8 @@ export class NodeRuntime {
     // How often a delivery was handed over here with a row an earlier process
     // had written: copies held here that wrote none, by board replies' key.
     this.rowsReused = new Map();
+    // How far back from the end of a channel's archive that is read.
+    this.archiveTailBytes = ARCHIVE_TAIL_BYTES;
     this.host = host.replace(/\/+$/, "");
     // Where a receipt's root is anchored, as aamio-python reads it: AAMIO_VERIFYUM.
     this.verifyum = String(verifyum).replace(/\/+$/, "");
@@ -598,6 +600,8 @@ export class NodeRuntime {
     this.prunedAt = this.now();
     try {
       await pruneArchive(this.home, policy, { now: this.now() });
+      // What the end of each file held may be gone with it.
+      this.archiveBefore.clear();
     } catch (error) {
       this.note("archive", "unpruned", `the archive was not pruned: ${error.code || error.name}: ${error.message}. It keeps growing, and what is in it stays readable to whoever can read this folder.`);
     }
@@ -617,46 +621,84 @@ export class NodeRuntime {
 
   /**
    * What earlier processes wrote to this channel's archive, from the end of
-   * the file, as deliveries: read once a process. The end is enough: what an
-   * earlier process wrote and did not get past with its cursor was written
-   * last, and a read takes at most a thread's megabyte of messages.
+   * the file, as deliveries. The end is enough for what an earlier process
+   * wrote and did not get past with its cursor, which was written last: a
+   * read takes at most a thread's megabyte of messages. A row further back is
+   * not found, and that delivery is written down again. The rows are the ones
+   * the archive's own reader counts, by its rules: past a byte order mark at
+   * the start of the file, UTF-8, JSON. The first line of the end counts when
+   * it starts where a line starts, and is passed by when it is the tail of a
+   * line cut by where the end begins.
+   *
+   * Read again when the file is not the one that was read: replaced, as a
+   * prune replaces it, or shorter. A row a prune had removed was still taken
+   * as there, and the message said archived: true with no row behind it (the
+   * release check of 14 November 2026).
    */
   async archivedBefore(label) {
     const name = archiveName(label);
-    if (this.archiveBefore.has(name)) return this.archiveBefore.get(name);
-    const found = new Set();
-    let handle = null;
+    const path = join(this.home, "archive", name + ".jsonl");
+    let found = null;
     try {
-      handle = await open(join(this.home, "archive", name + ".jsonl"), "r");
-      const { size } = await handle.stat();
-      const start = Math.max(0, size - ARCHIVE_TAIL_BYTES);
-      const buffer = Buffer.alloc(size - start);
-      let filled = 0;
-      while (filled < buffer.length) {
-        const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, start + filled);
-        if (bytesRead === 0) break;
-        filled += bytesRead;
-      }
-      const lines = buffer.subarray(0, filled).toString("utf8").split("\n");
-      if (start > 0) lines.shift();
-      for (const line of lines) {
-        let row;
-        try {
-          row = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (isObject(row) && row.kind === "received" && typeof row.w === "string" && typeof row.instance === "string" && Number.isInteger(row.seq) && typeof row.sha256 === "string") {
-          found.add([row.w, row.instance, row.seq, row.sha256].join("\u0000"));
-        }
-      }
+      found = await fsStat(path, { bigint: true });
     } catch {
-      // No archive for it yet, or one that cannot be read: there is no row to use again.
-    } finally {
-      await handle?.close();
+      found = null;
     }
-    this.archiveBefore.set(name, found);
-    return found;
+    const version = found === null ? null : `${found.dev}:${found.ino}`;
+    const size = found === null ? 0 : Number(found.size);
+    const held = this.archiveBefore.get(name);
+    if (held && held.version === version && size >= held.size) return held.rows;
+    const rows = new Set();
+    if (found !== null) {
+      let handle = null;
+      try {
+        handle = await open(path, "r");
+        const start = Math.max(0, size - this.archiveTailBytes);
+        // The byte before the end says whether its first line is whole.
+        const from = Math.max(0, start - 1);
+        const buffer = Buffer.alloc(size - from);
+        let filled = 0;
+        while (filled < buffer.length) {
+          const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, from + filled);
+          if (bytesRead === 0) break;
+          filled += bytesRead;
+        }
+        let bytes = buffer.subarray(0, filled);
+        let whole = true;
+        if (start > 0) {
+          whole = bytes[0] === 0x0a;
+          bytes = bytes.subarray(1);
+        } else if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+          bytes = bytes.subarray(3);
+        }
+        const lines = [];
+        for (let at = 0; at < bytes.length; ) {
+          let end = bytes.indexOf(0x0a, at);
+          if (end === -1) end = bytes.length;
+          lines.push(bytes.subarray(at, end));
+          at = end + 1;
+        }
+        if (!whole) lines.shift();
+        for (const raw of lines) {
+          let row;
+          try {
+            row = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw));
+          } catch {
+            continue;
+          }
+          if (isObject(row) && row.kind === "received" && typeof row.w === "string" && typeof row.instance === "string" && Number.isInteger(row.seq) && typeof row.sha256 === "string") {
+            rows.add([row.w, row.instance, row.seq, row.sha256].join("\u0000"));
+          }
+        }
+      } catch {
+        // One that cannot be read: there is no row to use again.
+        rows.clear();
+      } finally {
+        await handle?.close();
+      }
+    }
+    this.archiveBefore.set(name, { rows, version, size });
+    return rows;
   }
 
   /** The same for a record of something that is done already: what went wrong is given back, said in attention, and never thrown. */
@@ -692,6 +734,7 @@ export class NodeRuntime {
   /** Removes what the policy no longer keeps, or with everything the whole archive, and says how much went. */
   async archivePrune({ everything = false } = {}) {
     const gone = await pruneArchive(this.home, this.archivePolicy, { now: this.now(), everything });
+    this.archiveBefore.clear();
     return { ...(await this.archiveStatus()), removed: gone.removed };
   }
 
