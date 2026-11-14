@@ -241,6 +241,75 @@ test("tidying between two reads still takes what was there, and the next read's 
   assert.deepEqual(await rows(join(root, "a"), "side"), [2], "the first went with the tidying, which ran first; the second is there");
 });
 
+/** A home with a message on the side channel and one on a second, read by nobody yet, under a ceiling under one row. */
+async function twoChannels(t) {
+  const fake = new FakeAamio();
+  const { root, open } = await homes(t, fake);
+  const owner = await open("a");
+  const guest = await open("b");
+  await owner.partnerAdd("guest", guest.keys.public);
+  await owner.read();
+  const side = await owner.channelOpen("side", { ttl: 600, allow: ["guest"] });
+  const other = await owner.channelOpen("other", { ttl: 600, allow: ["guest"] });
+  await write(fake, guest, side.w, JSON.stringify({ text: "on side" }));
+  await write(fake, guest, other.w, JSON.stringify({ text: "on other" }));
+  owner.archivePolicy = { mode: "keep", days: null, max_mb: 128 / (1024 * 1024) };
+  return { fake, home: join(root, "a"), owner, guest, side, other };
+}
+
+test("one read over two channels says archived of rows that are there when the hour passes between them", async (t) => {
+  // The fifth release check of 14 November 2026, item 1: the hour passed
+  // between the two channels of one read, the second tidied, and took the
+  // first channel's row, which its message had been told was archived.
+  const { fake, home, owner, other } = await twoChannels(t);
+  const real = fake.fetch.bind(fake);
+  fake.fetch = async (url, init) => {
+    if (String(url).includes("/" + other.w) && (init?.method ?? "GET") === "GET") owner.prunedAt = 0;
+    return real(url, init);
+  };
+  const read = await owner.read();
+  assert.deepEqual(read.map((m) => [m.body.text, m.archived]).sort(), [["on other", true], ["on side", true]]);
+  assert.deepEqual([await rows(home, "side"), await rows(home, "other")], [[1], [1]], "each message's row is there when the read returns");
+  assert.equal(owner.prunedAt, 0, "nothing tidied within the read");
+  fake.fetch = real;
+  await owner.read();
+  assert.ok(owner.prunedAt > 0, "the next read tidies");
+});
+
+test("a read that begins while another gives receipts leaves the tidying for later", async (t) => {
+  // Item 1, across reads that run at once: one is between its first receipt
+  // and its return when another begins and finds the hour has passed.
+  const { fake, guest, home, owner, side, other } = await twoChannels(t);
+  await write(fake, guest, side.w, JSON.stringify({ text: "second on side" }));
+  const realArchive = owner.archive.bind(owner);
+  let signal;
+  const given = new Promise((resolve) => (signal = resolve));
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  let sideRows = 0;
+  owner.archive = async (label, record) => {
+    const wrote = await realArchive(label, record);
+    if (label === "side" && ++sideRows === 1) {
+      signal();
+      await held;
+    }
+    return wrote;
+  };
+  const first = owner.poll(owner.channel("side"));
+  await given;
+  owner.prunedAt = 0;
+  const meanwhile = await owner.poll(owner.channel("other"));
+  release();
+  const read = await first;
+  assert.deepEqual(read.map((m) => [m.body.text, m.archived]), [["on side", true], ["second on side", true]]);
+  assert.deepEqual(meanwhile.map((m) => [m.body.text, m.archived]), [["on other", true]]);
+  assert.deepEqual([await rows(home, "side"), await rows(home, "other")], [[1, 2], [1]], "every row a receipt names is there");
+  assert.equal(owner.prunedAt, 0, "the read that began meanwhile left the tidying for later");
+  owner.archive = realArchive;
+  await owner.read();
+  assert.ok(owner.prunedAt > 0, "and the next read tidies");
+});
+
 test("after a cursor that could not be written and a prune, the mark is the row that is there", async (t) => {
   const fake = new FakeAamio();
   const { root, open } = await homes(t, fake);

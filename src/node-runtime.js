@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { open, readFile, rename, stat as fsStat, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -447,6 +448,12 @@ export class NodeRuntime {
     this.archivePolicy = { ...DEFAULT_POLICY };
     this.archiveEnabled = false;
     this.prunedAt = 0;
+    // The read an async call belongs to, how many reads are saying what the
+    // archive holds, and a tidying under way: tidying waits for those reads
+    // (the fifth release check of 14 November 2026).
+    this.readScope = new AsyncLocalStorage();
+    this.receiptWindows = 0;
+    this.tidying = null;
     // What this process read on each channel, by write address, as it was
     // handed over, with the thread's instance and the archive's mark: what
     // board replies lists beside the archive. In memory only, and gone with
@@ -594,9 +601,48 @@ export class NodeRuntime {
   // fails costs the record, and is said, and the message, the send or the
   // post it is about stands.
 
-  /** Tidies the archive when an hour has passed since it was tidied last. */
+  /**
+   * Tidies the archive when an hour has passed since it was tidied last, and
+   * no read is saying what the archive holds. Never within a read, and never
+   * while another read is between its first word on the archive and its
+   * return: one read() over two channels tidied between them, took the first
+   * channel's row and still said archived of it (the fifth release check of
+   * 14 November 2026). A tidying that has to wait waits for the next chance.
+   */
   async pruneWhenDue() {
-    if (this.now() - this.prunedAt > 3600) await this.prune();
+    if (this.now() - this.prunedAt <= 3600) return;
+    if (this.readScope?.getStore() !== undefined) return;
+    if (this.receiptWindows > 0 || this.tidying) return;
+    this.tidying = this.prune().finally(() => {
+      this.tidying = null;
+    });
+    await this.tidying;
+  }
+
+  /**
+   * A read as its caller asked for it: it tidies first, when that is due, and
+   * nothing within it tidies. The channels it reads one by one, the reads
+   * within it and the rows it writes are one read for the archive, so what it
+   * says of each message is so when it returns.
+   */
+  async outerRead(read) {
+    if (!this.readScope || this.readScope.getStore() !== undefined) return read();
+    if (this.archiveEnabled && !this.closed) await this.pruneWhenDue();
+    const scope = { receipts: false };
+    try {
+      return await this.readScope.run(scope, read);
+    } finally {
+      if (scope.receipts) this.receiptWindows--;
+    }
+  }
+
+  /** From here until the outer read returns, what it says of the archive is to stay so: tidying waits. */
+  async givingReceipts() {
+    const scope = this.readScope?.getStore();
+    if (!scope || scope.receipts) return;
+    while (this.tidying) await this.tidying;
+    this.receiptWindows++;
+    scope.receipts = true;
   }
 
   /** Removes what the policy no longer keeps. A failure is said, since the archive then keeps growing in plain text. */
@@ -625,7 +671,8 @@ export class NodeRuntime {
     if (!this.archiveEnabled || this.closed) return false;
     // Before the row, never after it: a ceiling under one row took the row just
     // written, and the read said archived (the fourth release check of 14
-    // November 2026). A read tidies before it weighs its first message.
+    // November 2026). Within a read, never: the outer read tidies before it
+    // begins.
     await this.pruneWhenDue();
     await appendRecord(this.home, archiveName(label), record);
     return true;
@@ -2393,6 +2440,11 @@ export class NodeRuntime {
    * board inbox is waited on, and the others are asked once.
    */
   async boardPoll(wait = 0) {
+    return this.outerRead(() => this.boardPollHeld(wait));
+  }
+
+  /** boardPoll, as one read for the archive. */
+  async boardPollHeld(wait) {
     this.dropExpired();
     const now = this.now();
     const boards = this.state.channels.filter((channel) => isObject(channel) && (channel.label === "board" || String(channel.label).startsWith("board-")) && !channel.muted && Number(channel.expire_at) > now)
@@ -2625,6 +2677,11 @@ export class NodeRuntime {
    * one before it redelivers what the stored hashes then mark as replays.
    */
   async poll(channel, wait = 0, limit = null, maxBytes = null) {
+    return this.outerRead(() => this.pollHeld(channel, wait, limit, maxBytes));
+  }
+
+  /** One poll, inside the read it belongs to. */
+  async pollHeld(channel, wait, limit, maxBytes) {
     const before = { after: channel.after, created_at: channel.created_at, instance: channel.instance ?? null, expire_at: channel.expire_at, gone: channel.gone, seen: [...channel.seen], seen_from: [...(channel.seen_from ?? [])], peers: { ...this.state.peers } };
     try {
       return await this.pollOnce(channel, wait, limit, true, maxBytes);
@@ -2806,12 +2863,13 @@ export class NodeRuntime {
     // cursor cannot be written, so the same rows are not written down again
     // when this process reads them again.
     const written = [];
-    // Tidying that is due runs before any message of this read is weighed for
-    // the archive, and never after one is written: what the read says of the
-    // archive is so as it returns. A ceiling under one row took the row a read
-    // had just written, and a row an earlier process wrote, and the read said
-    // archived of both (the fourth release check of 14 November 2026).
-    if (Array.isArray(data.messages) && data.messages.length > 0 && this.archiveEnabled && !this.closed) await this.pruneWhenDue();
+    // The outer read tidied before it began, and from the first message weighed
+    // for the archive nothing tidies until it returns, in this read or another:
+    // what it says of the archive is so as it returns. Tidied here, channel by
+    // channel, a ceiling under one row took the first channel's row when the
+    // hour passed before the second (the fifth release check of 14 November
+    // 2026).
+    if (Array.isArray(data.messages) && data.messages.length > 0 && this.archiveEnabled && !this.closed) await this.givingReceipts();
     for (const raw of data.messages) {
       if (limit !== null && entries.length >= limit) break;
       const entry = this.readEntry(channel, raw);
@@ -3092,6 +3150,13 @@ export class NodeRuntime {
 
   /** Messages on every channel still read, the inbox first. The inbox is opened and presence published as the read starts. */
   async read({ wait = 0, limit = 50, maxBytes = null } = {}) {
+    // The channels it reads one by one are one read for the archive: it is
+    // tidied before the first, and not again until this returns.
+    return this.outerRead(() => this.readHeld({ wait, limit, maxBytes }));
+  }
+
+  /** read, as one read for the archive. */
+  async readHeld({ wait, limit, maxBytes }) {
     const noted = this.attention.length;
     await this.ensureInbox();
     await this.publishPresence();

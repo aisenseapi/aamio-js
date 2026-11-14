@@ -98,7 +98,7 @@ test("the archive's policy is keep, off or so many days, read from config.json a
   for (const size of [0, -1, Number.NaN, Infinity, "10"]) assert.throws(() => parsePolicy("keep", size), { code: "invalid_archive" }, String(size));
 
   assert.match(describePolicy(parsePolicy("off")), /^Nothing decrypted is written to this machine\./);
-  assert.equal(describePolicy(parsePolicy("days:7", 5)), "Decrypted messages and receipts are kept in archive/ for 7 days and never more than 5 MB, oldest first out, then removed. The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine.");
+  assert.equal(describePolicy(parsePolicy("days:7", 5)), "Decrypted messages and receipts are kept in archive/ for 7 days, then removed. Each time it is tidied, when a runtime starts and at most once an hour after, the oldest go first until it holds no more than 5 MB, so in between it can hold more. The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine.");
   assert.match(describePolicy(parsePolicy("keep")), /kept in archive\/ until you remove them\. .*`aamio archive days:30` gives it a lifetime, `aamio archive off` stops it\.$/);
 });
 

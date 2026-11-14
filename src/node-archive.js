@@ -132,14 +132,17 @@ export function parsePolicy(text, maxMb = null) {
 
 /** One sentence a person or a model can act on. The words are aamio-python's. */
 export function describePolicy(policy) {
-  const size = policy.max_mb ? ` and never more than ${policy.max_mb} MB, oldest first out` : "";
+  // The ceiling holds each time the archive is tidied, not at every write:
+  // under one of 128 bytes a row of 415 stayed until the next tidying, where
+  // this said never more than (the fifth release check of 14 November 2026).
+  const size = policy.max_mb ? ` Each time it is tidied, when a runtime starts and at most once an hour after, the oldest go first until it holds no more than ${policy.max_mb} MB, so in between it can hold more.` : "";
   if (policy.mode === "off") {
     return "Nothing decrypted is written to this machine. The key, the read keys of open threads and the outbox with sealed bytes still are, since the runtime cannot work without them.";
   }
   if (policy.mode === "days") {
-    return `Decrypted messages and receipts are kept in archive/ for ${policy.days} days${size}, then removed. The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine.`;
+    return `Decrypted messages and receipts are kept in archive/ for ${policy.days} days, then removed.${size} The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine.`;
   }
-  return `Decrypted messages and receipts are kept in archive/ until you remove them${size}. The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine. \`aamio archive days:30\` gives it a lifetime, \`aamio archive off\` stops it.`;
+  return `Decrypted messages and receipts are kept in archive/ until you remove them.${size} The service itself keeps nothing past a thread's expiry: this archive is yours, on this machine. \`aamio archive days:30\` gives it a lifetime, \`aamio archive off\` stops it.`;
 }
 
 /** After a rename the new name is on disk only when the folder is. Windows has no such call for a folder, and journals the rename. */
