@@ -242,7 +242,8 @@ export function perKeyFix(names) {
   // As JSON writes it, and on the command line only a name no shell changes: a
   // name with a space or a quote was given unquoted, and was not one argument or
   // not JSON (a review of 14 November 2026).
-  const line = /^[A-Za-z0-9._-]+$/.test(named) ? `--allow ${named} on the command line` : named.includes(",") ? "on the command line --allow takes names apart at commas, so this one is named over MCP" : "--allow on the command line with the name quoted as your shell quotes it";
+  // And as --allow=NAME: a name that starts with a hyphen was read as an option, so it goes as --allow=NAME, which every parser takes whole (a review of 14 November 2026).
+  const line = /^[A-Za-z0-9._-]+$/.test(named) ? `--allow=${named} on the command line` : named.includes(",") ? "on the command line --allow takes names apart at commas, so this one is named over MCP" : "--allow on the command line with the name quoted as your shell quotes it";
   return `Name the partners who may write in allow, as allow: ${JSON.stringify([named])} over MCP, or ${line}, and open the channel again.`;
 }
 
