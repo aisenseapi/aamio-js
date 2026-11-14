@@ -594,6 +594,11 @@ export class NodeRuntime {
   // fails costs the record, and is said, and the message, the send or the
   // post it is about stands.
 
+  /** Tidies the archive when an hour has passed since it was tidied last. */
+  async pruneWhenDue() {
+    if (this.now() - this.prunedAt > 3600) await this.prune();
+  }
+
   /** Removes what the policy no longer keeps. A failure is said, since the archive then keeps growing in plain text. */
   async prune() {
     const policy = this.archivePolicy;
@@ -618,8 +623,11 @@ export class NodeRuntime {
    */
   async archive(label, record) {
     if (!this.archiveEnabled || this.closed) return false;
+    // Before the row, never after it: a ceiling under one row took the row just
+    // written, and the read said archived (the fourth release check of 14
+    // November 2026). A read tidies before it weighs its first message.
+    await this.pruneWhenDue();
     await appendRecord(this.home, archiveName(label), record);
-    if (this.now() - this.prunedAt > 3600) await this.prune();
     return true;
   }
 
@@ -2798,6 +2806,12 @@ export class NodeRuntime {
     // cursor cannot be written, so the same rows are not written down again
     // when this process reads them again.
     const written = [];
+    // Tidying that is due runs before any message of this read is weighed for
+    // the archive, and never after one is written: what the read says of the
+    // archive is so as it returns. A ceiling under one row took the row a read
+    // had just written, and a row an earlier process wrote, and the read said
+    // archived of both (the fourth release check of 14 November 2026).
+    if (Array.isArray(data.messages) && data.messages.length > 0 && this.archiveEnabled && !this.closed) await this.pruneWhenDue();
     for (const raw of data.messages) {
       if (limit !== null && entries.length >= limit) break;
       const entry = this.readEntry(channel, raw);

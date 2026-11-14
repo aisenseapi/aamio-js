@@ -208,6 +208,39 @@ test("a row a prune removed is written again, never taken as there", async (t) =
   assert.deepEqual(await written(home), [[1], 1], "written again: the archive has what the message says");
 });
 
+test("tidying that is due runs before a read weighs its messages, and each says archived of a row that is there", async (t) => {
+  // The fourth release check of 14 November 2026, item 1: with tidying due and a
+  // ceiling under one row, the read used the row an earlier process wrote and
+  // wrote the next, the tidying took both, and each message said archived.
+  const { home, rows, open } = await crafted(t, ["first", "second"]);
+  await writeFile(join(home, "archive", "side.jsonl"), Buffer.concat([rows[0], Buffer.from("\n")]));
+  const again = await open("a", false);
+  again.archivePolicy = { mode: "keep", days: null, max_mb: 128 / (1024 * 1024) };
+  again.prunedAt = 0;
+  assert.ok(rows[0].length > 128, "the ceiling is under one row");
+  assert.deepEqual((await again.read()).map((m) => [m.body.text, m.archived]), [["first", true], ["second", true]]);
+  assert.deepEqual(await written(home), [[1, 2], 2], "the archive has what the messages say, after the tidying of the same read");
+  assert.ok(again.prunedAt > 0, "the tidying ran");
+});
+
+test("tidying between two reads still takes what was there, and the next read's own row stays", async (t) => {
+  const fake = new FakeAamio();
+  const { root, open } = await homes(t, fake);
+  const owner = await open("a");
+  const guest = await open("b");
+  await owner.partnerAdd("guest", guest.keys.public);
+  await owner.read();
+  const side = await owner.channelOpen("side", { ttl: 600, allow: ["guest"] });
+  await write(fake, guest, side.w, JSON.stringify({ text: "first" }));
+  assert.deepEqual((await owner.read()).map((m) => [m.body.text, m.archived]), [["first", true]]);
+  assert.deepEqual(await rows(join(root, "a"), "side"), [1]);
+  await write(fake, guest, side.w, JSON.stringify({ text: "second" }));
+  owner.archivePolicy = { mode: "keep", days: null, max_mb: 128 / (1024 * 1024) };
+  owner.prunedAt = 0;
+  assert.deepEqual((await owner.read()).map((m) => [m.body.text, m.archived]), [["second", true]]);
+  assert.deepEqual(await rows(join(root, "a"), "side"), [2], "the first went with the tidying, which ran first; the second is there");
+});
+
 test("after a cursor that could not be written and a prune, the mark is the row that is there", async (t) => {
   const fake = new FakeAamio();
   const { root, open } = await homes(t, fake);
