@@ -7,7 +7,10 @@
 // The first answer for a frame decides its status, also after its deadline
 // (B3.2). A transport is hung when three frames in a row reach their deadline
 // unanswered, or when frames wait 60 seconds for room no ready gave; what else
-// it says does not count as progress.
+// it says does not count as progress. A transport that says down gets no frames
+// until it says up and a new ready gives room, and one that has said down for
+// 60 seconds is stopped to be started again. Lines go to the transport through
+// the stream of its standard input, which never holds up the owner.
 
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
@@ -84,6 +87,8 @@ export class TransportProcess {
     this.counter = 0;
     this.timeoutsInARow = 0;
     this.waitingForRoomSince = null;
+    this.downSince = null;     // when the transport said down, while it has not said up again
+    this.afterDown = false;    // down was said: no room until a ready that comes after up
     this.failed = null;
   }
 
@@ -173,7 +178,9 @@ export class TransportProcess {
   // ---------------------------------------------------------- room and frames
 
   room() {
-    return this.credit - (this.written - this.sendsRead);
+    const free = this.credit - (this.written - this.sendsRead);
+    // After a down, the room it had is not trusted: only a ready that comes after up gives room again.
+    return this.afterDown ? Math.min(free, 0) : free;
   }
 
   /** Give the transport a frame if there is room: its id, or null when there is no room now. */
@@ -184,9 +191,10 @@ export class TransportProcess {
     }
     this.counter += 1;
     const id = `f-${this.counter}`;
-    this.#write({ t: "send", id, to, frame: b64url(frame), deadline_ms: deadlineMs });
-    this.written += 1;
+    // The frame and its deadline are known before the line goes, whatever the writing does.
     this.frames.set(id, { status: "waiting", deadline: this.clock() + deadlineMs / 1000, late: false, answered: false });
+    this.written += 1;
+    this.#write({ t: "send", id, to, frame: b64url(frame), deadline_ms: deadlineMs });
     return id;
   }
 
@@ -210,6 +218,14 @@ export class TransportProcess {
     }
     if (this.timeoutsInARow >= HANG_TIMEOUTS) this.#fail(new TransportFailed("transport_hung", `${this.timeoutsInARow} frames in a row reached their deadline without an answer`));
     if (this.waitingForRoomSince !== null && now - this.waitingForRoomSince >= HANG_ROOM_SECONDS) this.#fail(new TransportFailed("transport_hung", "frames waited 60 seconds for room no ready gave"));
+    // Also with nothing to send: a transport that cannot hear is started again (B2), not waited on for good.
+    if (this.downSince !== null && now - this.downSince >= HANG_ROOM_SECONDS) this.#fail(new TransportFailed("transport_down", "the transport has said down for 60 seconds"));
+  }
+
+  /** The owner has frames that wait for room, or has none: B3.2 counts the sixty seconds from the first moment. */
+  waitingForRoom(waiting) {
+    if (!waiting) this.waitingForRoomSince = null;
+    else if (this.room() <= 0 && this.waitingForRoomSince === null) this.waitingForRoomSince = this.clock();
   }
 
   /** What the transport said since last time, waiting up to timeoutMs for the first line: a list of events. */
@@ -269,6 +285,7 @@ export class TransportProcess {
         const before = this.room();
         this.credit = credit;
         this.sendsRead = sendsRead;
+        if (this.downSince === null) this.afterDown = false;
         if (this.room() > Math.max(before, 0)) this.waitingForRoomSince = null;
         return [];
       }
@@ -289,6 +306,13 @@ export class TransportProcess {
         return [["received", source, unb64url(message.frame)]];
       }
       case "status":
+        if (message.state === "down") {
+          // Room is gone until up and a new ready; the sixty seconds run also with nothing to send.
+          this.afterDown = true;
+          if (this.downSince === null) this.downSince = this.clock();
+        } else if (message.state === "up") {
+          this.downSince = null;
+        }
         return [["status", message.state ?? null, message.reason ?? null]];
       default:
         this.#fail(new TransportFailed("transport_protocol", `an unknown line ${message.t}`));
@@ -322,11 +346,22 @@ export class TransportProcess {
   }
 }
 
-/** Frames from the medium, sorted by tag into envelopes, within the limits of A10. */
+/**
+ * Frames from the medium, sorted by tag into envelopes, within the limits of A10. A copy of a frame already held is not
+ * held again, and room is made before a frame is held, so what is held never passes FRAME_BYTES, whatever comes before
+ * anything is verified.
+ */
 export class Reassembly {
   constructor(clock = realSeconds) {
     this.clock = clock;
-    this.groups = new Map();
+    this.groups = new Map();   // tag -> { first, frames: Map(index -> frame), bytes }
+    this.dropped = 0;          // groups and frames let go to stay within A10, counted
+  }
+
+  held() {
+    let bytes = 0;
+    for (const group of this.groups.values()) bytes += group.bytes;
+    return bytes;
   }
 
   add(frame) {
@@ -334,21 +369,34 @@ export class Reassembly {
     for (const [tag, group] of this.groups) if (now - group.first > FRAME_SECONDS) this.groups.delete(tag);
     if (frame.length < carry.FRAME_HEADER + 1) throw new CarryRefused("frame_bad_length");
     const tag = Array.from(frame.slice(3, 7)).join(",");
+    const index = frame[7];
     let group = this.groups.get(tag);
+    if (group && group.frames.has(index)) {
+      if (carry.equal(group.frames.get(index), frame)) return null;
+      this.groups.delete(tag);
+      throw new CarryRefused("frame_conflict");
+    }
+    if (frame.length > FRAME_BYTES) {
+      this.dropped += 1;
+      return null;
+    }
+    while (this.groups.size && (this.held() + frame.length > FRAME_BYTES || (!group && this.groups.size >= FRAME_GROUPS))) {
+      let oldest = null;
+      for (const [key, g] of this.groups) if (oldest === null || g.first < this.groups.get(oldest).first) oldest = key;
+      this.groups.delete(oldest);
+      this.dropped += 1;
+      if (oldest === tag) group = undefined;
+    }
     if (!group) {
-      while (this.groups.size && (this.groups.size >= FRAME_GROUPS || [...this.groups.values()].reduce((sum, g) => sum + g.bytes, 0) + frame.length > FRAME_BYTES)) {
-        let oldest = null;
-        for (const [key, g] of this.groups) if (oldest === null || g.first < this.groups.get(oldest).first) oldest = key;
-        this.groups.delete(oldest);
-      }
-      group = { first: now, frames: [], bytes: 0 };
+      group = { first: now, frames: new Map(), bytes: 0 };
       this.groups.set(tag, group);
     }
-    group.frames.push(frame);
+    group.frames.set(index, frame);
     group.bytes += frame.length;
-    if (new Set(group.frames.map((f) => f[7])).size < frame[8]) {
+    const frames = [...group.frames.values()];
+    if (frames.length < frame[8]) {
       try {
-        carry.reassemble(group.frames);
+        carry.reassemble(frames);
       } catch (error) {
         if (error instanceof CarryRefused && error.code !== "frame_incomplete") {
           this.groups.delete(tag);
@@ -358,6 +406,6 @@ export class Reassembly {
       return null;
     }
     this.groups.delete(tag);
-    return carry.reassemble(group.frames);
+    return carry.reassemble(frames);
   }
 }

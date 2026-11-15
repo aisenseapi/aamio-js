@@ -5,53 +5,64 @@
 // is put together from its frames and given to the state, which decides; what
 // the state answers goes back to the address it came from.
 //
-// A message is sent again with the same bytes until its receipt comes; it is
-// never sealed again or moved to another session, so a copy is known as one.
-// It is confirmed only when its receipt comes: when the tries run out without
-// one, its outcome is unknown, since it may still have arrived, and it is never
-// reported as confirmed. The challenge and the open are sent again with the same bytes through the
+// A message is known by its mark (partner, session and counter), which outlives
+// the process. It is sent again with the same bytes until its receipt comes; it
+// is never sealed again or moved to another session, so a copy is known as one.
+// The bytes and the tries are kept in the state, so a carrier on the same home
+// after a restart goes on with the same bytes and the tries that are left. It is
+// confirmed only when its receipt comes: when the tries run out without one, its
+// outcome is unknown, since it may still have arrived, and it is never reported
+// as confirmed.
+//
+// What came in is the state's until the program says it has it: inbox is what
+// the state keeps that the program has not taken, read as often as needed, and
+// take(mark) says the program has it. A crash before take offers it again.
+//
+// The challenge and the open are sent again with the same bytes through the
 // challenge window, since on a medium that loses frames one try is not enough;
 // an ask no challenge answers is asked again with a new session.
 
 import { performance } from "node:perf_hooks";
 import * as carry from "./carry.js";
 import { CarryRefused } from "./carry.js";
+import { mark, TRIES_DEFAULT } from "./node-carry-state.js";
 import { Reassembly } from "./node-transport-host.js";
 
 export const UNVERIFIED_PER_SECOND = 20;
-export const OUTCOMES_KEPT = 10000;
 const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 const pairOf = (pk, session) => toHex(pk) + ":" + toHex(session);
 
 export class Carrier {
   constructor(state, process, profile, known, { clock = () => performance.now() / 1000, wall = () => Math.floor(Date.now() / 1000), log = () => {},
-    retrySeconds = 2, askRetrySeconds = 5, tries = 30 } = {}) {
+    retrySeconds = 2, askRetrySeconds = 5, tries = TRIES_DEFAULT } = {}) {
     Object.assign(this, { state, process, profile, known, clock, wall, log, retrySeconds, askRetrySeconds, tries });
     this.reassembly = new Reassembly(clock);
     this.frameLimit = process.properties.max_frame_up;
     this.queue = [];
-    this.waiting = new Map();
+    this.messages = new Map();   // mark -> { envelope, pk, session, next }: sent, and its receipt not come
+    this.control = new Map();    // id -> challenges and opens sent again through the window
     this.asks = new Map();
     this.answered = new Map();   // pair -> [partner pk, session]
     this.addresses = new Map();  // partner pk in hex -> the transport address it was last heard from
-    this.inbox = [];             // [sender pk, session, counter, content]
     this.refused = [];
-    this.outcomes = new Map();   // envelope id -> "confirmed" or "unknown", the newest OUTCOMES_KEPT
     this.budget = UNVERIFIED_PER_SECOND;
     this.budgetAt = clock();
     this.counter = 0;
+    const knownSet = new Set(known.map(toHex));
+    for (const [key, pk, session, , envelope] of state.unconfirmed()) {
+      // Sent before this process started: taken up with the same bytes and the tries that are left.
+      if (knownSet.has(toHex(pk))) this.messages.set(key, { envelope, pk, session, next: clock() });
+    }
   }
 
   #queue(envelope, to) {
     this.queue.push([carry.split(envelope, this.frameLimit), to]);
   }
 
-  #await(envelope, to, kind, pk, session, counter = null, most = null) {
+  #control(envelope, to, kind, pk, session, most) {
     this.counter += 1;
-    const key = `e-${this.counter}`;
-    this.waiting.set(key, { envelope, to, next: this.clock() + this.retrySeconds, tries: 1, kind, pk, session, counter, most: most ?? this.tries });
+    this.control.set(`c-${this.counter}`, { envelope, to, kind, pk, session, next: this.clock() + this.retrySeconds, tries: 1, most });
     this.#queue(envelope, to);
-    return key;
   }
 
   #windowTries() {
@@ -73,34 +84,40 @@ export class Carrier {
     return found;
   }
 
-  /** A message in an open session, sent again with the same bytes until its receipt comes: its id. */
+  /** A message in an open session, sent again with the same bytes until its receipt comes: its mark. */
   send(partnerPk, session, content, deadline = 0) {
-    const envelope = this.state.send(partnerPk, session, content, this.profile, { deadline });
-    return this.#await(envelope, this.addresses.get(toHex(partnerPk)) ?? null, "message", partnerPk, session, this.state.counterOf(partnerPk, session));
+    const envelope = this.state.send(partnerPk, session, content, this.profile, { deadline, most: this.tries });
+    const key = mark(partnerPk, session, this.state.counterOf(partnerPk, session));
+    this.messages.set(key, { envelope, pk: partnerPk, session, next: this.clock() + this.retrySeconds });
+    this.#queue(envelope, this.addresses.get(toHex(partnerPk)) ?? null);
+    return key;
   }
 
   /** True only when the receipt came; never for a message whose tries ran out without one. */
   confirmed(key) {
-    return this.outcomes.get(key) === "confirmed";
+    return this.state.outcome(key) === "confirmed";
   }
 
-  /** waiting while it is sent again, confirmed when its receipt came, and unknown when the tries
-   * ran out without one (it may still have arrived) or the id is no longer remembered. */
+  /** waiting while it is sent again, confirmed when its receipt came, and unknown when the tries ran out without one. */
   outcome(key) {
-    if (this.waiting.has(key)) return "waiting";
-    return this.outcomes.get(key) ?? "unknown";
+    return this.state.outcome(key);
   }
 
-  #finish(key, outcome) {
-    this.waiting.delete(key);
-    this.outcomes.set(key, outcome);
-    while (this.outcomes.size > OUTCOMES_KEPT) this.outcomes.delete(this.outcomes.keys().next().value);
+  /** What came and is kept that the program has not taken: [sender pk, session, counter, content, mark], in order. */
+  get inbox() {
+    return this.state.pending().map(([key, pk, session, counter, content]) => [pk, session, counter, content, key]);
+  }
+
+  /** The program has the message: the state keeps only its mark from now on. */
+  take(key) {
+    this.state.handedOver(key);
   }
 
   /** Read what the transport said, deliver what is whole, resend what waits, and give frames within the room. */
   async pump(timeoutMs = 50) {
     for (const event of await this.process.poll(timeoutMs)) {
       if (event[0] === "received") this.#received(event[1], event[2]);
+      else if (event[0] === "status") this.log(`transport ${this.process.name}: ${event[1]} ${event[2]}`);
     }
     this.#resend();
     this.#flush();
@@ -125,9 +142,9 @@ export class Carrier {
       return;
     }
     this.budget -= 1;
-    let result, reply, got;
+    let reply, got;
     try {
-      [result, reply, got] = this.state.deliver(envelope, this.known, this.profile, now, this.wall());
+      [, reply, got] = this.state.deliver(envelope, this.known, this.profile, now, this.wall());
     } catch (error) {
       if (!(error instanceof CarryRefused)) throw error;
       // Refusals stay here (A7): logged and counted, never answered over the medium.
@@ -138,8 +155,10 @@ export class Carrier {
     const pair = pairOf(got.sender, got.session);
     if (got.kind === carry.CHALLENGE) {
       this.asks.delete(pair);
-      this.answered.set(pair, [got.sender, got.session]);
-      this.#await(reply, source, "open", got.sender, got.session, null, this.#windowTries());
+      if (!this.answered.has(pair)) this.answered.set(pair, [got.sender, got.session]);
+      // The open is sent again with the same bytes through the challenge window, until the first receipt in the session
+      // shows it came: on a medium that loses frames, one try is not enough.
+      this.#control(reply, source, "open", got.sender, got.session, this.#windowTries());
       return;
     }
     if (got.kind === carry.OPEN) {
@@ -147,31 +166,39 @@ export class Carrier {
       return;
     }
     if (got.kind === carry.ASK) {
-      this.#await(reply, source, "challenge", got.sender, got.session, null, this.#windowTries());
+      this.#control(reply, source, "challenge", got.sender, got.session, this.#windowTries());
       return;
     }
     if (got.kind === carry.RECEIPT) {
       const counter = ((got.content[9] << 24) >>> 0) + (got.content[10] << 16) + (got.content[11] << 8) + got.content[12];
-      for (const [key, entry] of this.waiting) {
-        if (pairOf(entry.pk, entry.session) === pair && (entry.kind === "open" || entry.counter === counter)) this.#finish(key, "confirmed");
-      }
+      this.messages.delete(mark(got.sender, got.content.slice(1, 9), counter));
+      this.#settled(pair, "open");
       return;
     }
-    if (got.kind === carry.MESSAGE && result === "accepted") this.inbox.push([got.sender, got.session, got.counter, got.content]);
     if (reply) this.#queue(reply, source);
   }
 
   #settled(pair, kind) {
-    for (const [key, entry] of this.waiting) if (pairOf(entry.pk, entry.session) === pair && entry.kind === kind) this.#finish(key, "confirmed");
+    for (const [key, entry] of this.control) if (pairOf(entry.pk, entry.session) === pair && entry.kind === kind) this.control.delete(key);
   }
 
   #resend() {
     const now = this.clock();
-    for (const [key, entry] of this.waiting) {
+    for (const [key, entry] of this.messages) {
+      if (now < entry.next) continue;
+      // The try is counted in the state before it goes, so a restart never gives back tries that were used.
+      if (!this.state.tried(key)) {
+        this.log(`no receipt for ${key}, and its tries are used`);
+        this.messages.delete(key);
+        continue;
+      }
+      entry.next = now + this.retrySeconds;
+      this.#queue(entry.envelope, this.addresses.get(toHex(entry.pk)) ?? null);
+    }
+    for (const [key, entry] of this.control) {
       if (now < entry.next) continue;
       if (entry.tries >= entry.most) {
-        // The outcome stays unknown; nothing is wrapped again or sent as a new message on its own.
-        this.#finish(key, "unknown");
+        this.control.delete(key);
         continue;
       }
       entry.tries += 1;
@@ -195,9 +222,11 @@ export class Carrier {
       const frame = frames.shift();
       if (this.process.send(frame, to) === null) {
         frames.unshift(frame);
-        return;
+        break;
       }
       if (frames.length === 0) this.queue.shift();
     }
+    // The host measures how long frames wait for room (B3.2), so it is told whether any do.
+    this.process.waitingForRoom(this.queue.length > 0);
   }
 }

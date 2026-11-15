@@ -17,7 +17,7 @@ import { delimiter, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Keys } from "../src/aamio.js";
 import * as carry from "../src/carry.js";
-import { CarryState, profile } from "../src/node-carry-state.js";
+import { CarryState, mark, profile } from "../src/node-carry-state.js";
 import { Carrier } from "../src/node-carrier.js";
 import { Reassembly, TransportFailed, TransportProcess, environment } from "../src/node-transport-host.js";
 
@@ -258,3 +258,124 @@ for (const [mode, medium, label] of [["readable", {}, "clean"], ["readable", POO
     }
   });
 }
+
+// ------------------------------------------------------------------ the review of 2026-11-15, findings 1, 4, 5, 6 and 14
+
+const NOW = 1794700000;
+const readable = profile({ mode: "readable" });
+const openedPair = (atA, atB) => {
+  const [session, ask] = atA.ask(B.publicRaw, readable, 0);
+  const [, challenge] = atB.deliver(ask, [A.publicRaw], readable, 0, NOW);
+  const [, opening] = atA.deliver(challenge, [B.publicRaw], readable, 0, NOW);
+  assert.equal(atB.deliver(opening, [A.publicRaw], readable, 0, NOW)[0], "accepted");
+  return session;
+};
+const frameOf = (tag, index, count, size, fill) => {
+  const frame = new Uint8Array(9 + size).fill(fill);
+  frame.set([0x41, 0x46, 0, ...tag, index, count]);
+  return frame;
+};
+
+test("finding 4: reassembly holds a copy once and never more than its room", () => {
+  const reassembly = new Reassembly(new Clock().read);
+  const first = frameOf([1, 2, 3, 4], 0, 2, 32768, 120);
+  for (let i = 0; i < 10; i++) assert.equal(reassembly.add(first), null);
+  assert.equal(reassembly.held(), first.length);
+  for (let n = 1; n < 40; n++) {
+    reassembly.add(frameOf([5, 6, 7, 8], n, 255, 32768, n));
+    assert.ok(reassembly.held() <= 262144);
+  }
+  for (let n = 0; n < 40; n++) {
+    reassembly.add(frameOf([n, 1, 2, 3], 0, 2, 20000, n));
+    assert.ok(reassembly.held() <= 262144 && reassembly.groups.size <= 32);
+  }
+});
+
+test("finding 5: a transport that stops reading never holds up the owner, its deadlines or its stop", { skip }, async () => {
+  const clock = new Clock();
+  const transport = await startFake("deaf", clock);
+  try {
+    await waitForRoom(transport, 2);
+    const began = performance.now();
+    const big = transport.send(new Uint8Array(65000), null, 100);
+    const small = transport.send(new Uint8Array(20), null, 100);
+    assert.ok(performance.now() - began < 500, "giving a frame waited for the transport to read");
+    clock.now += 1;
+    transport.checkTime();
+    assert.ok(["unknown", "not_sent"].includes(transport.status(big)) && ["unknown", "not_sent"].includes(transport.status(small)));
+    const stopping = performance.now();
+    await transport.stop();
+    assert.ok(performance.now() - stopping < 6000);
+  } finally {
+    await transport.stop();
+  }
+});
+
+test("finding 6: frames that wait in the carrier make the transport hung after sixty seconds", { skip }, async () => {
+  const clock = new Clock();
+  const atA = new CarryState(A);
+  const session = openedPair(atA, new CarryState(B));
+  const transport = await startFake("no_room", clock);
+  try {
+    const carrier = new Carrier(atA, transport, readable, [B.publicRaw], { clock: clock.read, wall: () => NOW, retrySeconds: 1000 });
+    carrier.send(B.publicRaw, session, new TextEncoder().encode("hei"));
+    await carrier.pump(50);
+    assert.equal(transport.waitingForRoomSince, clock.now);
+    clock.now += 59;
+    await carrier.pump(50);
+    clock.now += 2;
+    await assert.rejects(() => carrier.pump(50), (error) => error instanceof TransportFailed && error.code === "transport_hung");
+  } finally {
+    await transport.stop();
+  }
+});
+
+test("finding 14: down takes the room away, up alone gives none back, and sixty seconds of down start it again", async () => {
+  const transport = new TransportProcess("fake", "0.1.0", [], null, {}, { clock: new Clock().read });
+  const rooms = [];
+  for (const line of ['{"t":"ready","credit":3,"sends_read":0}', '{"t":"status","state":"down","reason":"the receiver stopped"}',
+    '{"t":"ready","credit":3,"sends_read":0}', '{"t":"status","state":"up","reason":"back"}', '{"t":"ready","credit":3,"sends_read":0}']) {
+    transport.inject(line);
+    await transport.poll(0);
+    rooms.push(transport.room());
+  }
+  assert.deepEqual(rooms, [3, 0, 0, 0, 3]);
+  const clock = new Clock();
+  const quiet = new TransportProcess("fake", "0.1.0", [], null, {}, { clock: clock.read });
+  quiet.inject('{"t":"status","state":"down","reason":"the receiver stopped"}');
+  await quiet.poll(0);
+  clock.now += 59;
+  quiet.checkTime();
+  quiet.inject('{"t":"status","state":"up","reason":"back"}');
+  await quiet.poll(0);
+  clock.now += 120;
+  quiet.checkTime();
+  quiet.inject('{"t":"status","state":"down","reason":"stopped again"}');
+  await quiet.poll(0);
+  clock.now += 60;
+  assert.throws(() => quiet.checkTime(), (error) => error instanceof TransportFailed && error.code === "transport_down");
+});
+
+test("finding 1: a carrier on the same home after a restart sends the same bytes with the tries left", { skip }, async () => {
+  const clock = new Clock();
+  const root = mkdtempSync(join(tmpdir(), "aamio-carry-resume-"));
+  const file = join(root, "a.json");
+  const atA = new CarryState(A, file);
+  const atB = new CarryState(B);
+  const [session, ask] = atA.ask(B.publicRaw, readable, 0);
+  const [, challenge] = atB.deliver(ask, [A.publicRaw], readable, 0, NOW);
+  atA.deliver(challenge, [B.publicRaw], readable, 0, NOW);
+  const envelope = atA.send(B.publicRaw, session, new TextEncoder().encode("hei"), readable, { most: 5 });
+  const key = mark(B.publicRaw, session, 1);
+  const transport = await startFake("loopback", clock);
+  try {
+    const carrier = new Carrier(new CarryState(A, file), transport, readable, [B.publicRaw], { clock: clock.read, wall: () => NOW, tries: 5 });
+    assert.ok(carry.equal(carrier.messages.get(key).envelope, envelope));
+    await carrier.pump(50);
+    const after = new CarryState(A, file);
+    assert.deepEqual([after.durable.outbox[key].tries, after.counterOf(B.publicRaw, session), carrier.outcome(key)], [2, 1, "waiting"]);
+  } finally {
+    await transport.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
