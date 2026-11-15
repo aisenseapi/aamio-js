@@ -1,7 +1,8 @@
 // One transport at work, for Node: frames in and out, envelopes delivered, receipts awaited.
 //
 // A Carrier joins a running TransportProcess to the home's CarryState for the
-// partners bound to that transport, under one security profile. What comes in
+// partners bound to that transport, under one security profile or one per
+// partner (B5). What comes in
 // is put together from its frames and given to the state, which decides; what
 // the state answers goes back to the address it came from.
 //
@@ -36,13 +37,17 @@ export class Carrier {
   constructor(state, process, profile, known, { clock = () => performance.now() / 1000, wall = () => Math.floor(Date.now() / 1000), log = () => {},
     retrySeconds = 2, askRetrySeconds = 5, tries = TRIES_DEFAULT } = {}) {
     Object.assign(this, { state, process, profile, known, clock, wall, log, retrySeconds, askRetrySeconds, tries });
+    // One profile for every partner, or a function from a partner's key to its own (B5).
+    this.profileOf = typeof profile === "function" ? profile : () => profile;
+    this.given = new Map();      // mark -> the frame ids of each try that was given to the transport whole
+    this.handed = new Set();     // marks one try of which the transport said it handed over whole (B6 1)
     this.reassembly = new Reassembly(clock);
     this.frameLimit = process.properties.max_frame_up;
     this.queue = [];
     this.messages = new Map();   // mark -> { envelope, pk, session, next }: sent, and its receipt not come
     this.control = new Map();    // id -> challenges and opens sent again through the window
     this.asks = new Map();
-    this.answered = new Map();   // pair -> [partner pk, session]
+    this.answered = new Map();   // pair -> [partner pk, session, when its challenge came], in that order
     this.addresses = new Map();  // partner pk in hex -> the transport address it was last heard from
     this.refused = [];
     this.budget = UNVERIFIED_PER_SECOND;
@@ -55,8 +60,8 @@ export class Carrier {
     }
   }
 
-  #queue(envelope, to) {
-    this.queue.push([carry.split(envelope, this.frameLimit), to]);
+  #queue(envelope, to, key = null) {
+    this.queue.push([carry.split(envelope, this.frameLimit), to, key, []]);
   }
 
   #control(envelope, to, kind, pk, session, most) {
@@ -65,13 +70,13 @@ export class Carrier {
     this.#queue(envelope, to);
   }
 
-  #windowTries() {
-    return Math.max(1, Math.floor(this.profile.challengeWindow / this.retrySeconds));
+  #windowTries(pk) {
+    return Math.max(1, Math.floor(this.profileOf(pk).challengeWindow / this.retrySeconds));
   }
 
   /** Ask the partner for a session of this party's: the challenge and the open follow in pump. */
   open(partnerPk) {
-    const [session, envelope] = this.state.ask(partnerPk, this.profile, this.clock());
+    const [session, envelope] = this.state.ask(partnerPk, this.profileOf(partnerPk), this.clock());
     this.asks.set(pairOf(partnerPk, session), { pk: partnerPk, session, next: this.clock() + this.askRetrySeconds, tries: 1 });
     this.#queue(envelope, this.addresses.get(toHex(partnerPk)) ?? null);
     return session;
@@ -84,13 +89,39 @@ export class Carrier {
     return found;
   }
 
+  /** The newest session of this party's with the partner whose challenge came less than seconds ago, or null. */
+  usableSession(partnerPk, seconds) {
+    let found = null;
+    const now = this.clock();
+    for (const [pk, session, at] of this.answered.values()) if (carry.equal(pk, partnerPk) && now - at < seconds) found = session;
+    return found;
+  }
+
   /** A message in an open session, sent again with the same bytes until its receipt comes: its mark. */
   send(partnerPk, session, content, deadline = 0) {
-    const envelope = this.state.send(partnerPk, session, content, this.profile, { deadline, most: this.tries });
+    const envelope = this.state.send(partnerPk, session, content, this.profileOf(partnerPk), { deadline, most: this.tries });
     const key = mark(partnerPk, session, this.state.counterOf(partnerPk, session));
     this.messages.set(key, { envelope, pk: partnerPk, session, next: this.clock() + this.retrySeconds });
-    this.#queue(envelope, this.addresses.get(toHex(partnerPk)) ?? null);
+    this.#queue(envelope, this.addresses.get(toHex(partnerPk)) ?? null, key);
     return key;
+  }
+
+  /** B6 1: the transport said sent for every frame of one try at the message, in this process. Nothing about receipt. */
+  handedOver(key) {
+    if (this.handed.has(key)) return true;
+    for (const ids of this.given.get(key) ?? []) {
+      if (ids.length && ids.every((id) => this.process.status(id) === "sent")) {
+        this.handed.add(key);
+        this.given.delete(key);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Whether frames wait here for the transport, or wait at the transport for an answer. */
+  busy() {
+    return this.queue.length > 0 || this.process.waiting() > 0;
   }
 
   /** True only when the receipt came; never for a message whose tries ran out without one. */
@@ -144,7 +175,7 @@ export class Carrier {
     this.budget -= 1;
     let reply, got;
     try {
-      [, reply, got] = this.state.deliver(envelope, this.known, this.profile, now, this.wall());
+      [, reply, got] = this.state.deliver(envelope, this.known, this.profileOf, now, this.wall());
     } catch (error) {
       if (!(error instanceof CarryRefused)) throw error;
       // Refusals stay here (A7): logged and counted, never answered over the medium.
@@ -155,10 +186,10 @@ export class Carrier {
     const pair = pairOf(got.sender, got.session);
     if (got.kind === carry.CHALLENGE) {
       this.asks.delete(pair);
-      if (!this.answered.has(pair)) this.answered.set(pair, [got.sender, got.session]);
+      if (!this.answered.has(pair)) this.answered.set(pair, [got.sender, got.session, now]);
       // The open is sent again with the same bytes through the challenge window, until the first receipt in the session
       // shows it came: on a medium that loses frames, one try is not enough.
-      this.#control(reply, source, "open", got.sender, got.session, this.#windowTries());
+      this.#control(reply, source, "open", got.sender, got.session, this.#windowTries(got.sender));
       return;
     }
     if (got.kind === carry.OPEN) {
@@ -166,7 +197,7 @@ export class Carrier {
       return;
     }
     if (got.kind === carry.ASK) {
-      this.#control(reply, source, "challenge", got.sender, got.session, this.#windowTries());
+      this.#control(reply, source, "challenge", got.sender, got.session, this.#windowTries(got.sender));
       return;
     }
     if (got.kind === carry.RECEIPT) {
@@ -193,7 +224,7 @@ export class Carrier {
         continue;
       }
       entry.next = now + this.retrySeconds;
-      this.#queue(entry.envelope, this.addresses.get(toHex(entry.pk)) ?? null);
+      this.#queue(entry.envelope, this.addresses.get(toHex(entry.pk)) ?? null, key);
     }
     for (const [key, entry] of this.control) {
       if (now < entry.next) continue;
@@ -209,7 +240,7 @@ export class Carrier {
       if (now < entry.next) continue;
       this.asks.delete(pair);
       if (entry.tries < this.tries) {
-        const [session, envelope] = this.state.ask(entry.pk, this.profile, now);
+        const [session, envelope] = this.state.ask(entry.pk, this.profileOf(entry.pk), now);
         this.asks.set(pairOf(entry.pk, session), { pk: entry.pk, session, next: now + this.askRetrySeconds, tries: entry.tries + 1 });
         this.#queue(envelope, this.addresses.get(toHex(entry.pk)) ?? null);
       }
@@ -218,13 +249,18 @@ export class Carrier {
 
   #flush() {
     while (this.queue.length && this.process.room() > 0) {
-      const [frames, to] = this.queue[0];
+      const [frames, to, key, ids] = this.queue[0];
       const frame = frames.shift();
-      if (this.process.send(frame, to) === null) {
+      const id = this.process.send(frame, to);
+      if (id === null) {
         frames.unshift(frame);
         break;
       }
-      if (frames.length === 0) this.queue.shift();
+      ids.push(id);
+      if (frames.length === 0) {
+        this.queue.shift();
+        if (key !== null && !this.handed.has(key)) this.given.set(key, [...(this.given.get(key) ?? []), ids]);
+      }
     }
     // The host measures how long frames wait for room (B3.2), so it is told whether any do.
     this.process.waitingForRoom(this.queue.length > 0);

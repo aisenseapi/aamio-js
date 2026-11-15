@@ -24,6 +24,8 @@ export const DESCRIBE_SECONDS = 10;
 export const STOP_SECONDS = 5;
 export const HANG_TIMEOUTS = 3;
 export const HANG_ROOM_SECONDS = 60;
+// A frame that settled is kept this long past its deadline, for a late answer and for status, and then forgotten.
+export const FORGET_SECONDS = 600;
 export const FRAME_GROUPS = 32;
 export const FRAME_BYTES = 262144;
 export const FRAME_SECONDS = 120;
@@ -80,6 +82,7 @@ export class TransportProcess {
     this.wake = null;
     this.buffer = "";
     this.properties = null;
+    this.medium = null;
     this.written = 0;
     this.credit = 0;
     this.sendsRead = 0;
@@ -94,7 +97,8 @@ export class TransportProcess {
 
   // ---------------------------------------------------------- the process
 
-  async start(aamioVersion, runtime, stateDir) {
+  /** hello, and the describe that answers it. With probe, the transport is asked to take nothing of its medium in use (B3). */
+  async start(aamioVersion, runtime, stateDir, { probe = false } = {}) {
     this.child = spawn(this.command[0], this.command.slice(1), { cwd: this.cwd, env: this.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk) => {
@@ -120,7 +124,7 @@ export class TransportProcess {
     this.child.on("error", () => this.#arrive(["closed"]));
     this.child.on("exit", () => this.#arrive(["closed"]));
     this.child.stdin.on("error", () => {});
-    this.#write({ t: "hello", aamio_addon: 3, aamio: { version: aamioVersion, runtime }, state_dir: stateDir });
+    this.#write({ t: "hello", aamio_addon: 3, aamio: { version: aamioVersion, runtime }, state_dir: stateDir, ...(probe ? { probe: true } : {}) });
     const until = realSeconds() + this.describeSeconds;
     while (this.properties === null) {
       if (realSeconds() >= until) this.#fail(new TransportFailed("transport_timeout", `no describe within ${this.describeSeconds} seconds of hello`));
@@ -198,13 +202,24 @@ export class TransportProcess {
     return id;
   }
 
+  /** What is known of a frame: waiting, sent, not_sent or unknown, and forgotten once it settled long ago. */
   status(id) {
-    return this.frames.get(id).status;
+    return this.frames.get(id)?.status ?? "forgotten";
+  }
+
+  /** How many frames wait for an answer from the transport. */
+  waiting() {
+    let count = 0;
+    for (const entry of this.frames.values()) if (entry.status === "waiting") count += 1;
+    return count;
   }
 
   /** B3.2: frames past their deadline become unknown and are cancelled; a transport without progress is hung. */
   checkTime() {
     const now = this.clock();
+    // A frame that settled is kept for a while for a late answer and for status, and then forgotten, so a transport that
+    // runs for days does not carry every frame it was ever given.
+    for (const [id, entry] of [...this.frames]) if (entry.status !== "waiting" && now - entry.deadline > FORGET_SECONDS) this.frames.delete(id);
     for (const [id, entry] of this.frames) {
       if (entry.status === "waiting" && now > entry.deadline) {
         entry.status = "unknown";
@@ -275,6 +290,7 @@ export class TransportProcess {
           } catch (failure) {
             this.#fail(failure);
           }
+          this.medium = typeof message.medium === "string" ? message.medium : null;
         }
         return [];
       case "ready": {

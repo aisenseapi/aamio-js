@@ -73,7 +73,7 @@ const HEX = /^(?:[0-9a-f]{2})*$/;
 const TOP = ["challenges", "floor", "incoming", "outbox", "outgoing", "stored", "used", "version"];
 const INCOMING = ["challenged", "closed", "closed_at", "deadline", "highest", "lifetime", "nonce", "opened"];
 const OUTGOING = ["answered", "closed", "closed_at", "counter", "deadline", "nonce"];
-const STORED = ["content", "sha256"];
+const STORED = ["at", "content", "sealed", "sha256"];
 const OUTBOX = ["envelope", "most", "receipt", "sha256", "tries"];
 
 const isMap = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -103,7 +103,8 @@ function outgoingOk(record) {
   return record.nonce === null && (record.deadline === null || int(record.deadline, 1, U32));
 }
 
-const storedOk = (entry) => fields(entry, STORED) && hex(entry.sha256, 32) && (entry.content === null || hex(entry.content, null, carry.MAX_CONTENT));
+const storedOk = (entry) => fields(entry, STORED) && hex(entry.sha256, 32) && (entry.content === null || hex(entry.content, null, carry.MAX_CONTENT))
+  && typeof entry.sealed === "boolean" && int(entry.at, 0, SAFE);
 
 function outboxOk(entry) {
   if (!fields(entry, OUTBOX) || !hex(entry.sha256, 32) || typeof entry.receipt !== "boolean") return false;
@@ -371,6 +372,13 @@ export class CarryState {
       .map(([key, entry]) => [key, ...parts(key), fromHex(entry.content)]);
   }
 
+  /** What is kept of a message taken in: sha256, whether it came sealed, and when (the time floor's clock), or null. */
+  kept(key) {
+    if (!Object.hasOwn(this.durable.stored, key)) return null;
+    const { sha256, sealed, at } = this.durable.stored[key];
+    return { sha256, sealed, at };
+  }
+
   /** The program has kept the message itself or is done with it: the content goes, the mark stays until A6.9. */
   handedOver(key) {
     this.#check();
@@ -387,7 +395,10 @@ export class CarryState {
     return Object.hasOwn(this.durable.incoming, pairOf(pk, session)) && record.challenged ? fromHex(record.nonce) : null;
   }
 
-  /** An envelope that came over a transport: [result, what goes back or null, what was read], or CarryRefused. */
+  /**
+   * An envelope that came over a transport: [result, what goes back or null, what was read], or CarryRefused. profileIn is
+   * a profile, or a function from the sender's key to its profile, asked once the sender is known.
+   */
   deliver(envelope, known, profileIn, mono, now, { rnd = null, sealRnd = null } = {}) {
     this.#check();
     let answer;
@@ -415,6 +426,7 @@ export class CarryState {
   #take(envelope, known, profileIn, mono, now, rnd, sealRnd) {
     const t = this.#tick(now);
     const got = carry.read(envelope, this.keys, known, (pk, session) => this.#bindingFor(pk, session));
+    if (typeof profileIn === "function") profileIn = profileIn(got.sender);
     if (got.mode !== (profileIn.mode === "sealed" ? carry.SEALED : carry.READABLE)) throw new CarryRefused("carry_mode_refused");
     const pk = got.sender;
     const session = got.session;
@@ -551,7 +563,8 @@ export class CarryState {
     record.highest = Math.max(record.highest, counter);
     incoming[pair] = record;
     if (isNew) this.used.add(pair);
-    this.durable.stored[key] = { sha256: digest, content: toHex(got.content) };
+    // How it came and when, kept with it: what read says of it does not depend on a profile that may change meanwhile.
+    this.durable.stored[key] = { sha256: digest, content: toHex(got.content), sealed: got.mode === carry.SEALED, at: t };
     this.#save();
     return ["accepted", receipt(), got];
   }

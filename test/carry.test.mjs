@@ -438,7 +438,10 @@ test("finding 9: a session with only some of its fields, or one more, is refused
     "only closed": { ...empty, used: [pair], incoming: { [pair]: { closed: false } } },
     "a field more": { ...empty, used: [pair], incoming: { [pair]: { ...session, extra: 1 } } },
     "not among the used": { ...empty, incoming: { [pair]: session } },
-    "a mark of no session kept": { ...empty, stored: { [pair + ":1"]: { sha256: "cc".repeat(32), content: null } } },
+    "a mark of no session kept": { ...empty, stored: { [pair + ":1"]: { sha256: "cc".repeat(32), content: null, sealed: true, at: 1794700000 } } },
+    "a message kept without how it came": { ...empty, used: [pair], incoming: { [pair]: session }, stored: { [pair + ":1"]: { sha256: "cc".repeat(32), content: null, at: 1 } } },
+    "a message kept without when": { ...empty, used: [pair], incoming: { [pair]: session }, stored: { [pair + ":1"]: { sha256: "cc".repeat(32), content: null, sealed: true } } },
+    "sealed as a number": { ...empty, used: [pair], incoming: { [pair]: session }, stored: { [pair + ":1"]: { sha256: "cc".repeat(32), content: null, sealed: 1, at: 1 } } },
     "a receipt with its bytes still kept": { ...empty, outbox: { [pair + ":1"]: { sha256: "cc".repeat(32), envelope: "00", receipt: true, tries: 1, most: 30 } } },
   };
   for (const [name, shape] of Object.entries(shapes)) {
