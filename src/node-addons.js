@@ -16,8 +16,9 @@ import { holdFile } from "./node-lock.js";
  * JSON request on its standard input, one JSON answer on its standard output,
  * and a deadline. That is contract 2 of aamio's add-ons, the same manifest and
  * the same protocol aamio-python and aamio-php speak, written up at
- * https://aamio.at/docs/addons. This runtime knows no other contract: nothing
- * of an add-on is ever loaded into this process.
+ * https://aamio.at/docs/addons. Contract 3 is a transport, a process the owner
+ * of the home starts and speaks to in lines (node-transports.js). This runtime
+ * knows no other contract: nothing of an add-on is ever loaded into this process.
  *
  * An add-on is installed in a folder of the home's own, addon-packages/npm,
  * with npm: which packages are there does not depend on the folder a command
@@ -43,7 +44,10 @@ export const MANIFEST_FIELD = "aamioAddon";
 export const ENABLED_FILE = "addons.json";
 // An entry of this runtime's in addons.json: a package of npm's.
 export const PREFIX = "npm:";
-export const KNOWN_CONTRACTS = [2];
+export const KNOWN_CONTRACTS = [2, 3];
+// What a transport may say it uses (contract 3, B1): shown before enable, never enforced, the ground for consent.
+export const TRANSPORT_PERMISSIONS = ["network_local", "network_internet", "bluetooth", "serial", "microphone", "speaker", "camera", "screen", "radio"];
+export const TRANSPORT_PLATFORMS = ["linux", "darwin", "win32"];
 export const DEADLINE_DEFAULT = 30;
 export const DEADLINE_MAX = 120;
 // The consent list lives beside the add-on's own directory, not in it: the
@@ -311,10 +315,104 @@ export class Manifest {
     if (hosts > 1 || subjects > 1) this.wrong(`the command ${command} has more than one host or more than one subject argument`);
   }
 
+  get CONTRACT() {
+    return 2;
+  }
+
   /** The commands under aamio addon NAME, the ones the core adds for an add-on with hosts among them, sorted. */
   commandNames() {
     return [...Object.keys(this.commands), ...(this.hosts !== null ? HOST_COMMANDS : [])].sort();
   }
+}
+
+/**
+ * What a contract-3 add-on is: a transport the owner of the home starts and speaks to in lines (contract 3, part B).
+ * It has no commands and no tools of its own: what it offers is a medium, used through aamio transport. Reading it
+ * runs none of it. The same rules as TransportManifest in aamio-python.
+ */
+export class TransportManifest {
+  constructor(distribution, path, data, fix) {
+    this.distribution = distribution;
+    this.path = path;
+    this.fix = fix;
+    this.data = data;
+    this.NAME = data.name;
+    this.version = data.version;
+    this.description = data.description ?? null;
+    this.environment = data.environment ?? [];
+    const transport = isObject(data.transport) ? data.transport : null;
+    this.transport = transport;
+    this.start = transport && isObject(transport.start) ? transport.start : null;
+    this.script = this.start ? this.start.node : undefined;
+    this.medium = transport ? transport.medium : undefined;
+    this.platforms = transport ? transport.platforms : undefined;
+    this.permissions = transport ? transport.permissions : undefined;
+    this.tools = [];
+    // The script's real path, set once it is found inside the package.
+    this.entry = null;
+    this.validate();
+  }
+
+  get CONTRACT() {
+    return 3;
+  }
+
+  wrong(what) {
+    throw new AddonError(`${this.distribution} cannot be used as a transport: ${what}. Reinstall it, or ${this.fix} to go on without it.`);
+  }
+
+  validate() {
+    if (typeof this.NAME !== "string" || !NAME.test(this.NAME)) this.wrong("its manifest has no name of 1 to 32 characters of a-z, 0-9, dash and underscore");
+    if (RESERVED.includes(this.NAME)) throw new AddonError(`${this.distribution} cannot be called ${this.NAME}: that is a command of aamio addon itself. To go on without it: ${this.fix}.`);
+    if (DEVICE.test(this.NAME)) this.wrong(`its manifest's name, ${this.NAME}, is one Windows keeps for a device, and it names the transport's working folder`);
+    if (typeof this.version !== "string" || !this.version) this.wrong("its manifest has no version");
+    for (const field of ["process", "commands", "tools", "hosts"]) {
+      if (field in this.data) this.wrong(`its manifest has ${field}, which is contract 2's: a transport has transport and nothing of that kind`);
+    }
+    if (this.description !== null && typeof this.description !== "string") this.wrong("description in its manifest is not text");
+    if (!this.transport) this.wrong("its manifest has no transport object");
+    if (typeof this.medium !== "string" || !NAME.test(this.medium)) this.wrong("transport.medium in its manifest is not a name of a-z, 0-9, dash and underscore");
+    if (!this.start) this.wrong("transport.start in its manifest is not an object");
+    // exec, a program inside the package, is for a transport in another language; this aamio starts one of its own.
+    if (typeof this.script !== "string" || !SCRIPT.test(this.script)) this.wrong("transport.start.node in its manifest names no JavaScript file, and this aamio starts a transport with its own interpreter");
+    if (!Array.isArray(this.platforms) || !this.platforms.length || this.platforms.some((platform) => !TRANSPORT_PLATFORMS.includes(platform))) {
+      this.wrong(`transport.platforms in its manifest is not a list of ${TRANSPORT_PLATFORMS.join(", ")}`);
+    }
+    if (!Array.isArray(this.permissions) || this.permissions.some((permission) => !TRANSPORT_PERMISSIONS.includes(permission))) {
+      this.wrong(`transport.permissions in its manifest is not a list of ${TRANSPORT_PERMISSIONS.join(", ")}`);
+    }
+    if (!Array.isArray(this.environment) || this.environment.some((name) => typeof name !== "string" || !VARIABLE.test(name))) {
+      this.wrong("environment in its manifest is not a list of variable names in A-Z, 0-9 and underscore");
+    }
+    const never = this.environment.filter((name) => NEVER_PASSED.includes(name));
+    if (never.length) this.wrong(`environment in its manifest asks for ${never.join(", ")}, which no add-on gets`);
+  }
+
+  runsHere(platform = process.platform) {
+    return this.platforms.includes(platform);
+  }
+
+  /** A transport has no commands of its own: aamio transport is where it is used. */
+  commandNames() {
+    return [];
+  }
+}
+
+/** What enable says of a transport: who starts it, where it runs, what it gets, and what it says it uses. */
+export function transportNote(distribution, manifest, folder) {
+  const asked = manifest.environment.length ? ` and ${manifest.environment.join(", ")}, which its manifest asks for` : "";
+  const uses = manifest.permissions.length ? manifest.permissions.join(", ") : "nothing it names";
+  return `${distribution} is a transport here from now on, over ${manifest.medium}. Only the process that owns this home starts it: aamio serve, and aamio send or ` +
+    `aamio read --wait while they run. It runs in a process of its own, in ${folder}, outside the home, and gets the frames to send and gives ` +
+    `back the frames it heard: never the home's key, the home or the address book. Its environment is the short list of contract 2${asked}. ` +
+    `It says it uses ${uses}; aamio cannot hold it to that, and it runs with your own permissions. Nothing goes over it until a partner is ` +
+    `bound to it: aamio transport bind PARTNER ${manifest.NAME}.`;
+}
+
+/** The contracts this aamio knows, as the three runtimes say them. */
+export function knownContracts() {
+  const names = KNOWN_CONTRACTS.map(String);
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 /**
@@ -333,16 +431,16 @@ export async function readManifest(row) {
     throw new AddonError(`the add-on ${row.distribution} has a manifest, ${path}, that cannot be read: ${error.name}: ${error.message}. Reinstall it, or ${fix} to go on without it.`);
   }
   const number = isObject(data) ? data.aamio_addon : undefined;
-  if (number !== 2) {
-    throw new AddonError(`the add-on ${row.distribution} is written for contract ${JSON.stringify(number ?? null)} of aamio's add-ons, and this aamio (${CORE_VERSION} for Node) knows ${KNOWN_CONTRACTS.join(" and ")}, a process of the add-on's own for each call. Upgrade aamio, or install a version of the add-on for this one; ${fix} goes on without it.`);
+  if (number !== 2 && number !== 3) {
+    throw new AddonError(`the add-on ${row.distribution} is written for contract ${JSON.stringify(number ?? null)} of aamio's add-ons, and this aamio (${CORE_VERSION} for Node) knows ${knownContracts()}: a process of the add-on's own for each call, and a transport. Upgrade aamio, or install a version of the add-on for this one; ${fix} goes on without it.`);
   }
-  const manifest = new Manifest(row.distribution, path, data, fix);
+  const manifest = number === 3 ? new TransportManifest(row.distribution, path, data, fix) : new Manifest(row.distribution, path, data, fix);
   // One package, one version: the list shows it before the add-on is enabled,
   // and the probe holds the process to it afterwards.
   if (row.version !== manifest.version) {
     throw new AddonError(`${row.distribution} cannot be used as an add-on: its manifest says version ${manifest.version} and its package.json ${row.version ?? "none"}. Reinstall it, or ${fix} to go on without it.`);
   }
-  manifest.entry = await inside(row, manifest.script, "the script its manifest names under process.node", fix);
+  manifest.entry = await inside(row, manifest.script, number === 3 ? "the script its manifest names under transport.start.node" : "the script its manifest names under process.node", fix);
   return manifest;
 }
 
@@ -498,8 +596,9 @@ export async function describe(home, { coreTools = [] } = {}) {
       const manifest = await readManifest(row);
       manifests.set(row.distribution, manifest);
       entry.name = manifest.NAME;
-      entry.contract = 2;
+      entry.contract = manifest.CONTRACT;
       if (manifest.environment.length) entry.environment = [...manifest.environment];
+      if (manifest instanceof TransportManifest) Object.assign(entry, { medium: manifest.medium, platforms: [...manifest.platforms], permissions: [...manifest.permissions] });
     } catch (failure) {
       if (!(failure instanceof AddonError)) throw failure;
       entry.error = failure.message;
@@ -592,18 +691,36 @@ export function enableNote(distribution, environment, probed = true) {
 export async function enable(home, which, { probe, coreTools = [], lock } = {}) {
   const distribution = await pick(home, which);
   let probed = false;
+  let transport = null;
   await withListLock(home, async () => {
     const names = await enabledNames(home);
     if (names.some((name) => sameEntry(name, distribution))) return;
     const manifests = await loaded(home, { coreTools, names: [...names, entryOf(distribution)] });
-    // Before anything is recorded: the process starts, speaks the protocol
-    // and is the add-on the manifest says.
-    await probe(manifests.find((manifest) => manifest.distribution === distribution));
+    const manifest = manifests.find((held) => held.distribution === distribution);
+    if (manifest instanceof TransportManifest) {
+      if (!manifest.runsHere()) throw new AddonError(`the transport ${manifest.NAME} runs on ${manifest.platforms.join(", ")}, and this is ${process.platform}. Nothing was recorded.`);
+      // Before anything is recorded: it starts, describes itself as its manifest says, and stops (contract 3, B2).
+      const { probe: probeTransport } = await import("./node-transports.js");
+      await probeTransport(manifest, home);
+      transport = manifest;
+    } else {
+      // Before anything is recorded: the process starts, speaks the protocol
+      // and is the add-on the manifest says.
+      await probe(manifest);
+    }
     probed = true;
     await writeEnabled(home, [...names, entryOf(distribution)]);
   }, lock);
   const answer = await describe(home, { coreTools });
   const row = answer.addons.find((entry) => entry.distribution === distribution) ?? {};
+  if (row.contract === 3) {
+    const { workingFolder } = await import("./node-transports.js");
+    transport ??= (await loaded(home, { coreTools })).find((held) => held.distribution === distribution) ?? null;
+    if (transport) {
+      answer.note = `${transportNote(distribution, transport, workingFolder(home, transport.NAME))} ${RESTART}`;
+      return answer;
+    }
+  }
   answer.note = `${enableNote(distribution, row.environment ?? [], probed)} ${RESTART}`;
   return answer;
 }

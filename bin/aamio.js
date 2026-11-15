@@ -11,6 +11,7 @@ import { archiveStatus, parsePolicy } from "../src/node-archive.js";
 import { doctor, homeCheck } from "../src/node-doctor.js";
 import { BODY_MAX_DEPTH, CHANNEL_TTL, NodeRuntime, SEND_STOPS, checkChannelTtl, checkGate, checkLabel, checkPartner, checkRe, stopFields, tagsFrom, unfitJson } from "../src/node-runtime.js";
 import { checkAccess, checkScopeAdd, checkScopeName } from "../src/node-scopes.js";
+import { bind as transportBind, listing as transportListing, profileAdd, profileRemove, unbind as transportUnbind } from "../src/node-transports.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
@@ -65,6 +66,15 @@ const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
   addon enable NAME            Let an installed add-on run here; addon disable NAME takes it out again
   addon NAME COMMAND ...       An add-on's own commands: aamio addon NAME --help lists them
   serve                        Start the local MCP server on standard input and output
+  transport list               The transports enabled here, the profiles, which partner goes over which, and the outbox
+  transport profile add NAME [--readable] [--lifetime N] [--window N] [--max-content N]
+                               A security profile: sealed unless --readable, which everyone who hears the medium can read
+  transport profile remove NAME
+                               Take out a profile no partner is bound to
+  transport bind PARTNER TRANSPORT [--profile NAME]
+                               Send to a partner over a transport, as lan, and never over HTTPS instead
+  transport unbind PARTNER [TRANSPORT]
+                               The partner over HTTPS again, or over its next transport
 
 An add-on is an npm package of its own, installed in the home's folder for
 add-ons, addon-packages/npm, and run in a process of its own for each call.
@@ -114,8 +124,12 @@ const SPEC = {
   "board replies": { positional: [], options: ["--post", "--wait"] },
   "board channel": { positional: ["key"], options: ["--ttl", "--reply-to", "--note"] },
   archive: { positional: ["policy"], optional: 1, options: ["--max-mb"], switches: ["--all"] },
+  "transport list": { positional: [] },
+  "transport profile": { positional: ["action", "name"], options: ["--lifetime", "--window", "--max-content"], switches: ["--readable"] },
+  "transport bind": { positional: ["partner", "transport"], options: ["--profile"] },
+  "transport unbind": { positional: ["partner", "transport"], optional: 1 },
 };
-const GROUPS = ["partner", "outbox", "board", "scope", "channel"];
+const GROUPS = ["partner", "outbox", "board", "scope", "channel", "transport"];
 
 function parse(argv) {
   let home;
@@ -417,6 +431,22 @@ function plan(command, positional, options) {
     case "scope remove":
       usage(() => checkScopeName(first));
       return (runtime) => runtime.scopeRemove(first);
+    case "transport list":
+      return (runtime) => transportListing(runtime);
+    case "transport profile": {
+      if (!["add", "remove"].includes(first)) throw wrong("transport profile add NAME [--readable] [--lifetime N] [--window N] [--max-content N], or transport profile remove NAME.");
+      if (first === "remove") {
+        if (["readable", "lifetime", "window", "max-content"].some((name) => name in options)) throw wrong("transport profile remove takes the name and nothing else.");
+        return (runtime) => profileRemove(runtime, second);
+      }
+      const chosen = { readable: options.readable === true, lifetime: whole(options.lifetime, "--lifetime", 11, 86400) ?? null,
+        window: whole(options.window, "--window", 10, 600) ?? null, maxContent: whole(options["max-content"], "--max-content", 0, 65431) ?? null };
+      return (runtime) => profileAdd(runtime, second, chosen);
+    }
+    case "transport bind":
+      return (runtime) => transportBind(runtime, first, second, options.profile ?? null);
+    case "transport unbind":
+      return (runtime) => transportUnbind(runtime, first, second ?? null);
     default:
       throw new Error("unknown command " + command);
   }
@@ -479,6 +509,12 @@ async function addon(home, words, archive, host) {
       return 0;
     }
     const manifest = (await loaded(home, core)).find((held) => held.NAME === first);
+    if (manifest && manifest.CONTRACT === 3) {
+      if (rest.length) return refuse(`${first} is a transport, and has no commands of its own: aamio transport list shows it, and aamio transport bind PARTNER ${first} uses it.`, 2);
+      say({ name: manifest.NAME, version: manifest.version, contract: 3, medium: manifest.medium, permissions: [...manifest.permissions],
+        note: `${manifest.NAME} is a transport. aamio transport list shows it with the partners bound to it; aamio transport bind PARTNER ${manifest.NAME} sends to a partner over it.` });
+      return 0;
+    }
     if (!manifest) {
       const there = (await describe(home, core)).addons.some((row) => row.name === first || row.distribution === first);
       return refuse(there ? `the add-on ${first} is installed and not enabled. aamio addon enable ${first} lets it run here.`
@@ -522,7 +558,9 @@ const KNOWN = ["home_not_initialized", "key_unreadable", "home_init_failed", "ho
   "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
   "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed", "no_trace",
   "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only",
-  "invalid_label", "invalid_gate", "invalid_ttl", "invalid_note", "invalid_address", "invalid_archive", "channel_exists", "channel_unavailable", "binding_conflict"];
+  "invalid_label", "invalid_gate", "invalid_ttl", "invalid_note", "invalid_address", "invalid_archive", "channel_exists", "channel_unavailable", "binding_conflict",
+  "transport_config_unreadable", "transport_profile_unknown", "transport_profile_invalid", "transport_profile_incomplete", "transport_profile_in_use", "transport_already_bound",
+  "transport_unbound", "transport_unknown", "transport_down", "carry_not_sent", "carry_too_large", "carry_storage_full", "carry_storage_failed", "carry_rate_limited"];
 
 // trace of a counterpart nothing is recorded about is said on standard error,
 // with nothing on standard output, as aamio-python and aamio-php say it.
@@ -569,6 +607,9 @@ async function main() {
     // One live runtime per home, Node, Python or PHP: serve holds the home,
     // owner.lock and all, for as long as it runs, as the other servers do.
     const runtime = await NodeRuntime.open({ home, host, archive });
+    runtime.log = (line) => process.stderr.write(`[aamio ${new Date().toTimeString().slice(0, 8)}] ${line}\n`);
+    // The owner runs the transports bound to partners for as long as it serves (B2).
+    await runtime.startTransports();
     // Presence lives two minutes. Once a read or a send has opened the inbox,
     // it is published again every minute and the inbox renewed before it runs
     // out, so partners keep finding this server. Nothing goes out before that.
@@ -625,6 +666,8 @@ async function main() {
     }
     await initIdentity(home);
     const runtime = await NodeRuntime.open({ home, host, archive });
+    // What the transports say goes to standard error, where the other two runtimes put it.
+    runtime.log = (line) => process.stderr.write(`${line}\n`);
     let result;
     try {
       result = await act(runtime);

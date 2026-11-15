@@ -33,6 +33,7 @@
     "src/node-scopes.js",
     "src/node-trace.js",
     "src/node-transport-host.js",
+    "src/node-transports.js",
     "README.md",
     "LICENSE"
   ],

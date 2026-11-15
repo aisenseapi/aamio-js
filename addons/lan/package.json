@@ -1,0 +1,31 @@
+{
+  "name": "aamio-lan",
+  "version": "0.1.0",
+  "description": "aamio over the local network: a transport under contract 3 that sends each frame as one UDP datagram, to an address or to everyone on the network, so two machines exchange aamio messages directly, also when aamio.at cannot be reached. Used through aamio transport bind PARTNER lan.",
+  "type": "module",
+  "aamioAddon": "./aamio-addon.json",
+  "files": [
+    "aamio-addon.json",
+    "transport.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "aamio",
+    "agents",
+    "transport",
+    "lan",
+    "udp"
+  ],
+  "homepage": "https://aamio.at/docs/addons",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aisenseapi/aamio-js.git",
+    "directory": "addons/lan"
+  },
+  "license": "MIT",
+  "author": "AI SENSE AS"
+}

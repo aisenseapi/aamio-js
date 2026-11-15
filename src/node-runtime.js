@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Aamio, AamioError, BOARD_POST_MARGIN, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, refusedOnce, withinBudget, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
 import { DEFAULT_POLICY, appendRecord, archiveName, archiveNames, archiveStatus, archivedRecords, isSafeLabel, pruneArchive, readPolicy } from "./node-archive.js";
 import { readKeys } from "./node-identity.js";
+import { Service as TransportService, timing as transportTiming } from "./node-transports.js";
 import { takeHome } from "./node-lock.js";
 import { SCOPE_NOT_SAVED, checkAccess, checkScopeName, longerForm, removedShares, scopeAddPlan, scopeCalled, scopeRemovePlan, scopeView, sharedScopeName, takenFrom, usableScopes, withoutScopeKey } from "./node-scopes.js";
 import { TRACE_KEEP, TRACE_KEYS, TRACE_READ_FIELDS, TRACE_RECEIVED_FIELDS, TRACE_SENT_FIELDS, isMessageHash, normalizeTraces, traceRow, traceView } from "./node-trace.js";
@@ -205,6 +206,14 @@ const RETRY_SAME_ID = "retry the same message: aamio_outbox_retry with this id, 
 
 /** The codes of a send that did not end in a stored message. Each is said with its message id and its outcome. */
 export const SEND_STOPS = ["send_failed", "not_sent", "retry_not_sent"];
+// How long a read waits on the inbox at a time while transports run beside it: what came over one is taken between.
+const CARRIED_SLICE = 5;
+const CARRIED_NOTES = {
+  confirmed: "The partner's aamio took it in over %via and said so with a receipt.",
+  handed_over: "Every frame went out over %via, and no receipt came within %wait seconds. It is sent again with the same bytes while an aamio owns this home, and aamio transport list says how it ends.",
+  queued: "It waits in the outbox for room on %via, and goes while an aamio owns this home. aamio transport list says how it ends.",
+  unknown: "No receipt came over %via and its tries are used, so it may or may not have arrived. It is not sent again.",
+};
 
 /**
  * What such a stop says of itself beside its words, for the command line and
@@ -1003,7 +1012,16 @@ export class NodeRuntime {
   async close() {
     if (this.closed) return;
     this.closed = true;
-    await this.owner.release();
+    try {
+      // What the carriers have queued goes out for a moment, and then the transports stop (B2).
+      if (this.transports) await this.transports.drain();
+    } finally {
+      try {
+        if (this.transports) await this.transports.stop();
+      } finally {
+        await this.owner.release();
+      }
+    }
   }
 
   // ---------------------------------------------------------- partners --
@@ -1094,6 +1112,14 @@ export class NodeRuntime {
     // The book counts only once partners.json holds it, as with partnerAdd.
     const next = this.partnersFile.filter((p) => !(isObject(p) && p.name === known.name));
     await this.savePartners(next);
+    // The bindings go with the partner. A transport takes nothing from a key
+    // that is not in the book whatever the file says, so one left behind, as
+    // by another runtime that removed the partner, opens nothing.
+    try {
+      this.transportService().config.unbind(known.key);
+    } catch {
+      // Not bound, or a file that cannot be read: nothing is taken from the key either way.
+    }
     return this.inboxAfterChange(`partner ${known.name} was removed`, { partner: known.name, known: true });
   }
 
@@ -1562,6 +1588,9 @@ export class NodeRuntime {
   /** One message, signed and sealed to the recipient, written to the outbox before it goes. */
   async send(to, { text = null, data = null, re = null, archivedData = null } = {}) {
     checkRe(re);
+    // A partner bound to a transport goes over it, and never over HTTPS instead.
+    const bound = this.#boundPartner(to);
+    if (bound) return this.#sendCarried(bound, { text, data, re });
     const { w, key, partner } = await this.recipient(to);
     // What the inbox asks of writers is read before anything is stored: a
     // requirement this client cannot meet stops here, as a GateStop.
@@ -3204,8 +3233,29 @@ export class NodeRuntime {
   /** read, as one read for the archive. */
   async readHeld({ wait, limit, maxBytes }) {
     const noted = this.attention.length;
-    await this.ensureInbox();
-    await this.publishPresence();
+    // What came over a transport is read too, and while this waits the
+    // transports run (B2). With a transport the inbox is one way among others,
+    // so an inbox that cannot be reached is said, and the rest read.
+    const carried = this.#carriedService();
+    const messages = [];
+    let online = true;
+    if (carried) {
+      if (wait > 0) await carried.start();
+      const ready = await this.#carriedReady(this.#carriedEntries(carried));
+      messages.push(...ready.slice(0, limit));
+      if (ready.length > limit) this.note("read", "more_carried", `${ready.length - limit} more that came over a transport wait for the next read, in the order they came.`);
+      try {
+        await this.ensureInbox();
+        await this.publishPresence();
+      } catch (error) {
+        if (error?.code === "runtime_closed") throw error;
+        online = false;
+        this.note("inbox", "unreachable", `the inbox could not be reached: ${String(error?.message ?? error).replace(/\.$/, "")}. What came over a transport is read all the same; nothing on the service was.`);
+      }
+    } else {
+      await this.ensureInbox();
+      await this.publishPresence();
+    }
     this.dropExpired();
     const now = this.now();
     // What was read of a thread is kept for its receipt while the receipt can
@@ -3216,9 +3266,8 @@ export class NodeRuntime {
       if (!known || Number(known.expire_at) + RECEIPT_KEEP < now) this.observed.delete(w);
     }
     // A muted inbox too: it is read until it expires, for the partners still in the book.
-    const channels = this.state.channels.filter((c) => isObject(c) && Number(c.expire_at) > now)
-      .sort((a, b) => (a.label === "inbox" ? -1 : b.label === "inbox" ? 1 : 0));
-    const messages = [];
+    const channels = online ? this.state.channels.filter((c) => isObject(c) && Number(c.expire_at) > now)
+      .sort((a, b) => (a.label === "inbox" ? -1 : b.label === "inbox" ? 1 : 0)) : [];
     // A channel this read had no room left to ask is named, as aamio-python
     // names it: what waits there was not looked at, and a read that stopped at
     // its limit is not a read of everything.
@@ -3236,7 +3285,9 @@ export class NodeRuntime {
       messages.push(...(await this.pollSafely(channel, 0, limit - messages.length, maxBytes)));
     }
     const inbox = this.channel("inbox");
-    if (!messages.length && wait > 0 && inbox && !inbox.muted) {
+    if (!messages.length && wait > 0 && carried) {
+      await this.#waitWithTransports(carried, messages, { limit, wait, maxBytes, inbox: online && inbox && !inbox.muted ? inbox : null, channels, notAskedAfter });
+    } else if (!messages.length && wait > 0 && inbox && !inbox.muted) {
       messages.push(...(await this.pollSafely(inbox, wait, limit, maxBytes)));
       // What reached the other channels during the wait comes with this
       // answer, as in aamio-python: only the inbox can end the wait early. It
@@ -3266,6 +3317,153 @@ export class NodeRuntime {
       return true;
     });
     this.attention.splice(noted, this.attention.length - noted, ...fresh);
+    await this.#carriedHandedOver(messages);
     return messages;
+  }
+
+  // ------------------------------------------------------- transports --
+  //
+  // A partner bound to a transport (aamio transport bind) is reached over it,
+  // and over nothing else: node-transports.js has the profiles, the bindings
+  // and the service. Only the owner of the home runs a transport (B2), and a
+  // runtime is the owner while it lives: serve starts them, and a send or a
+  // read that waits starts them for as long as it runs. The service pumps them
+  // in a loop of its own; a send or a read waits for what it needs to see.
+
+  /** The transports of this home, made at first use. */
+  transportService() {
+    this.transports ??= new TransportService(this);
+    return this.transports;
+  }
+
+  /**
+   * The partner to names when a transport is bound to it, or null. A write address is a thread at the service, and goes
+   * there as before. transport_config_unreadable when the bindings cannot be read: which partners go over a transport
+   * is not known then, so nothing is sent.
+   */
+  #boundPartner(to) {
+    if (typeof to === "string" && ADDRESS.test(to)) return null;
+    const partner = isKey(String(to)) ? this.partnerByKey(String(to)) : this.partnerByName(to);
+    if (!partner) return null;
+    return this.transportService().config.routes(partner.key).length ? partner : null;
+  }
+
+  /** A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier. */
+  async #sendCarried(partner, { text, data, re }) {
+    const body = { from: this.keys.hash.slice(0, 8) };
+    if (text !== null && text !== undefined) body.text = String(text);
+    if (data !== null && data !== undefined) body.data = data;
+    Object.assign(body, this.conversation(partner.key, re));
+    const content = new TextEncoder().encode(JSON.stringify(body));
+    const budget = this.workBudget;
+    const wait = budget === undefined || budget === null ? transportTiming.waitDefault : Math.max(1, Math.min(transportTiming.waitDefault, Math.floor(budget)));
+    const result = await this.transportService().send(new Uint8Array(Buffer.from(partner.key, "base64url")), content, wait);
+    const sent = { to: partner.name, ...result, note: CARRIED_NOTES[result.status].replace("%via", result.via).replace("%wait", String(wait)) };
+    const archiveError = await this.archiveSafely("sent", { kind: "sent", at: this.now(), to: partner.name, via: result.via, profile: result.profile, mark: result.mark, status: result.status, body },
+      `the send ${result.mark}`);
+    if (archiveError) sent.archive_error = archiveError;
+    return sent;
+  }
+
+  /** For serve: the transports bound to partners, started. Whether any run. */
+  async startTransports() {
+    try {
+      const service = this.transportService();
+      if (service.bound()) {
+        await service.start();
+        return true;
+      }
+    } catch (error) {
+      this.note("transports", "not_started", `the transports could not be started: ${error.message}. Nothing goes over them in this process, and partners bound to them are not sent to.`);
+    }
+    return false;
+  }
+
+  /** The transport service when a partner is bound to a transport, else null; a binding file that cannot be read is said. */
+  #carriedService() {
+    const service = this.transportService();
+    try {
+      return service.bound() ? service : null;
+    } catch (error) {
+      this.note("transports", "unreadable", `${error.message}. What came over a transport waits in the home until then.`);
+      return null;
+    }
+  }
+
+  #carriedEntries(service, skip = new Set()) {
+    return service.entries(bodyJson, skip).map((entry) => ({ ...entry, archived: false, ...(this.archiveEnabled ? {} : { archive_off: true }) }));
+  }
+
+  /** What may be handed over: a message from a key that has left the address book is not, and that is said. */
+  async #carriedReady(entries) {
+    const ready = [];
+    for (const entry of entries) {
+      if (this.partnerByKey(entry.from_key) === null) await this.#carriedWithheld(entry);
+      else ready.push(entry);
+    }
+    return ready;
+  }
+
+  async #carriedWithheld(entry) {
+    const archived = await this.#archiveCarried(entry);
+    try {
+      this.transportService().taken([entry.mark]);
+    } catch {
+      // Offered again after a restart, and withheld again then.
+    }
+    this.note(entry.channel, "removed_key", `A message came over ${entry.channel} from a key that has since left the address book. It is not handed over${archived ? "; the archive has it" : ""}.`);
+  }
+
+  /** The row of a message that came over a transport, as read writes one for a message over HTTPS: true when it was written. */
+  async #archiveCarried(entry) {
+    if (!this.archiveEnabled) return false;
+    try {
+      return (await this.archive(`transport-${entry.channel}`, { ...entry, kind: "received" })) !== false;
+    } catch (error) {
+      this.note(entry.channel, "archive_failed", `a message that came over ${entry.channel} was handed over and could not be written to the archive: ${error.code || error.message}. The archive does not have it.`);
+      return false;
+    }
+  }
+
+  /** What a read hands over that came over a transport: written to the archive, and then taken out of the carrier state. */
+  async #carriedHandedOver(messages) {
+    const marks = [];
+    for (const message of messages) {
+      if (!message.mark) continue;
+      message.archived = await this.#archiveCarried(message);
+      marks.push(message.mark);
+    }
+    if (!marks.length) return;
+    try {
+      this.transportService().taken(marks);
+    } catch (error) {
+      this.note("transports", "not_taken", `${marks.length} message(s) that came over a transport were handed over and could not be marked as taken: ${error.message}. They may come again, with the same mark.`);
+    }
+  }
+
+  /** A read that waits with transports running: the inbox in short waits, and what came over a transport between them. */
+  async #waitWithTransports(service, messages, { limit, wait, maxBytes, inbox, channels, notAskedAfter }) {
+    const seconds = () => performance.now() / 1000;
+    const until = seconds() + wait;
+    while (!messages.length) {
+      const left = until - seconds();
+      if (left <= 0) break;
+      const piece = Math.max(1, Math.min(CARRIED_SLICE, Math.floor(left)));
+      const began = seconds();
+      if (inbox) messages.push(...(await this.pollSafely(inbox, piece, limit, maxBytes)));
+      // An inbox that answers at once without waiting, or none, is no wait: the transports are waited on instead.
+      if (!messages.length && seconds() - began < piece / 2) await service.wait(() => service.carry().pending().length > 0, began + Math.min(left, piece));
+      const taken = new Set(messages.filter((message) => message.mark).map((message) => message.mark));
+      messages.push(...(await this.#carriedReady(this.#carriedEntries(service, taken))).slice(0, Math.max(0, limit - messages.length)));
+    }
+    if (!inbox) return;
+    for (const channel of channels) {
+      if (channel === inbox) continue;
+      if (messages.length >= limit) {
+        notAskedAfter.push(channel);
+        continue;
+      }
+      messages.push(...(await this.pollSafely(channel, 0, limit - messages.length, maxBytes)));
+    }
   }
 }
