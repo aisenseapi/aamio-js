@@ -175,6 +175,38 @@ test("every scenario, step by step, with the state kept in a real file", () => {
   }
 });
 
+test("a kept state of another shape is refused whole rather than read in part, and the maps go out as objects", () => {
+  // Another runtime may have written it. A map read as an array here would take entries in memory and write them away as [].
+  const root = mkdtempSync(join(tmpdir(), "aamio-carry-shape-"));
+  try {
+    const file = join(root, "carry.json");
+    const empty = { version: 1, floor: null, challenges: 0, incoming: {}, used: [], stored: {}, outgoing: {}, outbox: {} };
+    writeFileSync(file, JSON.stringify(empty));
+    new CarryState(keys("B"), file).prune(1794700000);
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...empty, floor: 1794700000 });
+    const without = (name) => Object.fromEntries(Object.entries(empty).filter(([key]) => key !== name));
+    const shapes = {
+      "an empty map written as a list": { ...empty, incoming: [] },
+      "a list where a map goes": { ...empty, outgoing: ["a"] },
+      "a record that is not one": { ...empty, incoming: { "a:b": "x" } },
+      "a hash that is a number": { ...empty, stored: { "a:b:1": 5 } },
+      "used as a map": { ...empty, used: {} },
+      "used with a number": { ...empty, used: [1] },
+      "a floor as text": { ...empty, floor: "1794700000" },
+      "a floor below zero": { ...empty, floor: -1 },
+      "a count that is true": { ...empty, challenges: true },
+      "no outbox": without("outbox"),
+      "no floor": without("floor"),
+    };
+    for (const [name, shape] of Object.entries(shapes)) {
+      writeFileSync(file, JSON.stringify(shape));
+      assert.equal(code(() => new CarryState(keys("B"), file)), "carry_state_unreadable", name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a state that cannot be read, a write that fails, and a state that is full", () => {
   const root = mkdtempSync(join(tmpdir(), "aamio-carry-keep-"));
   try {

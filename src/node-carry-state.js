@@ -10,6 +10,12 @@
 // asked. Everything else is written to the home before anything is answered,
 // and a write that fails is carry_storage_failed with no receipt. Nothing that
 // guards against a replay is deleted before A6.9 allows it.
+//
+// The kept state has the same shape in every runtime, since another runtime may
+// take the home over: four maps (incoming, stored, outgoing, outbox), written as
+// JSON objects also when they are empty, one list (used) and three numbers. A
+// file of any other shape is refused whole as carry_state_unreadable: a map read
+// as an array here would take new entries in memory and write them away as [].
 
 import fs from "node:fs";
 import path from "node:path";
@@ -34,6 +40,17 @@ const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(
 const fromHex = (text) => Uint8Array.from(text.match(/../g) ?? [], (pair) => parseInt(pair, 16));
 const pairOf = (pk, session) => toHex(pk) + ":" + toHex(session);
 const markOf = (pk, session, counter) => `${toHex(pk)}:${toHex(session)}:${counter}`;
+const MAPS = [["incoming", "record"], ["outgoing", "record"], ["stored", "string"], ["outbox", "string"]];
+const whole = (number, nullable = false) => (nullable && number === null) || (Number.isInteger(number) && number >= 0);
+const isMap = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** The shape every runtime writes (the comment at the top): anything else is not read at all. */
+function readable(value) {
+  if (!isMap(value) || value.version !== STATE_VERSION || !("floor" in value) || !whole(value.floor, true) || !whole(value.challenges)) return false;
+  if (!Array.isArray(value.used) || !value.used.every((item) => typeof item === "string")) return false;
+  return MAPS.every(([name, kind]) => isMap(value[name])
+    && Object.values(value[name]).every((item) => (kind === "record" ? isMap(item) : typeof item === "string")));
+}
 
 /** A security profile (B5), checked: what the user chose and the core holds to. */
 export function profile({ mode = "sealed", challenge = true, acceptUnchallenged = false, lifetime = LIFETIME_DEFAULT,
@@ -69,8 +86,9 @@ export class CarryState {
     } catch {
       value = null;
     }
-    if (!value || typeof value !== "object" || value.version !== STATE_VERSION) {
-      // Starting from nothing would forget which messages were taken, and a copy of one could then be taken again.
+    if (!readable(value)) {
+      // Starting from nothing would forget which messages were taken, and a copy of one could then be taken again;
+      // reading only part of it would write the rest away at the next save.
       throw new CarryRefused("carry_state_unreadable", `${this.path} could not be read, so nothing is taken until it is repaired or moved away`);
     }
     return value;
