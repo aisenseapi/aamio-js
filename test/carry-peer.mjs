@@ -1,7 +1,7 @@
 // One party of a carrier exchange over the simulated radio, for the tests across runtimes.
 // The same peer as tests/carry_peer.py in aamio-python, with the same JSON file as its one
-// argument, the same tasks (exchange, resave and replay) and the same lines out, so any two
-// runtimes can be paired. The last line is written before the process ends, since a pipe
+// argument, the same tasks (exchange, resave, deliver and pending) and the same lines out, so
+// any two runtimes can be paired. The last line is written before the process ends, since a pipe
 // may take it after process.exit otherwise. node --test runs every module under test/ as a
 // test file; run that way, without the argument, there is nothing to do.
 
@@ -29,7 +29,7 @@ async function main(config) {
     new CarryState(keys, config.state).prune(config.now);
     return finish({ resaved: true });
   }
-  if (task === "replay") {
+  if (task === "deliver") {
     const state = new CarryState(keys, config.state);
     let result, reply;
     try {
@@ -38,7 +38,10 @@ async function main(config) {
       if (!(error instanceof CarryRefused)) throw error;
       [result, reply] = [error.code, null];
     }
-    return finish({ replayed: result, receipt: reply !== null && reply !== undefined });
+    return finish({ result, receipt: reply !== null && reply !== undefined, challenges: state.durable.challenges });
+  }
+  if (task === "pending") {
+    return finish({ pending: new CarryState(keys, config.state).pending().map((entry) => new TextDecoder().decode(entry[4])) });
   }
   return exchange(config, keys, partner);
 }
@@ -75,7 +78,7 @@ async function exchange(config, keys, partner) {
           stage = "opening";
         } else if (stage === "opening" && opened !== null) {
           sent = carrier.send(partner, opened, text);
-          envelope = carrier.waiting.get(sent).envelope;
+          envelope = carrier.messages.get(sent).envelope;
           stage = "sending";
         } else if (stage === "sending" && carrier.confirmed(sent) && carrier.inbox.length) stage = "settling";
       } else if (stage === "start" && carrier.inbox.length) {
@@ -83,7 +86,7 @@ async function exchange(config, keys, partner) {
         stage = "opening";
       } else if (stage === "opening" && opened !== null) {
         sent = carrier.send(partner, opened, text);
-        envelope = carrier.waiting.get(sent).envelope;
+        envelope = carrier.messages.get(sent).envelope;
         stage = "sending";
       } else if (stage === "sending" && carrier.confirmed(sent)) stage = "settling";
       if (stage === "settling" && !done) {
