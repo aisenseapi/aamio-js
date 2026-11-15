@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import nacl from "tweetnacl";
 import { Keys, sha256 } from "../src/aamio.js";
 import * as carry from "../src/carry.js";
-import { CarryState, profile, limits } from "../src/node-carry-state.js";
+import { CarryState, profile, limits, mark, SAFE, SPENT_KEPT_PER_PARTNER } from "../src/node-carry-state.js";
 
 const vectors = JSON.parse(readFileSync(new URL("./carry_v1_vectors.json", import.meta.url), "utf8"));
 const parties = vectors.parties;
@@ -233,4 +233,228 @@ test("a state that cannot be read, a write that fails, and a state that is full"
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ------------------------------------------------------------------ the review of 2026-11-15, findings 1 to 13
+
+const T = 1794700000;
+const A = keys("A");
+const B = keys("B");
+const oneWay = profile({ mode: "readable", challenge: false, acceptUnchallenged: true });
+const challenged = profile({ mode: "readable" });
+const text = (value) => new TextEncoder().encode(value);
+const opened = (atA, atB, p = challenged, mono = 0) => {
+  const [session, ask] = atA.ask(B.publicRaw, p, mono);
+  const [, challenge] = atB.deliver(ask, [A.publicRaw], p, mono, T);
+  const [, opening] = atA.deliver(challenge, [B.publicRaw], p, mono, T);
+  assert.equal(atB.deliver(opening, [A.publicRaw], p, mono, T)[0], "accepted");
+  return session;
+};
+const inRoot = (name, run) => {
+  const root = mkdtempSync(join(tmpdir(), `aamio-carry-${name}-`));
+  try {
+    run(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+};
+
+test("finding 1: a message is kept with its content until the program says it has it", () => inRoot("kept", (root) => {
+  const file = join(root, "b.json");
+  const sender = new CarryState(A);
+  const session = sender.oneWay(B.publicRaw, T + 300);
+  const envelope = sender.send(B.publicRaw, session, text("hei"), oneWay);
+  assert.equal(new CarryState(B, file).deliver(envelope, [A.publicRaw], oneWay, 0, T)[0], "accepted");
+  const key = mark(A.publicRaw, session, 1);
+  const again = new CarryState(B, file);
+  assert.deepEqual(again.pending(), [[key, A.publicRaw, session, 1, text("hei")]]);
+  assert.deepEqual(again.pending(), [[key, A.publicRaw, session, 1, text("hei")]], "reading is not taking");
+  again.handedOver(key);
+  const after = new CarryState(B, file);
+  const [result, receipt] = after.deliver(envelope, [A.publicRaw], oneWay, 0, T);
+  assert.deepEqual([after.pending(), result, receipt !== null], [[], "duplicate", true]);
+}));
+
+test("finding 1, the sender: the same bytes and the tries left after a restart, and a late receipt still counts", () => inRoot("sent", (root) => {
+  const file = join(root, "a.json");
+  const atA = new CarryState(A, file);
+  const session = atA.oneWay(B.publicRaw, T + 300);
+  const envelope = atA.send(B.publicRaw, session, text("hei"), oneWay, { most: 3 });
+  const key = mark(B.publicRaw, session, 1);
+  const again = new CarryState(A, file);
+  assert.deepEqual([again.outcome(key), again.unconfirmed()], ["waiting", [[key, B.publicRaw, session, 1, envelope]]]);
+  assert.ok(again.tried(key) && again.tried(key));
+  assert.equal(new CarryState(A, file).durable.outbox[key].tries, 3, "a restart gives back no tries");
+  assert.equal(again.tried(key), false);
+  assert.deepEqual([again.outcome(key), again.unconfirmed(), again.durable.outbox[key].envelope], ["unknown", [], null]);
+  const [, receipt] = new CarryState(B).deliver(envelope, [A.publicRaw], oneWay, 0, T);
+  assert.equal(again.deliver(receipt, [B.publicRaw], oneWay, 0, T)[0], "accepted");
+  assert.equal(new CarryState(A, file).outcome(key), "confirmed");
+}));
+
+test("finding 2: after a write fails nothing is answered until the state is read again", () => inRoot("broken", (root) => {
+  const receiver = new CarryState(B, join(root, "in-the-way", "carry.json"));
+  writeFileSync(join(root, "in-the-way"), "not a folder");
+  const envelope = carry.write(A, B.publicRaw, carry.READABLE, carry.MESSAGE, 0, new Uint8Array(8), 1, T + 300, text("hei"));
+  for (let i = 0; i < 2; i++) assert.equal(code(() => receiver.deliver(envelope, [A.publicRaw], oneWay, 0, T)), "carry_storage_failed");
+  assert.equal(code(() => receiver.prune(T)), "carry_storage_failed");
+}));
+
+test("finding 3: the time floor is kept also when what came is refused", () => inRoot("floor", (root) => {
+  const file = join(root, "b.json");
+  new CarryState(B, file).prune(T);
+  const sender = new CarryState(A);
+  const session = sender.oneWay(B.publicRaw, T + 300);
+  const envelope = sender.send(B.publicRaw, session, text("sent"), oneWay);
+  assert.equal(code(() => new CarryState(B, file).deliver(envelope, [A.publicRaw], oneWay, 0, T + 421)), "carry_deadline_passed");
+  const again = new CarryState(B, file);
+  assert.equal(again.durable.floor, T + 421);
+  assert.equal(code(() => again.deliver(envelope, [A.publicRaw], oneWay, 0, T)), "carry_deadline_passed");
+  const noEnvelope = new Uint8Array(204);
+  noEnvelope.set(text("XXXX"));
+  assert.equal(code(() => again.deliver(noEnvelope, [A.publicRaw], oneWay, 0, T + 900)), "carry_bad_magic");
+  assert.equal(new CarryState(B, file).durable.floor, T + 900);
+}));
+
+test("finding 7: sixty messages a minute from one partner, copies too, 256 KiB, and ten asks", () => {
+  let atB = new CarryState(B);
+  const sender = new CarryState(A);
+  let session = sender.oneWay(B.publicRaw, T + 3000);
+  const first = sender.send(B.publicRaw, session, text("0"), oneWay);
+  assert.equal(atB.deliver(first, [A.publicRaw], oneWay, 0, T)[0], "accepted");
+  for (let i = 0; i < 59; i++) assert.equal(atB.deliver(first, [A.publicRaw], oneWay, 0.5, T)[0], "duplicate");
+  assert.equal(code(() => atB.deliver(first, [A.publicRaw], oneWay, 0.5, T)), "carry_rate_limited");
+  const second = sender.send(B.publicRaw, session, text("1"), oneWay);
+  assert.equal(code(() => atB.deliver(second, [A.publicRaw], oneWay, 59.9, T)), "carry_rate_limited");
+  assert.equal(atB.deliver(second, [A.publicRaw], oneWay, 60, T)[0], "accepted", "the first went out of the minute");
+  atB = new CarryState(B);
+  session = sender.oneWay(B.publicRaw, T + 3000);
+  const big = Array.from({ length: 5 }, (_, n) => sender.send(B.publicRaw, session, new Uint8Array(60000).fill(n), oneWay));
+  for (const envelope of big.slice(0, 4)) assert.equal(atB.deliver(envelope, [A.publicRaw], oneWay, 1, T)[0], "accepted");
+  assert.equal(code(() => atB.deliver(big[4], [A.publicRaw], oneWay, 2, T)), "carry_rate_limited");
+  const atA = new CarryState(A);
+  atB = new CarryState(B);
+  for (let n = 0; n < 10; n++) opened(atA, atB, challenged, n);
+  let [, ask] = atA.ask(B.publicRaw, challenged, 10);
+  assert.equal(code(() => atB.deliver(ask, [A.publicRaw], challenged, 10, T)), "carry_rate_limited");
+  [, ask] = atA.ask(B.publicRaw, challenged, 61);
+  assert.equal(atB.deliver(ask, [A.publicRaw], challenged, 61, T)[0], "accepted");
+});
+
+test("finding 8: only challenges that wait inside their window count, and a spent one keeps its code while remembered", () => {
+  let atA = new CarryState(A);
+  let atB = new CarryState(B);
+  for (let n = 0; n < 9; n++) {
+    const [, ask] = atA.ask(B.publicRaw, challenged, 100 * n);
+    assert.equal(atB.deliver(ask, [A.publicRaw], challenged, 100 * n, T)[0], "accepted");
+  }
+  for (let n = 0; n < 8; n++) {
+    const [, ask] = atA.ask(B.publicRaw, challenged, 1000);
+    atB.deliver(ask, [A.publicRaw], challenged, 1000, T);
+  }
+  let [, ask] = atA.ask(B.publicRaw, challenged, 1000);
+  assert.equal(code(() => atB.deliver(ask, [A.publicRaw], challenged, 1000, T)), "carry_rate_limited");
+  atA = new CarryState(A);
+  atB = new CarryState(B);
+  [, ask] = atA.ask(B.publicRaw, challenged, 0);
+  const [, challenge] = atB.deliver(ask, [A.publicRaw], challenged, 0, T);
+  const [, opening] = atA.deliver(challenge, [B.publicRaw], challenged, 0, T);
+  assert.equal(code(() => atB.deliver(opening, [A.publicRaw], challenged, 61, T)), "carry_nonce_expired");
+  for (let n = 1; n <= SPENT_KEPT_PER_PARTNER; n++) {
+    [, ask] = atA.ask(B.publicRaw, challenged, 61 * n);
+    atB.deliver(ask, [A.publicRaw], challenged, 61 * n, T);
+  }
+  assert.equal(code(() => atB.deliver(opening, [A.publicRaw], challenged, 61 * 65, T)), "carry_nonce_expired");
+  [, ask] = atA.ask(B.publicRaw, challenged, 61 * 66);
+  atB.deliver(ask, [A.publicRaw], challenged, 61 * 66, T);
+  assert.equal(code(() => atB.deliver(opening, [A.publicRaw], challenged, 61 * 66, T)), "carry_nonce_unknown");
+});
+
+test("finding 10: the count of challenges stops at 2^53 - 1, never rounded or wrapped", () => inRoot("count", (root) => {
+  const file = join(root, "b.json");
+  const empty = { version: 1, floor: null, challenges: SAFE - 1, incoming: {}, used: [], stored: {}, outgoing: {}, outbox: {} };
+  writeFileSync(file, JSON.stringify(empty));
+  const atA = new CarryState(A);
+  const atB = new CarryState(B, file);
+  let [, ask] = atA.ask(B.publicRaw, challenged, 0);
+  assert.equal(atB.deliver(ask, [A.publicRaw], challenged, 0, T)[0], "accepted");
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).challenges, SAFE);
+  [, ask] = atA.ask(B.publicRaw, challenged, 1);
+  assert.equal(code(() => atB.deliver(ask, [A.publicRaw], challenged, 1, T)), "carry_storage_full");
+  assert.equal(new CarryState(B, file).durable.challenges, SAFE);
+  writeFileSync(file, JSON.stringify(empty).replace(`"challenges":${SAFE - 1}`, '"challenges":9007199254740993'));
+  assert.equal(code(() => new CarryState(B, file)), "carry_state_unreadable", "past 2^53 - 1 JSON reads it rounded, so it is refused");
+}));
+
+test("finding 11: numbers outside their four bytes are refused, not cut down, and change nothing in the state", () => {
+  for (const [counter, deadline] of [[2 ** 32 + 1, 0], [-1, 0], [1, 2 ** 32], [NaN, 0], [Infinity, 0], [1.9, 0], [1, 1.5]]) {
+    assert.throws(() => carry.write(A, B.publicRaw, carry.READABLE, carry.MESSAGE, 0, new Uint8Array(8), counter, deadline, text("x")), RangeError, `${counter} ${deadline}`);
+  }
+  const atA = new CarryState(A);
+  const session = opened(atA, new CarryState(B));
+  assert.throws(() => atA.send(B.publicRaw, session, text("x"), challenged, { deadline: 2 ** 32 }), RangeError);
+  assert.deepEqual([atA.counterOf(B.publicRaw, session), atA.durable.outbox], [0, {}]);
+});
+
+test("finding 12: the first message without a challenge needs room for its three records", () => {
+  const sender = new CarryState(A);
+  const session = sender.oneWay(B.publicRaw, T + 300);
+  const envelope = sender.send(B.publicRaw, session, text("hei"), oneWay);
+  const saved = limits.records;
+  try {
+    limits.records = 2;
+    const atB = new CarryState(B);
+    assert.equal(code(() => atB.deliver(envelope, [A.publicRaw], oneWay, 0, T)), "carry_storage_full");
+    assert.deepEqual([atB.durable.incoming, atB.used.size], [{}, 0]);
+    limits.records = 3;
+    assert.equal(atB.deliver(envelope, [A.publicRaw], oneWay, 0, T)[0], "accepted");
+  } finally {
+    limits.records = saved;
+  }
+});
+
+test("finding 13: a session keeps the lifetime it was opened with, a profile can shorten it, never lengthen it", () => {
+  const short = profile({ mode: "readable", lifetime: 600 });
+  const long = profile({ mode: "readable", lifetime: 86400 });
+  const atA = new CarryState(A);
+  const atB = new CarryState(B);
+  let session = opened(atA, atB, short, 0);
+  let envelope = atA.send(B.publicRaw, session, text("x"), short);
+  assert.equal(code(() => atB.deliver(envelope, [A.publicRaw], long, 601, T)), "carry_session_expired");
+  session = opened(atA, atB, long, 1000);
+  envelope = atA.send(B.publicRaw, session, text("y"), long);
+  assert.equal(code(() => atB.deliver(envelope, [A.publicRaw], short, 1601, T)), "carry_session_expired");
+  assert.equal(atB.deliver(envelope, [A.publicRaw], long, 1601, T)[0], "accepted");
+});
+
+test("finding 9: a session with only some of its fields, or one more, is refused whole", () => inRoot("fields", (root) => {
+  const file = join(root, "carry.json");
+  const pair = "aa".repeat(32) + ":" + "bb".repeat(8);
+  const session = { challenged: false, nonce: null, highest: 1, closed: false, deadline: 1794700300, opened: null, closed_at: null, lifetime: null };
+  const empty = { version: 1, floor: null, challenges: 0, incoming: {}, used: [], stored: {}, outgoing: {}, outbox: {} };
+  writeFileSync(file, JSON.stringify({ ...empty, used: [pair], incoming: { [pair]: session } }));
+  assert.ok(new CarryState(B, file));
+  const shapes = {
+    "only closed": { ...empty, used: [pair], incoming: { [pair]: { closed: false } } },
+    "a field more": { ...empty, used: [pair], incoming: { [pair]: { ...session, extra: 1 } } },
+    "not among the used": { ...empty, incoming: { [pair]: session } },
+    "a mark of no session kept": { ...empty, stored: { [pair + ":1"]: { sha256: "cc".repeat(32), content: null } } },
+    "a receipt with its bytes still kept": { ...empty, outbox: { [pair + ":1"]: { sha256: "cc".repeat(32), envelope: "00", receipt: true, tries: 1, most: 30 } } },
+  };
+  for (const [name, shape] of Object.entries(shapes)) {
+    writeFileSync(file, JSON.stringify(shape));
+    assert.equal(code(() => new CarryState(B, file)), "carry_state_unreadable", name);
+  }
+}));
+
+test("a sealed receipt for the same message has the same bytes every time, and another message gets another", () => {
+  const sealed = profile({ mode: "sealed", challenge: false, acceptUnchallenged: true });
+  const sender = new CarryState(A);
+  const atB = new CarryState(B);
+  const session = sender.oneWay(B.publicRaw, T + 300);
+  const first = sender.send(B.publicRaw, session, text("en"), sealed);
+  const second = sender.send(B.publicRaw, session, text("to"), sealed);
+  const receipts = [atB.deliver(first, [A.publicRaw], sealed, 0, T)[1], atB.deliver(first, [A.publicRaw], sealed, 1, T)[1]];
+  assert.ok(carry.equal(receipts[0], receipts[1]));
+  assert.ok(!carry.equal(atB.deliver(second, [A.publicRaw], sealed, 2, T)[1], receipts[0]));
 });

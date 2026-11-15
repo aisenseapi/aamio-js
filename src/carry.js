@@ -144,6 +144,10 @@ function checkWritable(kind, flags, content, binding) {
 export function write(keys, recipientPk, mode, kind, flags, session, counter, deadline, content, { binding = null, rnd = null } = {}) {
   checkWritable(kind, flags, content, binding);
   if (session.length !== 8) throw new TypeError("a session is 8 bytes");
+  for (const [name, value] of [["counter", counter], ["deadline", deadline]]) {
+    // A number outside its four bytes, or not a whole number, is refused, never turned by setUint32 into one that fits.
+    if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new RangeError(`${name} is a whole number from 0 to 2^32 - 1, not ${value}`);
+  }
   const fields = concat(session, u32(counter), u32(deadline), u16(content.length), content);
   const prefix = concat(DOMAIN, keys.publicRaw, recipientPk, bind(binding));
   if (mode === READABLE) {
