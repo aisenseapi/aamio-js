@@ -153,6 +153,35 @@ for (const [mode, code] of [["bad_describe", "transport_bad_describe"], ["long_l
   });
 }
 
+test("a message whose tries run out without a receipt is unknown, never confirmed", { skip }, async () => {
+  const clock = new Clock();
+  const now = 1794700000;
+  const sealed = profile({ mode: "sealed" });
+  const atA = new CarryState(A);
+  const atB = new CarryState(B);
+  const [session, ask] = atA.ask(B.publicRaw, sealed, clock.now);
+  const [, challenge] = atB.deliver(ask, [A.publicRaw], sealed, clock.now, now);
+  const [, opened] = atA.deliver(challenge, [B.publicRaw], sealed, clock.now, now);
+  assert.equal(atB.deliver(opened, [A.publicRaw], sealed, clock.now, now)[0], "accepted");
+  // The loopback gives every frame back to A, which it is not sealed to: no receipt can come.
+  const transport = await startFake("loopback", clock);
+  try {
+    const carrier = new Carrier(atA, transport, sealed, [B.publicRaw], { clock: clock.read, wall: () => now, retrySeconds: 1, tries: 3 });
+    const key = carrier.send(B.publicRaw, session, new TextEncoder().encode("hei"));
+    assert.deepEqual([carrier.outcome(key), carrier.confirmed(key)], ["waiting", false]);
+    const until = Date.now() + 20000;
+    while (carrier.outcome(key) === "waiting") {
+      assert.ok(Date.now() < until, "the tries never ran out");
+      clock.now += 0.5;
+      await carrier.pump(50);
+    }
+    assert.deepEqual([carrier.outcome(key), carrier.confirmed(key)], ["unknown", false]);
+    assert.ok(carrier.refused.length > 0 && carrier.inbox.length === 0, "its own frames came back and were refused");
+  } finally {
+    await transport.stop();
+  }
+});
+
 test("room is exact when lines cross, the first answer decides, and a ready that does not add up stops the transport", async () => {
   const transport = new TransportProcess("fake", "0.1.0", [], null, {}, { clock: new Clock().read });
   transport.written = 5;

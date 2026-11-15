@@ -7,7 +7,9 @@
 //
 // A message is sent again with the same bytes until its receipt comes; it is
 // never sealed again or moved to another session, so a copy is known as one.
-// The challenge and the open are sent again with the same bytes through the
+// It is confirmed only when its receipt comes: when the tries run out without
+// one, its outcome is unknown, since it may still have arrived, and it is never
+// reported as confirmed. The challenge and the open are sent again with the same bytes through the
 // challenge window, since on a medium that loses frames one try is not enough;
 // an ask no challenge answers is asked again with a new session.
 
@@ -17,6 +19,7 @@ import { CarryRefused } from "./carry.js";
 import { Reassembly } from "./node-transport-host.js";
 
 export const UNVERIFIED_PER_SECOND = 20;
+export const OUTCOMES_KEPT = 10000;
 const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 const pairOf = (pk, session) => toHex(pk) + ":" + toHex(session);
 
@@ -33,6 +36,7 @@ export class Carrier {
     this.addresses = new Map();  // partner pk in hex -> the transport address it was last heard from
     this.inbox = [];             // [sender pk, session, counter, content]
     this.refused = [];
+    this.outcomes = new Map();   // envelope id -> "confirmed" or "unknown", the newest OUTCOMES_KEPT
     this.budget = UNVERIFIED_PER_SECOND;
     this.budgetAt = clock();
     this.counter = 0;
@@ -75,8 +79,22 @@ export class Carrier {
     return this.#await(envelope, this.addresses.get(toHex(partnerPk)) ?? null, "message", partnerPk, session, this.state.counterOf(partnerPk, session));
   }
 
+  /** True only when the receipt came; never for a message whose tries ran out without one. */
   confirmed(key) {
-    return !this.waiting.has(key);
+    return this.outcomes.get(key) === "confirmed";
+  }
+
+  /** waiting while it is sent again, confirmed when its receipt came, and unknown when the tries
+   * ran out without one (it may still have arrived) or the id is no longer remembered. */
+  outcome(key) {
+    if (this.waiting.has(key)) return "waiting";
+    return this.outcomes.get(key) ?? "unknown";
+  }
+
+  #finish(key, outcome) {
+    this.waiting.delete(key);
+    this.outcomes.set(key, outcome);
+    while (this.outcomes.size > OUTCOMES_KEPT) this.outcomes.delete(this.outcomes.keys().next().value);
   }
 
   /** Read what the transport said, deliver what is whole, resend what waits, and give frames within the room. */
@@ -135,7 +153,7 @@ export class Carrier {
     if (got.kind === carry.RECEIPT) {
       const counter = ((got.content[9] << 24) >>> 0) + (got.content[10] << 16) + (got.content[11] << 8) + got.content[12];
       for (const [key, entry] of this.waiting) {
-        if (pairOf(entry.pk, entry.session) === pair && (entry.kind === "open" || entry.counter === counter)) this.waiting.delete(key);
+        if (pairOf(entry.pk, entry.session) === pair && (entry.kind === "open" || entry.counter === counter)) this.#finish(key, "confirmed");
       }
       return;
     }
@@ -144,7 +162,7 @@ export class Carrier {
   }
 
   #settled(pair, kind) {
-    for (const [key, entry] of this.waiting) if (pairOf(entry.pk, entry.session) === pair && entry.kind === kind) this.waiting.delete(key);
+    for (const [key, entry] of this.waiting) if (pairOf(entry.pk, entry.session) === pair && entry.kind === kind) this.#finish(key, "confirmed");
   }
 
   #resend() {
@@ -153,7 +171,7 @@ export class Carrier {
       if (now < entry.next) continue;
       if (entry.tries >= entry.most) {
         // The outcome stays unknown; nothing is wrapped again or sent as a new message on its own.
-        this.waiting.delete(key);
+        this.#finish(key, "unknown");
         continue;
       }
       entry.tries += 1;
