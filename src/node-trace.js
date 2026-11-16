@@ -44,6 +44,8 @@ function isObject(value) {
 export const TRACE_SENT_FIELDS = {
   message_id: "string", at: "int", w: "string", status: "int", outcome: "string", seq: "int", sha256: "hash",
   sealed: "bool", bytes: "int", fields: "list", text_chars: "int", re: "hash", seen: "hash",
+  // The transport a send went over. A send over HTTPS has none.
+  via: "string",
 };
 export const TRACE_RECEIVED_FIELDS = {
   at: "int", channel: "string", w: "string", seq: "int", sha256: "hash", encrypted: "bool", format: "string",
@@ -102,6 +104,9 @@ export function normalizeTraces(traces, keep = TRACE_KEEP, keys = TRACE_KEYS) {
  * sha256 says their runtime read and opened that message, and nothing more: not
  * the ones sent before it, not another channel's. A message nothing names is
  * unknown, never unread.
+ *
+ * A send over a transport is matched the same way, by the sha256 of the
+ * envelope it carried, which is the sha256 their runtime reads it under.
  */
 export function traceView(book, limit) {
   const sentRows = (Array.isArray(book?.sent) ? book.sent : []).filter(isObject);
@@ -109,10 +114,18 @@ export function traceView(book, limit) {
   const claimed = new Set(receivedRows.filter((row) => isMessageHash(row.seen)).map((row) => row.seen));
   const answered = new Set(receivedRows.filter((row) => isMessageHash(row.re)).map((row) => row.re));
   const mine = new Map(sentRows.filter((row) => isMessageHash(row.sha256)).map((row) => [row.sha256, row]));
-  const delivered = sentRows.filter((row) => row.status === 201 && isMessageHash(row.sha256));
+  // Over HTTPS, the service's answer that it stored the message. A send over a transport has no such answer: it arrived
+  // when their runtime gave a receipt before the send answered, or when a message of theirs names it since. Its sha256 is
+  // known either way, since it is of the envelope this side wrote.
+  const arrived = (row) => {
+    if (!isMessageHash(row.sha256)) return false;
+    if (sentOver(row)) return row.outcome === "confirmed" || claimed.has(row.sha256) || answered.has(row.sha256);
+    return row.status === 201;
+  };
+  const delivered = sentRows.filter(arrived);
   const noClaim = delivered.filter((row) => !claimed.has(row.sha256)).map((row) => row.message_id ?? null);
   const sent = sentRows.slice(-limit).map((record) => {
-    const stored = record.status === 201 && isMessageHash(record.sha256) ? record.sha256 : null;
+    const stored = arrived(record) ? record.sha256 : null;
     return { ...record, seen_by_them: stored !== null && claimed.has(stored) ? true : null, answered_by_them: stored !== null && answered.has(stored) ? true : null };
   });
   const received = receivedRows.slice(-limit).map((record) => {
@@ -128,26 +141,46 @@ export function traceView(book, limit) {
   return { sent, received, no_read_claim: noClaim, note: traceNote(sentRows, receivedRows, delivered, noClaim, elsewhere) };
 }
 
+/** The transport a send in the trace went over, or null for a send over HTTPS. */
+export function sentOver(row) {
+  return typeof row?.via === "string" && row.via ? row.via : null;
+}
+
 /**
  * What the record says, in words, and no more than it says. A send the service
  * did not confirm is not a send it did not store: the answer can be lost after
  * the message was stored, and whoever is told it was not stored sends the text
  * again as new bytes, which is a second message. The words are aamio-python's.
+ *
+ * A send over a transport has no answer from the service. It has a receipt from
+ * their runtime, or a claim of theirs that names it, and its sha256 is of the
+ * envelope the transport carried. Such sends were not recorded at all until the
+ * exchange over one local network of 16 November 2026 showed that seen never
+ * named one, and what is said of a send over HTTPS is not said of them.
  */
 export function traceNote(sent, received, delivered, noClaim, elsewhere) {
   if (!sent.length) return "Nothing sent to them is recorded here.";
+  const carried = sent.filter((row) => sentOver(row)).length;
+  const carriedDelivered = delivered.filter((row) => sentOver(row)).length;
   const named = received.some((row) => isMessageHash(row.seen));
-  const turnedAway = sent.filter((row) => row.outcome === "refused" && row.status !== 201).length;
-  const unsettled = sent.length - delivered.length - turnedAway;
+  const turnedAway = sent.filter((row) => !sentOver(row) && row.outcome === "refused" && row.status !== 201).length;
+  const unsettled = sent.length - carried - (delivered.length - carriedDelivered) - turnedAway;
+  const withoutReceipt = carried - carriedDelivered;
   let note;
   if (!delivered.length) {
-    note = "No message here has an answer from the service that confirms it was stored.";
+    note = carried
+      ? "No message here has an answer from the service that confirms it was stored, or a receipt from their runtime over a transport."
+      : "No message here has an answer from the service that confirms it was stored.";
   } else if (!named) {
     const said = received.length ? "Nothing from them has named a message of yours as read" : "Nothing has come back from them";
+    // A transport's profile can be readable, and then not every message is sealed.
+    const sealed = !sent.some((row) => row.sealed === false);
     note = said + ", so each is unknown, not unread. A client that does not send seen says nothing, and neither does one "
-      + "that cannot open what it gets: every message here is sealed to their key, so a reader without it sees an "
-      + "envelope and no text. The sha256 of each message is what the service stored, byte for byte; ask them for "
-      + "the sha256 they read.";
+      + "that cannot open what it gets"
+      + (sealed ? ": every message here is sealed to their key, so a reader without it sees an envelope and no text." : ".")
+      + (carried
+        ? " The sha256 of each message is of the bytes that went, byte for byte: what the service stored, or the envelope a transport carried; ask them for the sha256 they read."
+        : " The sha256 of each message is what the service stored, byte for byte; ask them for the sha256 they read.");
   } else {
     note = `${delivered.length} delivered, and their runtime says it read and opened ${delivered.length - noClaim.length} of them.`;
     if (noClaim.length) {
@@ -156,13 +189,18 @@ export function traceNote(sent, received, delivered, noClaim, elsewhere) {
     }
   }
   if (elsewhere.length) {
-    note += ` They named ${elsewhere.length} message(s) this record cannot match to a send the service confirmed: older than this record, `
+    note += ` They named ${elsewhere.length} message(s) this record cannot match to a send ${carried ? "recorded here" : "the service confirmed"}: older than this record, `
       + "sent from elsewhere, or sent from here without an answer that confirmed it.";
   }
   if (unsettled) {
     note += ` For ${unsettled} no answer settled whether the service stored it, so it may be stored already. Check each one's status `
       + "and outcome first, and if it must go again, retry it from the outbox: the same bytes are marked a replay "
       + "where the first arrived, and new bytes would be a second message.";
+  }
+  if (withoutReceipt) {
+    note += ` For ${withoutReceipt} sent over a transport no receipt had come when the send answered, and nothing of theirs names it since. `
+      + "aamio transport list says how each stands now. The carrier sends the same bytes again by itself while its tries "
+      + "last, and sending the text again would be a second message.";
   }
   if (turnedAway) note += ` The service turned away ${turnedAway}; the status of each says why.`;
   if (named) note += " A claim covers the one message it names. It says their runtime opened it, not that anyone understood it or acted on it.";

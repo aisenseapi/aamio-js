@@ -19,7 +19,7 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { isKey } from "./aamio.js";
-import { CarryRefused, MAX_CONTENT } from "./carry.js";
+import { CarryRefused, MAGIC, MAX_CONTENT, SEALED } from "./carry.js";
 import { NO_CURRENT_DIRECTORY } from "./node-addon-process.js";
 import { AddonError, CORE_VERSION, TransportManifest, loaded } from "./node-addons.js";
 import { Carrier } from "./node-carrier.js";
@@ -547,7 +547,9 @@ export class Service {
   }
 
   /**
-   * content to pk over its first transport, in an open session or in a new one: its mark and how far it came.
+   * content to pk over its first transport, in an open session or in a new one: its mark, the sha256 of its envelope and
+   * how far it came, and for the trace its size and whether it went sealed. The sha256 is the one the partner's runtime
+   * reads it under and names as seen once it has read it.
    *
    * status is confirmed when the receipt came, handed_over when every frame of a try was given to the medium and no
    * receipt came within wait, queued when the message waits in the outbox for room, and unknown when its tries are used
@@ -582,11 +584,14 @@ export class Service {
       if (error instanceof CarryRefused) throw coded(error.code, `${error.message}. Nothing was sent.`);
       throw error;
     }
+    // What went, as the outbox keeps it: the envelope, and its sha256.
+    const written = this.carry().durable.outbox[key];
+    const envelope = Buffer.from(written.envelope, "hex");
     const state = this.carry();
     await this.wait(() => state.outcome(key) !== "waiting", until);
     let outcome = state.outcome(key);
     if (outcome === "waiting") outcome = this.running.get(name)?.carrier?.handedOver(key) ? "handed_over" : "queued";
-    return { via: name, profile: route.profile, mark: key, status: outcome };
+    return { via: name, profile: route.profile, mark: key, status: outcome, sha256: written.sha256, bytes: envelope.length, sealed: envelope[MAGIC.length] === SEALED };
   }
 
   /** What was sent over a transport, as aamio transport list shows it: mark and outcome, oldest first. */

@@ -1954,13 +1954,33 @@ export class NodeRuntime {
       seq: stored ? result.seq ?? null : null, sha256: stored ? result.sha256 ?? null : null, sealed: true,
       ...(isObject(entry.shape) ? entry.shape : {}),
     }, TRACE_SENT_FIELDS);
+    return this.keepSent(key, record);
+  }
+
+  /**
+   * One send over a transport, as the transport service answered it. The mark names it, via says which transport it
+   * went over, and the sha256 is of the envelope the transport carries: the sha256 their runtime reads it under, and the
+   * one its seen names once it has read it. There is no status, since there is no answer from the service.
+   */
+  async traceCarried(key, result, body) {
+    const record = traceRow({
+      message_id: result.mark, at: Math.floor(this.now()), outcome: result.status, sha256: result.sha256, sealed: result.sealed, via: result.via,
+      ...messageShape(body, ""), bytes: result.bytes,
+    }, TRACE_SENT_FIELDS);
+    return this.keepSent(key, record);
+  }
+
+  /** A send in the record of its key, in place of an earlier row for the same message. */
+  keepSent(key, record) {
     const book = this.traceBook(key);
     book.sent = [...book.sent.filter((row) => row.message_id !== record.message_id), record].slice(-TRACE_KEEP);
     return this.saveTrace();
   }
 
   /**
-   * One verified message from a key, as it arrived here. Recorded whether or
+   * One verified message from a key, as it arrived here: over HTTPS on a
+   * channel, or over a transport, with the transport's name as its label and
+   * no address. Recorded whether or
    * not it could be opened, since one that could not is what a trace is for.
    * Taken as read only when it could: last_read is what the next message to
    * this key names as seen, and it names a message this side opened, not one
@@ -2011,9 +2031,9 @@ export class NodeRuntime {
   /**
    * What was sent to one counterpart and what came back, as hashes and shapes.
    * who is a partner name, a key or a write address; without it, one line per
-   * counterpart. Nothing here is content: the sha256 is what the service
-   * stored, byte for byte, so the other side can hold its own trace against
-   * this one.
+   * counterpart. Nothing here is content: the sha256 is of the bytes that
+   * went, what the service stored or the envelope a transport carried, byte for
+   * byte, so the other side can hold its own trace against this one.
    */
   trace(who = null, limit = 20) {
     const most = Math.max(1, Math.min(Math.floor(Number(limit) || 20), TRACE_KEEP));
@@ -3385,10 +3405,15 @@ export class NodeRuntime {
     const budget = this.workBudget;
     const wait = budget === undefined || budget === null ? transportTiming.waitDefault : Math.max(1, Math.min(transportTiming.waitDefault, Math.floor(budget)));
     const result = await this.transportService().send(new Uint8Array(Buffer.from(partner.key, "base64url")), content, wait);
-    const sent = { to: partner.name, ...result, note: CARRIED_NOTES[result.status].replace("%via", result.via).replace("%wait", String(wait)) };
+    // The sha256 is of the envelope the transport carries: what their runtime reads it under and names as seen, as the
+    // sha256 of a send over HTTPS is what the service stored.
+    const sent = { to: partner.name, via: result.via, profile: result.profile, mark: result.mark, sha256: result.sha256, status: result.status,
+      note: CARRIED_NOTES[result.status].replace("%via", result.via).replace("%wait", String(wait)) };
     const archiveError = await this.archiveSafely("sent", { kind: "sent", at: this.now(), to: partner.name, via: result.via, profile: result.profile, mark: result.mark, status: result.status,
       body: archivedData === null || archivedData === undefined ? body : { ...body, data: archivedData } }, `the send ${result.mark}`);
     if (archiveError) sent.archive_error = archiveError;
+    const traceError = await this.traceSafely("sent", () => this.traceCarried(partner.key, result, body));
+    if (traceError) sent.trace_error = traceError;
     return sent;
   }
 
@@ -3546,7 +3571,12 @@ export class NodeRuntime {
     }
   }
 
-  /** What a read hands over that came over a transport: written to the archive, and then taken out of the carrier state. */
+  /**
+   * What a read hands over that came over a transport: written to the archive and the trace, and then taken out of the
+   * carrier state. The trace is where the next message to that partner takes its seen from, as a read over HTTPS records
+   * a message there. A message over a transport went past it, so seen never named one, and aamio trace showed nothing of
+   * it (the exchange over one local network of 16 November 2026).
+   */
   async #carriedHandedOver(messages) {
     const marks = [];
     for (const message of messages) {
@@ -3555,6 +3585,13 @@ export class NodeRuntime {
       marks.push(message.mark);
     }
     if (!marks.length) return;
+    await this.traceSafely("received", async () => {
+      let changed = false;
+      for (const message of messages) {
+        if (message.mark && message.verified === true && message.from_key) changed = this.traceReceived({ label: message.channel, w: null }, message) || changed;
+      }
+      return changed ? this.saveTrace() : null;
+    });
     try {
       this.transportService().taken(marks);
     } catch (error) {

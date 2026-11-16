@@ -957,3 +957,36 @@ test("on the command line, against a service that answers: a send turned away sa
   assert.match(row.trace_error, /^trace\.json: /);
   assert.deepEqual((await receiver.read()).map((m) => [m.body.text, m.replay]), [["turned away, and untraced", false]]);
 });
+
+/** A send over a transport as the trace records one: the mark, via and the sha256 of the envelope, and no status. */
+const carried = (number, outcome = "confirmed", sealed = true) => ({
+  message_id: `${"ab".repeat(32)}:${number.toString(16).padStart(16, "0")}:1`, at: 1794852000 + number, outcome, sha256: sha256hex(String(number)), sealed, via: "lan",
+  bytes: 300, fields: ["from", "text"], text_chars: 10,
+});
+
+test("a send over a transport is matched by the sha256 of its envelope, and said in words of its own", () => {
+  // A send over a transport has no answer from the service. It arrived when a receipt came or a claim of theirs names it,
+  // and what is said of a send over HTTPS is not said of it (the exchange over one local network of 16 November 2026).
+  const named = carried(2, "handed_over");
+  const book = { sent: [carried(1), named, carried(3, "handed_over")],
+    received: [{ at: 1794852100, channel: "lan", sha256: sha256hex("10"), seen: named.sha256, encrypted: true, format: "json", fields: ["from", "seen", "text"] }], last_read: null };
+  const view = traceView(book, 50);
+  assert.deepEqual(view.sent.map((row) => row.seen_by_them), [null, true, null], "a claim names the second, whose receipt had not come");
+  assert.deepEqual(view.no_read_claim, [carried(1).message_id], "the one a receipt confirmed and nothing names");
+  assert.equal(view.received[0].acknowledges.sha256, named.sha256);
+  assert.ok(view.note.startsWith("2 delivered, and their runtime says it read and opened 1 of them."), view.note);
+  assert.ok(view.note.includes("For 1 sent over a transport no receipt had come when the send answered") && view.note.includes("aamio transport list"), view.note);
+  assert.ok(!view.note.includes("retry it from the outbox") && !view.note.includes("the service stored it"), view.note);
+  const key = Keys.generate().public;
+  assert.deepEqual(normalizeTraces({ [key]: { ...book, active: 1 } })[key].sent, book.sent, "via is kept when the file is read back");
+});
+
+test("a send over a transport under a readable profile is not said to be sealed", () => {
+  const nothing = traceView({ sent: [carried(1, "unknown", false)], received: [], last_read: null }, 50).note;
+  assert.ok(nothing.startsWith("No message here has an answer from the service that confirms it was stored, or a receipt from their runtime over a transport."), nothing);
+  assert.ok(nothing.includes("For 1 sent over a transport no receipt had come"), nothing);
+  const unnamed = traceView({ sent: [carried(1, "confirmed", false)], received: [], last_read: null }, 50).note;
+  assert.ok(unnamed.startsWith("Nothing has come back from them, so each is unknown, not unread."), unnamed);
+  assert.ok(!unnamed.includes("every message here is sealed") && unnamed.includes("the envelope a transport carried"), unnamed);
+  assert.ok(traceView({ sent: [carried(1)], received: [], last_read: null }, 50).note.includes("every message here is sealed to their key"));
+});

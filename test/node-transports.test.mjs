@@ -319,6 +319,52 @@ for (const serves of [true, false]) {
   });
 }
 
+for (const serves of [true, false]) {
+  test(`seen names what was read over a transport, and the sender sees it in its trace, ${serves ? "as serve reads" : "as the command line reads"}`, async (t) => {
+    // seen never named a message that came over a transport: what was read over one went past the trace, where seen is
+    // taken from, and a send over one was not recorded there either. In all three runtimes (the exchange over one local
+    // network of 16 November 2026).
+    const { a, b } = await homes(t);
+    let reading = null;
+    if (serves) await b.startTransports();
+    else {
+      reading = b.read({ wait: 25 });
+      reading.catch(() => {});
+      await eventually(() => b.transportService().status().lan === "up", "the reader's transport never came up");
+    }
+    const first = await a.send("b", { text: "første over nettet" });
+    assert.equal(first.status, "confirmed", JSON.stringify(first));
+    assert.match(first.sha256, /^[0-9a-f]{64}$/);
+    const got = serves ? await b.read({ wait: 10 }) : await reading;
+    assert.deepEqual(got.map((message) => message.sha256), [first.sha256], "both sides name it by the sha256 of its envelope");
+    assert.ok(!("seen" in got[0].body), "a had read nothing of b's");
+
+    const back = await b.send("a", { text: "svar over nettet", re: got[0].sha256 });
+    assert.equal(back.status, "confirmed", JSON.stringify(back));
+    assert.ok(/^[0-9a-f]{64}$/.test(back.sha256) && back.sha256 !== first.sha256, JSON.stringify(back));
+    const answers = await a.read({ wait: 10 });
+    assert.deepEqual(answers.map((message) => [message.body.seen, message.body.re]), [[first.sha256, first.sha256]], "b read it, and says so");
+    assert.equal(answers[0].sha256, back.sha256);
+
+    const mine = a.trace("b");
+    assert.deepEqual(mine.sent.map((row) => [row.message_id, row.via, row.sha256, row.outcome, row.seen_by_them, row.answered_by_them]),
+      [[first.mark, "lan", first.sha256, "confirmed", true, true]], JSON.stringify(mine));
+    const sent = mine.sent[0];
+    assert.ok(sent.sealed === true && sent.bytes > 0 && !("status" in sent) && !("w" in sent) && !("seq" in sent), JSON.stringify(sent));
+    assert.deepEqual(sent.fields, ["from", "text"]);
+    assert.deepEqual(mine.received.map((row) => [row.channel, row.sha256, row.seen, row.re]), [["lan", back.sha256, first.sha256, first.sha256]]);
+    assert.equal(mine.received[0].acknowledges.sha256, first.sha256);
+    assert.deepEqual(mine.no_read_claim, []);
+    assert.ok(mine.note.startsWith("1 delivered, and their runtime says it read and opened 1 of them."), mine.note);
+    assert.equal(mine.last_read.sha256, back.sha256, "a has read b's answer, and its next message names it");
+
+    const theirs = b.trace("a");
+    assert.deepEqual(theirs.received.map((row) => [row.channel, row.sha256]), [["lan", first.sha256]]);
+    assert.deepEqual(theirs.sent.map((row) => [row.via, row.sha256, row.seen_by_them]), [["lan", back.sha256, null]]);
+    assert.ok(theirs.note.includes("unknown, not unread") && theirs.note.includes("the envelope a transport carried") && !theirs.note.includes("is what the service stored"), theirs.note);
+  });
+}
+
 test("follow-up finding 1: a scope is not shared under a readable profile, and one that comes readable is not kept", async (t) => {
   // Under a readable profile everyone who hears the medium would read the key, so it does not go; and a message that
   // carries one all the same has it taken out, and nothing is kept from it.
