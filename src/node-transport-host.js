@@ -80,6 +80,7 @@ export class TransportProcess {
     this.child = null;
     this.lines = [];          // what has come and not been taken: ["line", text] | ["closed"] | ["too_long"]
     this.wake = null;
+    this.early = [];          // what the transport said before start returned, for the first poll after it
     this.buffer = "";
     this.properties = null;
     this.medium = null;
@@ -128,7 +129,10 @@ export class TransportProcess {
     const until = realSeconds() + this.describeSeconds;
     while (this.properties === null) {
       if (realSeconds() >= until) this.#fail(new TransportFailed("transport_timeout", `no describe within ${this.describeSeconds} seconds of hello`));
-      await this.poll(200);
+      // What comes with describe is kept for whoever polls next: a status, or a frame that came in as the medium
+      // opened. It was dropped here, so a port said as down in the same breath as describe was never heard of (a
+      // full run of 16 November 2026).
+      this.early = await this.poll(200);
     }
     return this.properties;
   }
@@ -243,9 +247,14 @@ export class TransportProcess {
     else if (this.room() <= 0 && this.waitingForRoomSince === null) this.waitingForRoomSince = this.clock();
   }
 
-  /** What the transport said since last time, waiting up to timeoutMs for the first line: a list of events. */
+  /**
+   * What the transport said since last time, waiting up to timeoutMs for the first line: a list of events. What it
+   * said before start returned comes first, and is not waited behind.
+   */
   async poll(timeoutMs = 0) {
-    if (this.lines.length === 0 && timeoutMs > 0) {
+    const events = this.early;
+    this.early = [];
+    if (this.lines.length === 0 && timeoutMs > 0 && events.length === 0) {
       await new Promise((resolve) => {
         const timer = setTimeout(() => {
           this.wake = null;
@@ -257,7 +266,6 @@ export class TransportProcess {
         };
       });
     }
-    const events = [];
     while (this.lines.length) {
       for (const event of this.#take(this.lines.shift())) events.push(event);
     }

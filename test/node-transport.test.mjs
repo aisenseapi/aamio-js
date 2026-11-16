@@ -123,6 +123,23 @@ test("a transport that never gives room is hung after sixty seconds, whatever el
   }
 });
 
+test("what a transport says with its describe is not lost", { skip }, async () => {
+  // start read lines until describe had come and dropped whatever else had come with it: a status, or a frame that
+  // came in as the medium opened. A port in use was said as down in the same breath, and whoever waited for it saw
+  // nothing (a full run of 16 November 2026).
+  const transport = await startFake("early");
+  try {
+    const heard = [];
+    const until = Date.now() + 5000;
+    while (heard.length < 2 && Date.now() < until) heard.push(...(await transport.poll(50)));
+    assert.deepEqual(heard.map((event) => [event[0], event[1], event[0] === "received" ? Array.from(event[2]) : event[2]]),
+      [["status", "up", "said with describe"], ["received", "early", [0, 1, 2]]]);
+    assert.equal(transport.room(), 4);
+  } finally {
+    await transport.stop();
+  }
+});
+
 test("a late answer decides the status after the deadline", { skip }, async () => {
   const clock = new Clock();
   const transport = await startFake("late", clock);
