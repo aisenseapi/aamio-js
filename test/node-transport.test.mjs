@@ -140,6 +140,22 @@ test("what a transport says with its describe is not lost", { skip }, async () =
   }
 });
 
+test("what a transport says before its describe is kept, and describe is still waited for", { skip }, async () => {
+  // The simulated radio listens before it has read hello, so a frame from a partner that is already sending comes
+  // before describe. It is kept as what comes with describe is, and describe is still waited for: kept and then
+  // not waited behind, the host never read the describe that came after (a full run of 16 November 2026).
+  const began = Date.now();
+  const transport = await startFake("eager");
+  try {
+    assert.ok(Date.now() - began < 5000, "describe was waited for, and came");
+    const heard = await transport.poll(0);
+    assert.deepEqual(heard.map((event) => [event[0], event[1], Array.from(event[2])]), [["received", "eager", [0, 1, 2]]]);
+    await waitForRoom(transport, 4);
+  } finally {
+    await transport.stop();
+  }
+});
+
 test("a late answer decides the status after the deadline", { skip }, async () => {
   const clock = new Clock();
   const transport = await startFake("late", clock);

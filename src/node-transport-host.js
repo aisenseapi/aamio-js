@@ -129,10 +129,12 @@ export class TransportProcess {
     const until = realSeconds() + this.describeSeconds;
     while (this.properties === null) {
       if (realSeconds() >= until) this.#fail(new TransportFailed("transport_timeout", `no describe within ${this.describeSeconds} seconds of hello`));
-      // What comes with describe is kept for whoever polls next: a status, or a frame that came in as the medium
-      // opened. It was dropped here, so a port said as down in the same breath as describe was never heard of (a
-      // full run of 16 November 2026).
-      this.early = await this.poll(200);
+      // What comes before describe or with it is kept for whoever polls next: a status, or a frame that came in as
+      // the medium opened. It was dropped here, so a port said as down in the same breath as describe was never
+      // heard of (a full run of 16 November 2026). Each round waits for a line as before, whatever is kept
+      // already: kept and then not waited behind, this loop never let the describe that came after be read.
+      const heard = await this.#heard(200);
+      this.early.push(...heard);
     }
     return this.properties;
   }
@@ -254,7 +256,13 @@ export class TransportProcess {
   async poll(timeoutMs = 0) {
     const events = this.early;
     this.early = [];
-    if (this.lines.length === 0 && timeoutMs > 0 && events.length === 0) {
+    events.push(...(await this.#heard(events.length ? 0 : timeoutMs)));
+    return events;
+  }
+
+  /** The lines that have come, taken in, after a wait of up to timeoutMs for the first: the events in them. */
+  async #heard(timeoutMs) {
+    if (this.lines.length === 0 && timeoutMs > 0) {
       await new Promise((resolve) => {
         const timer = setTimeout(() => {
           this.wake = null;
@@ -266,6 +274,7 @@ export class TransportProcess {
         };
       });
     }
+    const events = [];
     while (this.lines.length) {
       for (const event of this.#take(this.lines.shift())) events.push(event);
     }
