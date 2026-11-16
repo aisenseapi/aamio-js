@@ -85,8 +85,12 @@ export class Carrier {
     return this.queue.some(([, , queued, ids]) => queued === key && ids.length === 0);
   }
 
-  #queue(envelope, to, key = null) {
-    this.queue.push([carry.split(envelope, this.frameLimit), to, key, []]);
+  /**
+   * An envelope in frames, waiting for room. counted says whether the try it is has been counted in the state: the
+   * first try of a message is, when the message is written, and a later one is counted as it begins.
+   */
+  #queue(envelope, to, key = null, counted = true) {
+    this.queue.push([carry.split(envelope, this.frameLimit), to, key, [], counted]);
   }
 
   #control(envelope, to, kind, pk, session, most) {
@@ -252,16 +256,18 @@ export class Carrier {
         this.messages.delete(key);
         continue;
       }
-      // The try is counted in the state before it goes, so a restart never gives back tries that were used.
-      if (!this.state.tried(key)) {
+      if (this.state.triesLeft(key) === 0) {
+        // The tries are used: the bytes go, and the outcome is unknown for good (A7).
+        this.state.tried(key);
         this.log(`no receipt for ${key}, and its tries are used`);
         this.messages.delete(key);
-        // A try that never started is not sent after the message is over (A7): it went out after unknown was said.
-        this.queue = this.queue.filter(([, , queued, ids]) => !(queued === key && ids.length === 0));
         continue;
       }
       entry.next = now + this.retrySeconds;
-      this.#queue(entry.envelope, this.addresses.get(toHex(entry.pk)) ?? null, key);
+      // Queued, the try has used nothing: it is counted as it begins, in #flush, when it can be given to the
+      // transport. Counted here, every new owner used a try as it took the outbox up, room or not, and a budget went
+      // with nothing sent (the check of 16 November 2026).
+      this.#queue(entry.envelope, this.addresses.get(toHex(entry.pk)) ?? null, key, false);
     }
     for (const [key, entry] of this.control) {
       if (now < entry.next) continue;
@@ -286,7 +292,7 @@ export class Carrier {
 
   #flush() {
     while (this.queue.length && this.process.room() > 0) {
-      const [frames, to, key, ids] = this.queue[0];
+      const [frames, to, key, ids, counted] = this.queue[0];
       if (key !== null && ids.length === 0) {
         // A try at a message begins here, so here is where it may still be stopped: when the message is over (its
         // receipt came, or its tries are used), or when the partner's profile is of another mode now than the bytes
@@ -297,6 +303,19 @@ export class Carrier {
           this.queue.shift();
           continue;
         }
+        if (!counted) {
+          // Counted in the state before its first frame goes, so a restart never gives back a try that was used,
+          // and counted only now that there is room for it.
+          if (!this.state.tried(key)) {
+            this.log(`no receipt for ${key}, and its tries are used`);
+            this.messages.delete(key);
+            this.queue.shift();
+            continue;
+          }
+          this.queue[0][4] = true;
+        }
+        // The next try is one wait after this one began, however long it waited for room.
+        entry.next = this.clock() + this.retrySeconds;
       }
       const frame = frames.shift();
       const id = this.process.send(frame, to);

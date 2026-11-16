@@ -504,6 +504,45 @@ test("follow-up finding 8, in Node: a transport is started once when two callers
   assert.equal(said.filter((line) => line === "transport lan: up").length, 1, JSON.stringify(said));
 });
 
+for (const how of ["startTransports", "read"]) {
+  test(`a start under way when the owner closes adds and starts nothing after it, through ${how}`, async (t) => {
+    // The check of 16 November 2026: a start that was reading the manifests when close ran went on after the home had
+    // been let go of. It added the transport and started it and the service's loop, in a runtime that was closed, and
+    // the port was held while another runtime could have the home.
+    const made = await homes(t);
+    const b = made.b;
+    const service = b.transportService();
+    const read = service.manifests.bind(service);
+    let letGo = null;
+    const held = new Promise((resolve) => {
+      letGo = resolve;
+    });
+    let reading = 0;
+    service.manifests = async () => {
+      const found = await read();
+      reading += 1;
+      await held;
+      return found;
+    };
+    const starting = (how === "read" ? b.read({ wait: 0.05 }) : b.startTransports()).catch(() => null);
+    await eventually(() => reading > 0, "the start never read the manifests");
+    let closed = false;
+    const closing = b.close().then(() => {
+      closed = true;
+    });
+    await sleep(300);
+    assert.equal(closed, false, "close waits for the start that is under way");
+    letGo();
+    await Promise.all([starting, closing]);
+    assert.deepEqual(service.status(), {}, "nothing was added after the stop");
+    assert.ok(await portIsFree(made.ports.b[0]), "and no transport was started");
+    // The home and the port are free for the next owner.
+    const again = await made.open("b");
+    assert.equal(await again.startTransports(), true);
+    await eventually(() => again.transportService().status().lan === "up", "the next owner's transport never came up");
+  });
+}
+
 test("follow-up finding 4, in the service: a transport whose carrier cannot be made stays down with the reason, and its process is stopped", async (t) => {
   // A carrier state that refuses, as it now does to every read after a failed write, threw out of the start with the
   // transport's process left running, and the next round started another.

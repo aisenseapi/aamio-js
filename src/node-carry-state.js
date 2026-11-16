@@ -355,6 +355,18 @@ export class CarryState {
   }
 
   /**
+   * How many more tries the budget allows a message that waits for its receipt. Nothing is counted: whoever asks can
+   * then wait with the try until it can go.
+   */
+  triesLeft(key) {
+    this.#check();
+    if (!Object.hasOwn(this.durable.outbox, key)) return 0;
+    const entry = this.durable.outbox[key];
+    if (entry.receipt || entry.envelope === null) return 0;
+    return Math.max(0, entry.most - entry.tries);
+  }
+
+  /**
    * A message that cannot go on as it was written, as one written readable for a partner whose profile is sealed now:
    * its bytes go, as when the tries are used, and its mark and hash stay, so a receipt that comes late still confirms
    * it. It is never sealed again under its mark (B5, A7). True when there was something to give up.
@@ -496,7 +508,11 @@ export class CarryState {
       const entry = this.waiting.get(pair);
       if (!entry || !carry.equal(entry.nonce, got.content)) throw new CarryRefused("carry_nonce_unknown");
       if (entry.used) throw new CarryRefused("carry_nonce_used");
-      if (mono - entry.t0 > profileIn.challengeWindow) throw new CarryRefused("carry_nonce_expired");
+      // In the window it was given under, as the quota counts it and as it is forgotten: taken in the window of the
+      // profile now, a challenge the quota no longer counted still opened a session when the profile had come to
+      // have a longer window (the check of 16 November 2026). A profile changed later neither lengthens nor
+      // shortens what was given.
+      if (mono - entry.t0 > entry.window) throw new CarryRefused("carry_nonce_expired");
       this.#room(pk);
       entry.used = true;
       // The lifetime goes with the session: a profile changed later can shorten it, never lengthen it (A6.6.4).

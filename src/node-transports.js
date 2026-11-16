@@ -264,7 +264,11 @@ export class Service {
     this.state = null;
     this.running = new Map();   // transport name -> { manifest, process, carrier, crashes, next, down }
     this.loop = null;
+    // True from the moment stop begins, and for good: nothing is added or started after it, also by a start that
+    // began before it. The service stops once, with its owner.
     this.stopping = false;
+    // Starts under way, which stop waits for before it says that nothing of this service runs.
+    this.starts = new Set();
     // The environment a transport's variables are read from: process.env, unless a test or an embedder says otherwise.
     this.environ = null;
     this.knownAt = 0;
@@ -322,21 +326,35 @@ export class Service {
 
   // ------------------------------------------------------------ running
 
-  /** Every transport that is bound and enabled, started, and pumped in a loop of the service's own. */
+  /**
+   * Every transport that is bound and enabled, started, and pumped in a loop of the service's own. Nothing once stop
+   * has begun: a runtime that is closed does not start its transports again.
+   */
   async start() {
-    await this.#add(this.wanted());
-    await this.#startDue();
-    if (!this.loop && this.running.size) {
-      this.stopping = false;
-      this.loop = this.#run();
+    if (this.stopping) return this;
+    const under = this.#start();
+    this.starts.add(under);
+    try {
+      await under;
+    } finally {
+      this.starts.delete(under);
     }
     return this;
+  }
+
+  async #start() {
+    await this.#add(this.wanted());
+    await this.#startDue();
+    if (!this.stopping && !this.loop && this.running.size) this.loop = this.#run();
   }
 
   /** Transports to run, each once, with the manifests read only when one is new. */
   async #add(names) {
     if (names.every((name) => this.running.has(name))) return;
     const manifests = await this.manifests();
+    // Stopped while the manifests were read: nothing is added after that. Added then, the transport was started and
+    // the loop with it after the owner had let go of the home (the check of 16 November 2026).
+    if (this.stopping) return;
     for (const name of names) {
       // Looked at again now that the manifests are read: a send and the service's own loop may both be adding.
       if (this.running.has(name)) continue;
@@ -394,6 +412,7 @@ export class Service {
   async #startDue() {
     const at = now();
     for (const [name, entry] of this.running) {
+      if (this.stopping) return;
       if (entry.carrier || entry.starting || !entry.manifest || entry.down !== null || at < entry.next) continue;
       const folder = workingFolder(this.runtime.home, name);
       const transport = new TransportProcess(name, entry.manifest.version, [process.execPath, entry.manifest.entry], folder,
@@ -503,6 +522,9 @@ export class Service {
     const entries = [...this.running.values()];
     this.running.clear();
     for (const entry of entries) if (entry.process) await entry.process.stop();
+    // A start under way adds and starts nothing more now, and stops what it was starting itself. It is waited for,
+    // so nothing of this service runs when stop returns and the owner lets go of the home.
+    await Promise.allSettled([...this.starts]);
   }
 
   status() {

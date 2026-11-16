@@ -537,6 +537,54 @@ test("follow-up finding 2, in the state: a message given up keeps its mark for a
   assert.equal(again.outcome(key), "confirmed");
 }));
 
+test("an open is taken in the window its challenge was given under", () => {
+  // The check of 16 November 2026: the quota counted a challenge in the window it was given under, and an open was taken
+  // in the window of the profile now. Given with 60 seconds, a challenge was refused at 61 under that profile and taken
+  // under one of 600, while the quota no longer counted it.
+  const narrow = profile({ mode: "readable", challengeWindow: 60, lifetime: 600 });
+  const wide = profile({ mode: "readable", challengeWindow: 600, lifetime: 3600 });
+  const atA = new CarryState(A);
+  const atB = new CarryState(B);
+  let [, ask] = atA.ask(B.publicRaw, narrow, 0);
+  let [, challenge] = atB.deliver(ask, [A.publicRaw], narrow, 0, T);
+  let [, opening] = atA.deliver(challenge, [B.publicRaw], narrow, 1, T);
+  assert.equal(code(() => atB.deliver(opening, [A.publicRaw], wide, 61, T)), "carry_nonce_expired");
+  // What was given stands the other way too: given with 600 seconds, it is taken at 61 under a profile of 60.
+  [, ask] = atA.ask(B.publicRaw, wide, 100);
+  [, challenge] = atB.deliver(ask, [A.publicRaw], wide, 100, T);
+  [, opening] = atA.deliver(challenge, [B.publicRaw], wide, 101, T);
+  assert.equal(atB.deliver(opening, [A.publicRaw], narrow, 161, T)[0], "accepted");
+});
+
+test("a challenge the quota no longer counts opens no session", () => {
+  // The same, as the quota sees it: 64 challenges given with 60 seconds are out of the count at 61, a new one is given
+  // under a profile of 600, and none of the 64 opens a session then.
+  const narrow = profile({ mode: "readable", challengeWindow: 60, lifetime: 600 });
+  const wide = profile({ mode: "readable", challengeWindow: 600, lifetime: 3600 });
+  const partners = Array.from({ length: 9 }, (_, n) => Keys.fromSeedHex((n + 1).toString(16).padStart(2, "0").repeat(32)));
+  const known = partners.map((partner) => partner.publicRaw);
+  const atB = new CarryState(B);
+  const given = [];
+  for (const partner of partners.slice(0, 8)) {
+    const state = new CarryState(partner);
+    let challenge = null;
+    for (let n = 0; n < MAX_WAITING_PER_PARTNER; n++) {
+      const [, ask] = state.ask(B.publicRaw, narrow, 0);
+      const [result, reply] = atB.deliver(ask, known, narrow, 0, T);
+      assert.equal(result, "accepted");
+      challenge = reply;
+    }
+    given.push([state, challenge]);
+  }
+  const late = new CarryState(partners[8]);
+  const [, ask] = late.ask(B.publicRaw, wide, 61);
+  assert.equal(atB.deliver(ask, known, wide, 61, T)[0], "accepted", "the 64 are past their window, and no longer counted");
+  for (const [state, challenge] of given) {
+    const [, opening] = state.deliver(challenge, [B.publicRaw], narrow, 1, T);
+    assert.equal(code(() => atB.deliver(opening, known, wide, 61, T)), "carry_nonce_expired");
+  }
+});
+
 test("follow-up finding 10: every challenge waits in the window it was given under", () => {
   // The 64 in all are counted with each challenge's own window, not with the window of the one who asks now.
   const wide = profile({ mode: "readable", challengeWindow: 600, lifetime: 3600 });

@@ -508,7 +508,7 @@ test("follow-up finding 5: a try that waits for room is not begun once its recei
   medium.credit = 0;
   clock.now += 2.1;
   await carrier.pump(0);
-  assert.ok(queued(carrier, key) && atA.durable.outbox[key].tries === 2);
+  assert.ok(queued(carrier, key) && atA.durable.outbox[key].tries === 1, "it waits, and has used nothing yet");
   const [, receipt] = atB.deliver(keptEnvelope(atA, key), [A.publicRaw], readable, 1, NOW);
   medium.events = carry.split(receipt, 64).map((frame) => ["received", null, frame]);
   await carrier.pump(0);
@@ -516,6 +516,46 @@ test("follow-up finding 5: a try that waits for room is not begun once its recei
   medium.credit = 1000;
   await carrier.pump(0);
   assert.deepEqual([medium.given.length, carrier.queue.length], [first, 0], "the copy that waited was not sent after the receipt");
+  assert.equal(atA.durable.outbox[key].tries, 1, "and it was never counted");
+});
+
+test("a new owner uses no try while the transport has no room", async () => {
+  // The check of 16 November 2026: every new owner counted a try as it took the outbox up, room or not. With a budget
+  // of three and no room, three owners used it all, the bytes went, and not one frame had been given.
+  const clock = new Clock();
+  const root = mkdtempSync(join(tmpdir(), "aamio-carry-owner-"));
+  try {
+    const file = join(root, "a.json");
+    const atA = new CarryState(A, file);
+    const session = openedPair(atA, new CarryState(B));
+    atA.send(B.publicRaw, session, bytes("hei"), readable, { most: 3 });
+    const key = mark(B.publicRaw, session, 1);
+    const options = { clock: clock.read, wall: () => NOW, retrySeconds: 2 };
+    for (let owner = 0; owner < 3; owner++) {
+      const medium = new Medium(0);
+      const state = new CarryState(A, file);
+      const carrier = new Carrier(state, medium, readable, [B.publicRaw], options);
+      for (let round = 0; round < 3; round++) {
+        clock.now += 2.1;
+        await carrier.pump(0);
+      }
+      assert.deepEqual([medium.given, state.durable.outbox[key].tries, carrier.outcome(key)], [[], 1, "waiting"], `owner ${owner + 1}`);
+    }
+    // With room the next owner's try is counted as it begins, and goes.
+    const medium = new Medium(1000);
+    const state = new CarryState(A, file);
+    const carrier = new Carrier(state, medium, readable, [B.publicRaw], options);
+    await carrier.pump(0);
+    assert.ok(medium.given.length > 0 && state.durable.outbox[key].tries === 2);
+    // And the tries still end: one more goes, and then the outcome is unknown and the bytes are gone.
+    for (let round = 0; round < 3; round++) {
+      clock.now += 2.1;
+      await carrier.pump(0);
+    }
+    assert.deepEqual([state.durable.outbox[key].tries, carrier.outcome(key), state.durable.outbox[key].envelope], [3, "unknown", null]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("follow-up finding 2: bytes written readable are not taken up under a sealed profile", async () => {
