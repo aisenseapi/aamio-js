@@ -81,6 +81,8 @@ export class TransportProcess {
     this.lines = [];          // what has come and not been taken: ["line", text] | ["closed"] | ["too_long"]
     this.wake = null;
     this.early = [];          // what the transport said before start returned, for the first poll after it
+    this.said = 0;            // lines taken from the transport in all
+    this.lastWords = [];      // the last lines it wrote on standard error
     this.buffer = "";
     this.properties = null;
     this.medium = null;
@@ -118,7 +120,9 @@ export class TransportProcess {
       errors = (errors + chunk).slice(-65536);
       let at;
       while ((at = errors.indexOf("\n")) !== -1) {
-        this.log(`transport ${this.name}: ${errors.slice(0, at).trimEnd()}`);
+        const words = errors.slice(0, at).trimEnd();
+        this.lastWords = [...this.lastWords, words.slice(0, 200)].slice(-3);
+        this.log(`transport ${this.name}: ${words}`);
         errors = errors.slice(at + 1);
       }
     });
@@ -128,7 +132,7 @@ export class TransportProcess {
     this.#write({ t: "hello", aamio_addon: 3, aamio: { version: aamioVersion, runtime }, state_dir: stateDir, ...(probe ? { probe: true } : {}) });
     const until = realSeconds() + this.describeSeconds;
     while (this.properties === null) {
-      if (realSeconds() >= until) this.#fail(new TransportFailed("transport_timeout", `no describe within ${this.describeSeconds} seconds of hello`));
+      if (realSeconds() >= until) this.#fail(new TransportFailed("transport_timeout", `no describe within ${this.describeSeconds} seconds of hello: ${this.#silence()}`));
       // What comes before describe or with it is kept for whoever polls next: a status, or a frame that came in as
       // the medium opened. It was dropped here, so a port said as down in the same breath as describe was never
       // heard of (a full run of 16 November 2026). Each round waits for a line as before, whatever is kept
@@ -137,6 +141,18 @@ export class TransportProcess {
       this.early.push(...heard);
     }
     return this.properties;
+  }
+
+  /**
+   * What is known of a transport that did not describe itself: whether the hello was written to it, whether its
+   * process runs, what it said, and its last lines on standard error. Said alone, no describe told nothing of where the
+   * start had stopped, and one that stopped once could not be told from any other (16 November 2026).
+   */
+  #silence() {
+    const written = this.child.stdin.writableLength === 0 ? "the hello was written to it" : "the hello was not written to it";
+    const runs = this.child.exitCode === null && this.child.signalCode === null ? "its process runs" : "its process has ended";
+    const said = this.said === 0 ? "it said nothing" : this.said === 1 ? "it said 1 line that was no describe" : `it said ${this.said} lines, none of them a describe`;
+    return `${written}, ${runs}, and ${said}${this.lastWords.length ? `. On standard error: ${this.lastWords.join(" | ")}` : ""}`;
   }
 
   #arrive(item) {
@@ -289,6 +305,7 @@ export class TransportProcess {
   #take(item) {
     if (item[0] === "closed") this.#fail(new TransportFailed("transport_down", "the process ended"));
     if (item[0] === "too_long") this.#fail(new TransportFailed("transport_protocol", `a line longer than ${LINE_LIMIT} bytes`));
+    this.said += 1;
     let message;
     try {
       message = JSON.parse(item[1]);

@@ -174,6 +174,22 @@ test("a late answer decides the status after the deadline", { skip }, async () =
   }
 });
 
+test("a transport that does not describe itself is said with what is known of it", { skip }, async () => {
+  // No describe within ten seconds said only that. A start that stopped so once, with three suites running, could not
+  // be told from any other: whether the hello had gone, whether the process lived, or what it had said (16 November
+  // 2026). Here the wait is one second.
+  const env = { ...environment([], baseEnv), FAKE_TRANSPORT_MODE: "mute" };
+  const transport = new TransportProcess("fake", "0.1.0", [...python, "-u", fake], tmpdir(), env, { describeSeconds: 1 });
+  try {
+    const failed = await transport.start("0.0.0-test", "node", tmpdir()).then(() => null, (error) => error);
+    assert.equal(failed?.code, "transport_timeout");
+    for (const words of ["no describe within 1 seconds of hello: ", "the hello was written to it", "its process runs", "it said 1 line that was no describe",
+      "On standard error: the fake transport has nothing to say"]) assert.ok(failed.message.includes(words), failed.message);
+  } finally {
+    await transport.stop();
+  }
+});
+
 for (const [mode, code] of [["bad_describe", "transport_bad_describe"], ["long_line", "transport_protocol"]]) {
   test(`a transport that breaks the contract is not used: ${mode}`, { skip }, async () => {
     const env = { ...environment([], baseEnv), FAKE_TRANSPORT_MODE: mode };
