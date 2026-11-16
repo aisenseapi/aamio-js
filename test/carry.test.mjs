@@ -12,14 +12,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import nacl from "tweetnacl";
 import { Keys, sha256 } from "../src/aamio.js";
 import * as carry from "../src/carry.js";
-import { CarryState, profile, limits, mark, SAFE, SPENT_KEPT_PER_PARTNER } from "../src/node-carry-state.js";
+import { CarryState, profile, limits, mark, MAX_WAITING_PER_PARTNER, SAFE, SKEW, SPENT_KEPT_PER_PARTNER } from "../src/node-carry-state.js";
 
 const vectors = JSON.parse(readFileSync(new URL("./carry_v1_vectors.json", import.meta.url), "utf8"));
 const parties = vectors.parties;
@@ -146,8 +146,12 @@ test("every scenario, step by step, with the state kept in a real file", () => {
         const where = `${scenario.name}, step ${index}`;
         const sealRnd = step.seal_rnd ? unhex(step.seal_rnd) : null;
         if (step.op === "restart") party.state = new CarryState(party.state.keys, party.state.path);
-        else if (step.op === "prune") party.state.prune(step.now);
-        else if (step.op === "ask") {
+        else if (step.op === "prune") {
+          // The scenarios are about the guard against replays, and no program in them takes a message. A session with a
+          // message nobody has taken is kept whatever its age, so the program takes what has come before it tidies.
+          for (const [key] of party.state.pending()) party.state.handedOver(key);
+          party.state.prune(step.now);
+        } else if (step.op === "ask") {
           const [, envelope] = party.state.ask(pk(step.to), party.profile, step.mono, { session: unhex(step.session), rnd: sealRnd });
           assert.equal(hex(envelope), step.envelope, where);
         } else if (step.op === "send") {
@@ -460,4 +464,113 @@ test("a sealed receipt for the same message has the same bytes every time, and a
   const receipts = [atB.deliver(first, [A.publicRaw], sealed, 0, T)[1], atB.deliver(first, [A.publicRaw], sealed, 1, T)[1]];
   assert.ok(carry.equal(receipts[0], receipts[1]));
   assert.ok(!carry.equal(atB.deliver(second, [A.publicRaw], sealed, 2, T)[1], receipts[0]));
+});
+
+// ------------------------------------------------------------------ the follow-up check of 2026-11-15, findings 2, 3, 4 and 10
+
+test("follow-up finding 3: a message nobody has taken outlives the guard against replays", () => inRoot("outlives", (root) => {
+  // Tidying takes what guards against a replay when its time is up, never a message the program has not taken.
+  const file = join(root, "b.json");
+  const sender = new CarryState(A);
+  const session = sender.oneWay(B.publicRaw, T + 300);
+  const envelope = sender.send(B.publicRaw, session, text("hei"), oneWay);
+  const atB = new CarryState(B, file);
+  assert.equal(atB.deliver(envelope, [A.publicRaw], oneWay, 0, T)[0], "accepted");
+  const key = mark(A.publicRaw, session, 1);
+  const waiting = [[key, A.publicRaw, session, 1, text("hei")]];
+  atB.prune(T + 300 + SKEW);
+  assert.deepEqual(new CarryState(B, file).pending(), waiting);
+  atB.prune(T + 300 + SKEW + 1);
+  const again = new CarryState(B, file);
+  assert.deepEqual(again.pending(), waiting, "the receipt said it was kept, and the program has not said it has it");
+  assert.equal(again.deliver(envelope, [A.publicRaw], oneWay, 0, T + 300 + SKEW + 1)[0], "duplicate", "kept with its session, so a copy is still known as one");
+  again.handedOver(key);
+  again.prune(T + 300 + SKEW + 1);
+  const after = new CarryState(B, file);
+  assert.deepEqual([after.pending(), after.durable.incoming, after.durable.stored], [[], {}, {}], "taken, it goes with its session at the next tidying");
+  assert.equal(code(() => after.deliver(envelope, [A.publicRaw], oneWay, 0, T)), "carry_deadline_passed");
+}));
+
+test("follow-up finding 4: after a write fails nothing is read from memory either", () => inRoot("unread", (root) => {
+  // A receipt whose save failed is not shown as confirmed: outcome, unconfirmed, pending, kept and giveUp refuse as deliver does.
+  const file = join(root, "a.json");
+  const atA = new CarryState(A, file);
+  const receiver = new CarryState(B);
+  const session = atA.oneWay(B.publicRaw, T + 300);
+  const envelope = atA.send(B.publicRaw, session, text("hei"), oneWay);
+  const key = mark(B.publicRaw, session, 1);
+  const [, receipt] = receiver.deliver(envelope, [A.publicRaw], oneWay, 0, T);
+  mkdirSync(file + ".tmp");
+  assert.equal(code(() => atA.deliver(receipt, [B.publicRaw], oneWay, 0, T)), "carry_storage_failed");
+  const reads = { outcome: () => atA.outcome(key), unconfirmed: () => atA.unconfirmed(), pending: () => atA.pending(), kept: () => atA.kept(key), giveUp: () => atA.giveUp(key) };
+  for (const [name, read] of Object.entries(reads)) assert.equal(code(read), "carry_storage_failed", name);
+  rmdirSync(file + ".tmp");
+  assert.equal(new CarryState(A, file).outcome(key), "waiting", "what the file holds: the receipt never reached it");
+  atA.restart();
+  assert.equal(atA.outcome(key), "waiting");
+  assert.equal(atA.deliver(receipt, [B.publicRaw], oneWay, 0, T)[0], "accepted");
+  assert.equal(new CarryState(A, file).outcome(key), "confirmed");
+}));
+
+test("follow-up finding 4, the receiver: a message that was not kept is not listed as waiting after the write failed", () => inRoot("unlisted", (root) => {
+  const receiver = new CarryState(B, join(root, "in-the-way", "carry.json"));
+  writeFileSync(join(root, "in-the-way"), "not a folder");
+  const envelope = carry.write(A, B.publicRaw, carry.READABLE, carry.MESSAGE, 0, new Uint8Array(8), 1, T + 300, text("hei"));
+  assert.equal(code(() => receiver.deliver(envelope, [A.publicRaw], oneWay, 0, T)), "carry_storage_failed");
+  assert.equal(code(() => receiver.pending()), "carry_storage_failed", "nothing is shown of what never reached the file");
+}));
+
+test("follow-up finding 2, in the state: a message given up keeps its mark for a late receipt", () => inRoot("given-up", (root) => {
+  // Given up, the bytes go and the outcome is unknown; the hash stays, so a late receipt confirms it.
+  const file = join(root, "a.json");
+  const atA = new CarryState(A, file);
+  const receiver = new CarryState(B);
+  const session = atA.oneWay(B.publicRaw, T + 300);
+  const envelope = atA.send(B.publicRaw, session, text("hei"), oneWay);
+  const key = mark(B.publicRaw, session, 1);
+  assert.deepEqual([atA.giveUp(key), atA.giveUp(key)], [true, false]);
+  const again = new CarryState(A, file);
+  assert.deepEqual([again.outcome(key), again.unconfirmed(), again.durable.outbox[key].envelope], ["unknown", [], null]);
+  assert.equal(again.tried(key), false, "never sent again");
+  const [, receipt] = receiver.deliver(envelope, [A.publicRaw], oneWay, 0, T);
+  assert.equal(again.deliver(receipt, [B.publicRaw], oneWay, 0, T)[0], "accepted");
+  assert.equal(again.outcome(key), "confirmed");
+}));
+
+test("follow-up finding 10: every challenge waits in the window it was given under", () => {
+  // The 64 in all are counted with each challenge's own window, not with the window of the one who asks now.
+  const wide = profile({ mode: "readable", challengeWindow: 600, lifetime: 3600 });
+  const narrow = profile({ mode: "readable", challengeWindow: 60, lifetime: 600 });
+  const partners = Array.from({ length: 9 }, (_, n) => Keys.fromSeedHex((n + 1).toString(16).padStart(2, "0").repeat(32)));
+  const ninth = partners[8];
+  const known = partners.map((partner) => partner.publicRaw);
+  const atB = new CarryState(B);
+  const profileOf = (sender) => (carry.equal(sender, ninth.publicRaw) ? narrow : wide);
+  const openings = [];
+  for (const partner of partners.slice(0, 8)) {
+    const state = new CarryState(partner);
+    let challenge = null;
+    for (let n = 0; n < MAX_WAITING_PER_PARTNER; n++) {
+      const [, ask] = state.ask(B.publicRaw, wide, 0);
+      const [result, reply] = atB.deliver(ask, known, profileOf, 0, T);
+      assert.equal(result, "accepted");
+      challenge = reply;
+    }
+    openings.push([state, challenge]);
+  }
+  const late = new CarryState(ninth);
+  let [, ask] = late.ask(B.publicRaw, narrow, 100);
+  assert.equal(code(() => atB.deliver(ask, known, profileOf, 100, T)), "carry_rate_limited");
+  // The 64 still wait: an open for one of them is taken at the same moment.
+  const [state, challenge] = openings[0];
+  const [, opening] = state.deliver(challenge, [B.publicRaw], wide, 100, T);
+  assert.equal(atB.deliver(opening, known, profileOf, 100, T)[0], "accepted");
+  // One is used now, so there is room for one more.
+  [, ask] = late.ask(B.publicRaw, narrow, 100);
+  assert.equal(atB.deliver(ask, known, profileOf, 100, T)[0], "accepted");
+  // And past their own window the old ones no longer count, whatever window the asker has.
+  for (let n = 0; n < MAX_WAITING_PER_PARTNER - 1; n++) {
+    [, ask] = late.ask(B.publicRaw, narrow, 700);
+    assert.equal(atB.deliver(ask, known, profileOf, 700, T)[0], "accepted", `ask ${n}`);
+  }
 });

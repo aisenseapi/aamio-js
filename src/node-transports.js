@@ -11,8 +11,8 @@
 // read that waits, on the command line, for as long as it runs. The service starts every transport that is enabled and
 // bound to a partner, in a working folder of its own outside the home, pumps the carriers in one loop of its own,
 // starts a transport again after a stop after 1, 5 and 30 seconds, leaves it down after three stops in ten minutes,
-// and stops it with the owner. One loop pumps, so a send or a read waits for what it needs to see and never pumps
-// itself.
+// stops one that no partner is bound to any more, and stops them all with the owner. One loop pumps, so a send or a
+// read waits for what it needs to see and never pumps itself.
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -32,7 +32,9 @@ export const CRASH_WINDOW = 600;
 export const CRASHES_MOST = 3;
 // What a carried message is filed under when the partner it came from is no longer bound to a transport.
 export const UNBOUND_CHANNEL = "carry";
-// How often a running carrier's list of whom it takes messages from is read again.
+// How often a running carrier's list of whom it takes messages from is read again, and what runs is held against the
+// bindings: a partner removed meanwhile is taken from no longer than this after, and a transport nobody is bound to any
+// more runs no longer than this after.
 export const KNOWN_REFRESH = 2;
 // How long a transport that stopped waits before it is started again, and how long a send waits; a test may shorten them.
 export const timing = { restartAfter: [1, 5, 30], waitDefault: 30 };
@@ -286,6 +288,12 @@ export class Service {
     return Object.keys(this.config.bindings()).some((key) => this.runtime.partnerByKey(key) !== null);
   }
 
+  /** Whether something came over a transport and waits for a read, whatever is bound now: an unbind leaves it to be read. */
+  hasPending() {
+    if (!fs.existsSync(this.config.statePath())) return false;
+    return this.carry().pending().length > 0;
+  }
+
   /** Every transport a partner in the address book is bound to, in the order first named. */
   wanted() {
     const names = [];
@@ -316,16 +324,7 @@ export class Service {
 
   /** Every transport that is bound and enabled, started, and pumped in a loop of the service's own. */
   async start() {
-    const manifests = await this.manifests();
-    for (const name of this.wanted()) {
-      if (this.running.has(name)) continue;
-      const entry = { manifest: manifests.get(name) ?? null, process: null, carrier: null, crashes: [], next: 0, down: null };
-      if (!entry.manifest) {
-        entry.down = `${name} is bound to a partner and is not an enabled transport here: aamio addon enable ${name}`;
-        this.runtime.log?.(`transport ${name}: ${entry.down}`);
-      }
-      this.running.set(name, entry);
-    }
+    await this.#add(this.wanted());
     await this.#startDue();
     if (!this.loop && this.running.size) {
       this.stopping = false;
@@ -334,28 +333,102 @@ export class Service {
     return this;
   }
 
-  async #startDue() {
-    const at = now();
+  /** Transports to run, each once, with the manifests read only when one is new. */
+  async #add(names) {
+    if (names.every((name) => this.running.has(name))) return;
+    const manifests = await this.manifests();
+    for (const name of names) {
+      // Looked at again now that the manifests are read: a send and the service's own loop may both be adding.
+      if (this.running.has(name)) continue;
+      const entry = { manifest: manifests.get(name) ?? null, process: null, carrier: null, crashes: [], next: 0, down: null, starting: false };
+      if (!entry.manifest) {
+        entry.down = `${name} is bound to a partner and is not an enabled transport here: aamio addon enable ${name}`;
+        this.runtime.log?.(`transport ${name}: ${entry.down}`);
+      }
+      this.running.set(name, entry);
+    }
+  }
+
+  /**
+   * What a carrier has to tell the user, as a message that is not sent again: in attention under the transport's name,
+   * where a read shows it, and in the log, where a command that sends and ends shows it.
+   */
+  #say(name, text) {
+    this.runtime.log?.(`transport ${name}: ${text}`);
+    if (typeof this.runtime.note === "function") this.runtime.note(name, "not_sent_again", text);
+  }
+
+  /**
+   * Who each running carrier takes messages from, read again; a transport no partner is bound to any more is stopped, so
+   * it no longer holds its port and is not started again after a stop, and one bound meanwhile is started (the follow-up
+   * check of 15 November 2026).
+   */
+  async #refresh() {
+    let wanted;
+    try {
+      wanted = this.wanted();
+    } catch (error) {
+      // Whom to take messages from is not known while the bindings cannot be read: no one, then, and nothing stopped.
+      for (const entry of this.running.values()) if (entry.carrier) entry.carrier.known = [];
+      this.runtime.log?.(`transports: ${error.message}`);
+      return;
+    }
+    for (const [name, entry] of [...this.running]) {
+      if (wanted.includes(name)) continue;
+      this.running.delete(name);
+      if (entry.process) await entry.process.stop();
+      this.runtime.log?.(`transport ${name}: stopped, since no partner in the address book is bound to it any more`);
+    }
+    await this.#add(wanted);
     for (const [name, entry] of this.running) {
-      if (entry.carrier || !entry.manifest || entry.down !== null || at < entry.next) continue;
-      const folder = workingFolder(this.runtime.home, name);
-      const transport = new TransportProcess(name, entry.manifest.version, [process.execPath, entry.manifest.entry], folder,
-        environmentFor(entry.manifest, { base: this.environ ?? process.env }), { log: (line) => this.runtime.log?.(line) });
+      if (!entry.carrier) continue;
       try {
-        await transport.start(CORE_VERSION, "node", folder);
-        entry.carrier = new Carrier(this.carry(), transport, (pk) => this.profileFor(pk), this.knownFor(name), { log: (line) => this.runtime.log?.(line) });
-        entry.process = transport;
-        this.runtime.log?.(`transport ${name}: up`);
+        entry.carrier.known = this.knownFor(name);
       } catch (error) {
-        if (!(error instanceof TransportFailed)) throw error;
-        await transport.stop();
-        await this.#crashed(name, error);
+        entry.carrier.known = [];
+        this.runtime.log?.(`transport ${name}: ${error.message}`);
       }
     }
   }
 
-  async #crashed(name, error) {
-    const entry = this.running.get(name);
+  async #startDue() {
+    const at = now();
+    for (const [name, entry] of this.running) {
+      if (entry.carrier || entry.starting || !entry.manifest || entry.down !== null || at < entry.next) continue;
+      const folder = workingFolder(this.runtime.home, name);
+      const transport = new TransportProcess(name, entry.manifest.version, [process.execPath, entry.manifest.entry], folder,
+        environmentFor(entry.manifest, { base: this.environ ?? process.env }), { log: (line) => this.runtime.log?.(line) });
+      // One start of a transport at a time: a send or a read that starts the service while its loop starts the same
+      // transport would start it twice, and the second would find the port taken.
+      entry.starting = true;
+      try {
+        await transport.start(CORE_VERSION, "node", folder);
+        if (this.running.get(name) !== entry) {
+          // Taken out of what runs while it started, as when its last partner was unbound or the owner stopped.
+          await transport.stop();
+          continue;
+        }
+        entry.carrier = new Carrier(this.carry(), transport, (pk) => this.profileFor(pk), this.knownFor(name),
+          { log: (line) => this.runtime.log?.(line), note: (text) => this.#say(name, text) });
+        entry.process = transport;
+        this.runtime.log?.(`transport ${name}: up`);
+      } catch (error) {
+        await transport.stop();
+        if (error instanceof TransportFailed) {
+          if (this.running.get(name) === entry) await this.#crashed(name, entry, error);
+        } else if (error instanceof CarryRefused || typeof error?.code === "string") {
+          // Not the transport: the carrier state is closed after a write failed, or a profile cannot be read. It stays
+          // down with the reason rather than start again every second.
+          entry.down = `${error.message}. It stays down until that is put right and aamio starts again`;
+          this.runtime.log?.(`transport ${name}: down: ${entry.down}`);
+        } else throw error;
+      } finally {
+        entry.starting = false;
+      }
+    }
+  }
+
+  async #crashed(name, entry, error) {
     if (entry.process) await entry.process.stop();
     entry.process = null;
     entry.carrier = null;
@@ -371,21 +444,12 @@ export class Service {
     this.runtime.log?.(`transport ${name}: down: ${error.message}, started again in ${after} seconds`);
   }
 
-  /** One round: every carrier pumped, and transports that are due started again. */
+  /** One round: what runs held against the bindings when that is due, every carrier pumped, and transports that are due started. */
   async pump(timeoutMs = 20) {
     const at = now();
     if (at - this.knownAt >= KNOWN_REFRESH) {
       this.knownAt = at;
-      for (const [name, entry] of this.running) {
-        if (!entry.carrier) continue;
-        try {
-          entry.carrier.known = this.knownFor(name);
-        } catch (error) {
-          // Whom to take messages from is not known while the bindings cannot be read: no one, then.
-          entry.carrier.known = [];
-          this.runtime.log?.(`transport ${name}: ${error.message}`);
-        }
-      }
+      await this.#refresh();
     }
     for (const [name, entry] of this.running) {
       if (!entry.carrier) continue;
@@ -393,7 +457,7 @@ export class Service {
         await entry.carrier.pump(timeoutMs);
       } catch (error) {
         if (!(error instanceof TransportFailed)) throw error;
-        await this.#crashed(name, error);
+        await this.#crashed(name, entry, error);
       }
     }
     await this.#startDue();
@@ -435,8 +499,10 @@ export class Service {
     this.stopping = true;
     if (this.loop) await this.loop;
     this.loop = null;
-    for (const entry of this.running.values()) if (entry.process) await entry.process.stop();
+    // Out of what runs before the first of them is waited for, so one that is starting this moment stops itself.
+    const entries = [...this.running.values()];
     this.running.clear();
+    for (const entry of entries) if (entry.process) await entry.process.stop();
   }
 
   status() {

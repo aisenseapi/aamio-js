@@ -13,7 +13,8 @@
 // after a restart goes on with the same bytes and the tries that are left. It is
 // confirmed only when its receipt comes: when the tries run out without one, its
 // outcome is unknown, since it may still have arrived, and it is never reported
-// as confirmed.
+// as confirmed. Bytes written under another mode than the partner's profile has
+// now are not sent at all (B5): the message is given up, and the user is told.
 //
 // What came in is the state's until the program says it has it: inbox is what
 // the state keeps that the program has not taken, read as often as needed, and
@@ -35,8 +36,10 @@ const pairOf = (pk, session) => toHex(pk) + ":" + toHex(session);
 
 export class Carrier {
   constructor(state, process, profile, known, { clock = () => performance.now() / 1000, wall = () => Math.floor(Date.now() / 1000), log = () => {},
-    retrySeconds = 2, askRetrySeconds = 5, tries = TRIES_DEFAULT } = {}) {
+    retrySeconds = 2, askRetrySeconds = 5, tries = TRIES_DEFAULT, note = null } = {}) {
     Object.assign(this, { state, process, profile, known, clock, wall, log, retrySeconds, askRetrySeconds, tries });
+    // What the user is to hear, as a message that is not sent again: where the runtime keeps attention, or the log.
+    this.note = note ?? log;
     // One profile for every partner, or a function from a partner's key to its own (B5).
     this.profileOf = typeof profile === "function" ? profile : () => profile;
     this.given = new Map();      // mark -> the frame ids of each try that was given to the transport whole
@@ -55,9 +58,31 @@ export class Carrier {
     this.counter = 0;
     const knownSet = new Set(known.map(toHex));
     for (const [key, pk, session, , envelope] of state.unconfirmed()) {
-      // Sent before this process started: taken up with the same bytes and the tries that are left.
-      if (knownSet.has(toHex(pk))) this.messages.set(key, { envelope, pk, session, next: clock() });
+      // Sent before this process started: taken up with the same bytes and the tries that are left, when they were
+      // written as the partner's profile says now (B5).
+      if (knownSet.has(toHex(pk)) && this.#fitsProfile(key, pk, envelope)) this.messages.set(key, { envelope, pk, session, next: clock() });
     }
+  }
+
+  /**
+   * Whether bytes written earlier may go on under the partner's profile now, given up and said when they may not.
+   *
+   * Readable bytes taken up after the partner's profile became sealed went out readable (the follow-up check of 15
+   * November 2026). A message is never sealed again under its mark, so it is given up: its mark and hash stay for a late
+   * receipt, and its outcome is unknown, since an earlier try may have arrived.
+   */
+  #fitsProfile(key, pk, envelope) {
+    const mode = this.profileOf(pk).mode;
+    if (envelope[4] === (mode === "sealed" ? carry.SEALED : carry.READABLE)) return true;
+    this.state.giveUp(key);
+    this.note(`${key} was written ${envelope[4] === carry.READABLE ? "readable" : "sealed"}, and the profile for that partner is ${mode} now, so it is not sent again: B5 sends no message under another mode. `
+      + `Its outcome is unknown, since an earlier try may have arrived; send it again as a new message to have it go ${mode}.`);
+    return false;
+  }
+
+  /** Whether a try at the message waits in the queue, not one frame of it given to the transport yet. */
+  #queued(key) {
+    return this.queue.some(([, , queued, ids]) => queued === key && ids.length === 0);
   }
 
   #queue(envelope, to, key = null) {
@@ -217,10 +242,22 @@ export class Carrier {
     const now = this.clock();
     for (const [key, entry] of this.messages) {
       if (now < entry.next) continue;
+      if (this.#queued(key)) {
+        // The last try still waits for room: a try is counted when it can be given to the transport, not while copies
+        // pile up behind one that has not gone.
+        entry.next = now + this.retrySeconds;
+        continue;
+      }
+      if (!this.#fitsProfile(key, entry.pk, entry.envelope)) {
+        this.messages.delete(key);
+        continue;
+      }
       // The try is counted in the state before it goes, so a restart never gives back tries that were used.
       if (!this.state.tried(key)) {
         this.log(`no receipt for ${key}, and its tries are used`);
         this.messages.delete(key);
+        // A try that never started is not sent after the message is over (A7): it went out after unknown was said.
+        this.queue = this.queue.filter(([, , queued, ids]) => !(queued === key && ids.length === 0));
         continue;
       }
       entry.next = now + this.retrySeconds;
@@ -250,6 +287,17 @@ export class Carrier {
   #flush() {
     while (this.queue.length && this.process.room() > 0) {
       const [frames, to, key, ids] = this.queue[0];
+      if (key !== null && ids.length === 0) {
+        // A try at a message begins here, so here is where it may still be stopped: when the message is over (its
+        // receipt came, or its tries are used), or when the partner's profile is of another mode now than the bytes
+        // were written under. Queued earlier, it went out all the same once there was room.
+        const entry = this.messages.get(key);
+        if (!entry || !this.#fitsProfile(key, entry.pk, entry.envelope)) {
+          this.messages.delete(key);
+          this.queue.shift();
+          continue;
+        }
+      }
       const frame = frames.shift();
       const id = this.process.send(frame, to);
       if (id === null) {

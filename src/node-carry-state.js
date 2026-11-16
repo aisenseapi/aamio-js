@@ -205,7 +205,7 @@ export class CarryState {
   }
 
   #forgetTheClock() {
-    this.waiting = new Map();        // pair -> { nonce, t0, used }
+    this.waiting = new Map();        // pair -> { nonce, t0, used, window }: the window of the profile it was given under
     this.anchors = new Map();        // pair of a session with a challenge -> t0 on this party's monotonic clock
     this.askedAt = new Map();        // pair of an outgoing session -> when this party asked
     this.messagesSeen = new Map();   // pk hex -> [mono, bytes] of messages in the last minute
@@ -322,8 +322,12 @@ export class CarryState {
   /**
    * waiting while the bytes are kept for another try, confirmed when the receipt came, and unknown otherwise: the tries
    * ran out, so it may or may not have arrived, or nothing is known of it here.
+   *
+   * After a write failed nothing is answered from memory: what is held there may be what never reached the file, as a
+   * receipt taken in whose save failed (the follow-up check of 15 November 2026).
    */
   outcome(key) {
+    this.#check();
     if (!Object.hasOwn(this.durable.outbox, key)) return "unknown";
     const entry = this.durable.outbox[key];
     if (entry.receipt) return "confirmed";
@@ -350,8 +354,24 @@ export class CarryState {
     return true;
   }
 
+  /**
+   * A message that cannot go on as it was written, as one written readable for a partner whose profile is sealed now:
+   * its bytes go, as when the tries are used, and its mark and hash stay, so a receipt that comes late still confirms
+   * it. It is never sealed again under its mark (B5, A7). True when there was something to give up.
+   */
+  giveUp(key) {
+    this.#check();
+    if (!Object.hasOwn(this.durable.outbox, key)) return false;
+    const entry = this.durable.outbox[key];
+    if (entry.receipt || entry.envelope === null) return false;
+    entry.envelope = null;
+    this.#save();
+    return true;
+  }
+
   /** What was sent and waits for its receipt, oldest first: [mark, partner pk, session, counter, envelope]. */
   unconfirmed() {
+    this.#check();
     return Object.entries(this.durable.outbox).filter(([, entry]) => entry.envelope !== null && !entry.receipt)
       .map(([key, entry]) => [key, ...parts(key), fromHex(entry.envelope)]);
   }
@@ -368,12 +388,14 @@ export class CarryState {
    * mark to do nothing twice.
    */
   pending() {
+    this.#check();
     return Object.entries(this.durable.stored).filter(([, entry]) => entry.content !== null)
       .map(([key, entry]) => [key, ...parts(key), fromHex(entry.content)]);
   }
 
   /** What is kept of a message taken in: sha256, whether it came sealed, and when (the time floor's clock), or null. */
   kept(key) {
+    this.#check();
     if (!Object.hasOwn(this.durable.stored, key)) return null;
     const { sha256, sealed, at } = this.durable.stored[key];
     return { sha256, sealed, at };
@@ -413,12 +435,12 @@ export class CarryState {
   }
 
   /**
-   * Challenges used or past their window are remembered for their own code, nonce_used or nonce_expired, at most
+   * Challenges used or past their own window are remembered for their own code, nonce_used or nonce_expired, at most
    * SPENT_KEPT_PER_PARTNER per partner; an open for one forgotten is nonce_unknown. Either way it is refused, and nothing
    * kept against a replay goes with it.
    */
-  #forgetSpent(prefix, mono, window) {
-    const spent = [...this.waiting].filter(([key, entry]) => key.startsWith(prefix) && (entry.used || mono - entry.t0 > window))
+  #forgetSpent(prefix, mono) {
+    const spent = [...this.waiting].filter(([key, entry]) => key.startsWith(prefix) && (entry.used || mono - entry.t0 > entry.window))
       .sort((a, b) => a[1].t0 - b[1].t0);
     for (const [key] of spent.slice(0, Math.max(0, spent.length - SPENT_KEPT_PER_PARTNER))) this.waiting.delete(key);
   }
@@ -437,7 +459,9 @@ export class CarryState {
     if (got.kind === carry.ASK) {
       if (this.used.has(pair) || Object.hasOwn(outgoing, pair)) throw new CarryRefused("carry_session_in_use");
       const window = profileIn.challengeWindow;
-      const live = [...this.waiting].filter(([, entry]) => !entry.used && mono - entry.t0 <= window);
+      // Each challenge waits in the window of the profile it was given under: counted with this ask's window, one still
+      // open in a longer window of another partner's was counted as gone (the follow-up check of 15 November 2026).
+      const live = [...this.waiting].filter(([, entry]) => !entry.used && mono - entry.t0 <= entry.window);
       if (live.filter(([key]) => key.startsWith(prefix)).length >= MAX_WAITING_PER_PARTNER || live.length >= MAX_WAITING) {
         throw new CarryRefused("carry_rate_limited", "too many challenges wait");
       }
@@ -453,8 +477,8 @@ export class CarryState {
       this.used.add(pair);
       this.#save();
       asks.push([mono, 0]);
-      this.waiting.set(pair, { nonce, t0: mono, used: false });
-      this.#forgetSpent(prefix, mono, window);
+      this.waiting.set(pair, { nonce, t0: mono, used: false, window });
+      this.#forgetSpent(prefix, mono);
       return ["accepted", this.#write(pk, profileIn, carry.CHALLENGE, 0, session, 0, 0, nonce, null, sealRnd), got];
     }
     if (got.kind === carry.CHALLENGE) {
@@ -579,6 +603,10 @@ export class CarryState {
       const gone = record.challenged
         ? floor > Math.max(record.opened + record.lifetime, record.closed_at ?? 0) + HORIZON
         : floor > record.deadline + SKEW;
+      // A message the program has not taken stays until handedOver says it has it, and its session with it, since a
+      // kept message belongs to a session kept. Deleted with the guard against replays, a message a receipt had said
+      // was kept was gone (the follow-up check of 15 November 2026).
+      if (gone && Object.entries(this.durable.stored).some(([key, entry]) => key.startsWith(pair + ":") && entry.content !== null)) continue;
       if (gone) {
         delete this.durable.incoming[pair];
         this.used.delete(pair);

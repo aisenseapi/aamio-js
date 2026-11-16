@@ -557,7 +557,7 @@ async function addon(home, words, archive, host) {
 const KNOWN = ["home_not_initialized", "key_unreadable", "home_init_failed", "home_in_use", "lock_unavailable", "state_unreadable", "invalid_name",
   "invalid_key", "invalid_re", "unknown_partner", "ambiguous_partner", "unknown_address", "partner_offline", "too_large", "inbox_unavailable", "runtime_closed",
   "board_failed", "board_unreachable", "board_inbox_unavailable", "unknown_post", "not_saved", "unknown_channel", "receipt_failed", "no_trace",
-  "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only",
+  "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only", "scope_needs_sealed",
   "invalid_label", "invalid_gate", "invalid_ttl", "invalid_note", "invalid_address", "invalid_archive", "channel_exists", "channel_unavailable", "binding_conflict",
   "transport_config_unreadable", "transport_profile_unknown", "transport_profile_invalid", "transport_profile_incomplete", "transport_profile_in_use", "transport_already_bound",
   "transport_unbound", "transport_unknown", "transport_down", "carry_not_sent", "carry_too_large", "carry_storage_full", "carry_storage_failed", "carry_rate_limited"];

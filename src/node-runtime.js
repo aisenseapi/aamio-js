@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Aamio, AamioError, BOARD_POST_MARGIN, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, refusedOnce, withinBudget, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
+import { CarryRefused } from "./carry.js";
 import { DEFAULT_POLICY, appendRecord, archiveName, archiveNames, archiveStatus, archivedRecords, isSafeLabel, pruneArchive, readPolicy } from "./node-archive.js";
 import { readKeys } from "./node-identity.js";
 import { Service as TransportService, timing as transportTiming } from "./node-transports.js";
@@ -1225,9 +1226,19 @@ export class NodeRuntime {
     const partner = isKey(String(to)) ? this.partnerByKey(to) : this.partnerByName(to);
     if (!partner) throw runtimeError("unknown_partner", "a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone's");
     const share = access === "read" ? { name: entry.name, key: entry.key } : { name: entry.name, address: entry.address };
+    // A partner bound to a transport gets it there, as every message to it
+    // goes, and never over HTTPS instead. Under a readable profile it does not
+    // go at all: everyone who hears the medium would read the key, and the
+    // partner's runtime takes a scope only when it comes sealed.
+    const bound = this.#boundPartner(partner.key);
+    if (bound && this.transportService().profileFor(new Uint8Array(Buffer.from(bound.key, "base64url"))).mode !== "sealed") {
+      throw runtimeError("scope_needs_sealed", `${bound.name} is bound to a transport under a readable profile, and a scope is only shared sealed: everyone who hears the medium would read it, and ${bound.name}'s aamio takes a scope only when it comes sealed. Bind ${bound.name} under a sealed profile first: aamio transport unbind, then aamio transport bind`);
+    }
     // By the key, so the partner chosen stays chosen. The envelope is sealed
     // to it, and the outbox and the trace keep the envelope and the names of
-    // the fields: the scope's key is in neither in the clear.
+    // the fields: the scope's key is in neither in the clear. The archive
+    // keeps what was shared and with whom, never the key, over a transport
+    // as over HTTPS.
     const sent = await this.send(partner.key, { text: `Scope ${entry.name}, shared to ${access === "read" ? "read and post" : "post only"}.`, data: { aamio_scope: share }, archivedData: { aamio_scope: { name: entry.name, access } } });
     return { ...sent, scope: entry.name, access };
   }
@@ -1249,8 +1260,12 @@ export class NodeRuntime {
    * taking it would write is given back, or null when nothing is to be taken,
    * and the message carries the longer of the two forms the share can end in,
    * kept or not saved: a message has to be the size it was weighed at.
+   *
+   * With apply false nothing is to be taken whatever the message says, and
+   * the key still comes out: for a message that came over a transport from a
+   * key that has since left the address book, which goes to the archive.
    */
-  scopeSharePlan(entry) {
+  scopeSharePlan(entry, { apply = true } = {}) {
     const body = entry.body;
     if (!isObject(body)) return null;
     if ("aamio_scope" in body) body.aamio_scope = { kept: false, note: "not kept: a scope is shared in data.aamio_scope" };
@@ -1266,7 +1281,9 @@ export class NodeRuntime {
     const partner = entry.from_key ? this.partnerByKey(entry.from_key) : null;
     const invitation = this.shareRecord(entry);
     let why = null;
-    if (!(entry.verified && entry.encrypted && entry.known_contact && partner !== null)) {
+    if (!apply) {
+      why = "not kept: the key that signed it left the address book while the message was being read, so nothing from it is taken";
+    } else if (!(entry.verified && entry.encrypted && entry.known_contact && partner !== null)) {
       why = "not kept: a scope is only taken when it comes sealed from a partner in your address book";
     } else if (entry.replay) {
       why = "not kept again: this message arrived before, and a scope removed since stays removed";
@@ -1407,6 +1424,7 @@ export class NodeRuntime {
     const inbox = { label: "inbox", read_key: thread.id, w: thread.w, expire_at: thread.expireAt, allow: wanted ?? [], after: 0, created_at: null, instance: null, gone: false, muted: false, seen: [], seen_from: [] };
     this.state.channels.push(inbox);
     const muted = this.muteGenerations(reason);
+    const saidOfMuting = this.attention.length - noted;
     try {
       await this.saveState();
     } catch (error) {
@@ -1414,7 +1432,9 @@ export class NodeRuntime {
       for (const kept of before) {
         if (kept) [kept[0].label, kept[0].muted] = [kept[1], kept[2]];
       }
-      this.attention.length = noted;
+      // What the muting said is taken back with it, and nothing else: a
+      // transport may have said something of its own while the save was out.
+      this.attention.splice(noted, saidOfMuting);
       const what = `the inbox opened again after ${reason} could not be written down (${error.code || error.message}), so it is not used: a partner would write where this home cannot read after a restart. ${old ? "The old inbox stays in use with its old list." : "There is no inbox until state.json can be written."}`;
       this.note("inbox", "rotation_failed", what, old?.w ?? null);
       return { rotated: false, inbox: old?.w ?? null, error: what };
@@ -1590,7 +1610,7 @@ export class NodeRuntime {
     checkRe(re);
     // A partner bound to a transport goes over it, and never over HTTPS instead.
     const bound = this.#boundPartner(to);
-    if (bound) return this.#sendCarried(bound, { text, data, re });
+    if (bound) return this.#sendCarried(bound, { text, data, re, archivedData });
     const { w, key, partner } = await this.recipient(to);
     // What the inbox asks of writers is read before anything is stored: a
     // requirement this client cannot meet stops here, as a GateStop.
@@ -3239,11 +3259,13 @@ export class NodeRuntime {
     const carried = this.#carriedService();
     const messages = [];
     let online = true;
+    // What came over a transport is on this machine already, so its byte
+    // budget is kept here, for each transport as for each channel: what this
+    // read has handed over of each so far, across its waits.
+    const carriedBudget = { maxBytes, used: new Map(), taken: new Map(), full: [] };
     if (carried) {
       if (wait > 0) await carried.start();
-      const ready = await this.#carriedReady(this.#carriedEntries(carried));
-      messages.push(...ready.slice(0, limit));
-      if (ready.length > limit) this.note("read", "more_carried", `${ready.length - limit} more that came over a transport wait for the next read, in the order they came.`);
+      await this.#carriedTake(await this.#carriedReady(this.#carriedEntries(carried)), messages, limit, carriedBudget);
       try {
         await this.ensureInbox();
         await this.publishPresence();
@@ -3286,7 +3308,7 @@ export class NodeRuntime {
     }
     const inbox = this.channel("inbox");
     if (!messages.length && wait > 0 && carried) {
-      await this.#waitWithTransports(carried, messages, { limit, wait, maxBytes, inbox: online && inbox && !inbox.muted ? inbox : null, channels, notAskedAfter });
+      await this.#waitWithTransports(carried, messages, { limit, wait, maxBytes, inbox: online && inbox && !inbox.muted ? inbox : null, channels, notAskedAfter, carriedBudget });
     } else if (!messages.length && wait > 0 && inbox && !inbox.muted) {
       messages.push(...(await this.pollSafely(inbox, wait, limit, maxBytes)));
       // What reached the other channels during the wait comes with this
@@ -3348,8 +3370,13 @@ export class NodeRuntime {
     return this.transportService().config.routes(partner.key).length ? partner : null;
   }
 
-  /** A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier. */
-  async #sendCarried(partner, { text, data, re }) {
+  /**
+   * A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier.
+   *
+   * archivedData stands in for data in the archive, as it does over HTTPS: a scope shared this way left its key in the
+   * archive of the one who shared it (the follow-up check of 15 November 2026).
+   */
+  async #sendCarried(partner, { text, data, re, archivedData = null }) {
     const body = { from: this.keys.hash.slice(0, 8) };
     if (text !== null && text !== undefined) body.text = String(text);
     if (data !== null && data !== undefined) body.data = data;
@@ -3359,8 +3386,8 @@ export class NodeRuntime {
     const wait = budget === undefined || budget === null ? transportTiming.waitDefault : Math.max(1, Math.min(transportTiming.waitDefault, Math.floor(budget)));
     const result = await this.transportService().send(new Uint8Array(Buffer.from(partner.key, "base64url")), content, wait);
     const sent = { to: partner.name, ...result, note: CARRIED_NOTES[result.status].replace("%via", result.via).replace("%wait", String(wait)) };
-    const archiveError = await this.archiveSafely("sent", { kind: "sent", at: this.now(), to: partner.name, via: result.via, profile: result.profile, mark: result.mark, status: result.status, body },
-      `the send ${result.mark}`);
+    const archiveError = await this.archiveSafely("sent", { kind: "sent", at: this.now(), to: partner.name, via: result.via, profile: result.profile, mark: result.mark, status: result.status,
+      body: archivedData === null || archivedData === undefined ? body : { ...body, data: archivedData } }, `the send ${result.mark}`);
     if (archiveError) sent.archive_error = archiveError;
     return sent;
   }
@@ -3379,27 +3406,121 @@ export class NodeRuntime {
     return false;
   }
 
-  /** The transport service when a partner is bound to a transport, else null; a binding file that cannot be read is said. */
+  /**
+   * The transport service when a partner is bound to a transport or something that came over one waits to be read, else
+   * null; a binding file or a carrier state that cannot be read is said.
+   *
+   * What has come is read whatever is bound now: asked only whether a partner was bound, a message that came before the
+   * last unbind was not read, while unbind said it still would be (the follow-up check of 15 November 2026).
+   */
   #carriedService() {
     const service = this.transportService();
+    let bound;
     try {
-      return service.bound() ? service : null;
+      bound = service.bound();
     } catch (error) {
       this.note("transports", "unreadable", `${error.message}. What came over a transport waits in the home until then.`);
       return null;
     }
+    try {
+      return bound || service.hasPending() ? service : null;
+    } catch (error) {
+      if (!(error instanceof CarryRefused)) throw error;
+      this.note("transports", "carry_unreadable", `${error.message}. What came over a transport waits in the home until then.`);
+      return null;
+    }
   }
 
+  /**
+   * What came over a transport, as read hands it over: archived is said when it is handed over.
+   *
+   * A carrier state closed after a write that failed answers nothing from memory, and one that cannot be read answers
+   * nothing at all: said, and the rest of the read goes on.
+   */
   #carriedEntries(service, skip = new Set()) {
-    return service.entries(bodyJson, skip).map((entry) => ({ ...entry, archived: false, ...(this.archiveEnabled ? {} : { archive_off: true }) }));
+    let entries;
+    try {
+      entries = service.entries(bodyJson, skip);
+    } catch (error) {
+      if (!(error instanceof CarryRefused)) throw error;
+      this.note("transports", "carry_unreadable", `${error.message}. What came over a transport waits in the home until then.`);
+      return [];
+    }
+    return entries.map((entry) => ({ ...entry, archived: false, ...(this.archiveEnabled ? {} : { archive_off: true }) }));
+  }
+
+  /**
+   * A scope in a message that came over a transport, taken as one over HTTPS is: kept when it came sealed from a
+   * partner in the address book, and its key out of the message either way, before the message is shown or archived.
+   * Once for each entry: what it leaves in the message is no share to take again.
+   */
+  async #carriedScope(entry) {
+    const plan = this.scopeSharePlan(entry, { apply: this.partnerByKey(entry.from_key) !== null });
+    if (plan === null) return;
+    const said = [];
+    await this.scopeShareTake(entry, plan, said);
+    for (const [state, what] of said) this.note(entry.channel, state, what);
+  }
+
+  /**
+   * The bytes of a carried message as this read would hand it over, on a copy and keeping nothing: the scope in it as
+   * shown in the longer of the forms it can end in, and the archive's mark as it is weighed for a message over HTTPS.
+   */
+  #carriedWeight(entry) {
+    const shown = structuredClone(entry);
+    this.scopeSharePlan(shown, { apply: this.partnerByKey(shown.from_key) !== null });
+    return Buffer.byteLength(JSON.stringify(shown), "utf8");
+  }
+
+  /**
+   * Carried messages into a read's answer in the order they came, within its limit and its byte budget for each
+   * transport.
+   *
+   * Only what goes into the answer is taken; the rest stays in the home for the next read. Whole messages: one that is
+   * larger than the whole budget and first on its transport is handed over on its own and said, as a message already on
+   * this machine is everywhere else, rather than kept back for ever. Three messages of 600 characters came whole on a
+   * budget of 512, and nothing said so (the follow-up check of 15 November 2026).
+   */
+  async #carriedTake(ready, messages, limit, budget) {
+    const { maxBytes, used, taken, full } = budget;
+    let pastLimit = 0;
+    for (const entry of ready) {
+      const where = entry.channel;
+      if (messages.length >= limit) {
+        pastLimit += 1;
+        continue;
+      }
+      if (maxBytes !== null) {
+        if (full.includes(where)) continue;
+        const weight = this.#carriedWeight(entry);
+        if (taken.get(where) && (used.get(where) ?? 0) + weight > maxBytes) {
+          full.push(where);
+          continue;
+        }
+        if (!taken.get(where) && weight > maxBytes) {
+          this.note(where, "over_budget", `a message that came over ${where} is ${weight} bytes as handed over here, larger than the whole byte budget of ${maxBytes} this read asked for. It was already on this machine, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.`);
+        }
+        used.set(where, (used.get(where) ?? 0) + weight);
+        taken.set(where, (taken.get(where) ?? 0) + 1);
+      }
+      await this.#carriedScope(entry);
+      messages.push(entry);
+    }
+    if (pastLimit) this.note("read", "more_carried", `${pastLimit} more that came over a transport wait for the next read, in the order they came.`);
+    if (full.length) {
+      this.note("read", "more_carried_bytes", `this read stopped at the byte budget it asked for on ${[...new Set(full)].join(", ")}, ${maxBytes} bytes of messages for each transport. The rest waits in the home in the order it came, and the next read hands it over; nothing was dropped.`);
+    }
   }
 
   /** What may be handed over: a message from a key that has left the address book is not, and that is said. */
   async #carriedReady(entries) {
     const ready = [];
     for (const entry of entries) {
-      if (this.partnerByKey(entry.from_key) === null) await this.#carriedWithheld(entry);
-      else ready.push(entry);
+      if (this.partnerByKey(entry.from_key) === null) {
+        // The key of a scope in it comes out before it goes to the archive, and nothing is kept from it.
+        await this.#carriedScope(entry);
+        await this.#carriedWithheld(entry);
+      } else ready.push(entry);
     }
     return ready;
   }
@@ -3442,9 +3563,18 @@ export class NodeRuntime {
   }
 
   /** A read that waits with transports running: the inbox in short waits, and what came over a transport between them. */
-  async #waitWithTransports(service, messages, { limit, wait, maxBytes, inbox, channels, notAskedAfter }) {
+  async #waitWithTransports(service, messages, { limit, wait, maxBytes, inbox, channels, notAskedAfter, carriedBudget }) {
     const seconds = () => performance.now() / 1000;
     const until = seconds() + wait;
+    // A carrier state closed after a write that failed has nothing to say: the wait runs out, and the read says why.
+    const somethingCame = () => {
+      try {
+        return service.carry().pending().length > 0;
+      } catch (error) {
+        if (!(error instanceof CarryRefused)) throw error;
+        return false;
+      }
+    };
     while (!messages.length) {
       const left = until - seconds();
       if (left <= 0) break;
@@ -3452,9 +3582,13 @@ export class NodeRuntime {
       const began = seconds();
       if (inbox) messages.push(...(await this.pollSafely(inbox, piece, limit, maxBytes)));
       // An inbox that answers at once without waiting, or none, is no wait: the transports are waited on instead.
-      if (!messages.length && seconds() - began < piece / 2) await service.wait(() => service.carry().pending().length > 0, began + Math.min(left, piece));
+      if (!messages.length && seconds() - began < piece / 2) await service.wait(somethingCame, began + Math.min(left, piece));
       const taken = new Set(messages.filter((message) => message.mark).map((message) => message.mark));
-      messages.push(...(await this.#carriedReady(this.#carriedEntries(service, taken))).slice(0, Math.max(0, limit - messages.length)));
+      const ready = await this.#carriedReady(this.#carriedEntries(service, taken));
+      await this.#carriedTake(ready, messages, limit, carriedBudget);
+      // What waits and has no room in this read, as with a limit of none, is not waited on: it would be asked for
+      // again at once, for as long as the wait lasts.
+      if (ready.length && !messages.length) break;
     }
     if (!inbox) return;
     for (const channel of channels) {

@@ -379,3 +379,188 @@ test("finding 1: a carrier on the same home after a restart sends the same bytes
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ------------------------------------------------------------------ the follow-up check of 2026-11-15, findings 2 and 5
+
+/** What a Carrier needs of a transport, with the room in the test's hands and every frame given kept. */
+class Medium {
+  constructor(room = 0, frame = 64) {
+    this.name = "medium";
+    this.properties = { max_frame_up: frame };
+    this.credit = room;
+    this.given = [];
+    this.events = [];
+  }
+
+  async poll() {
+    const events = this.events;
+    this.events = [];
+    return events;
+  }
+
+  room() {
+    return this.credit;
+  }
+
+  send(frame) {
+    if (this.credit < 1) return null;
+    this.credit -= 1;
+    this.given.push(frame);
+    return `f-${this.given.length}`;
+  }
+
+  status() {
+    return "sent";
+  }
+
+  waiting() {
+    return 0;
+  }
+
+  checkTime() {}
+
+  waitingForRoom(waiting) {
+    this.waits = waiting;
+  }
+}
+
+const sealed = profile({ mode: "sealed" });
+const bytes = (value) => new TextEncoder().encode(value);
+/** Whether a try at the message waits in the carrier's queue, not one frame of it given to the transport yet. */
+const queued = (carrier, key) => carrier.queue.some(([, , of, ids]) => of === key && ids.length === 0);
+/** The bytes of a message as its sender keeps them, before its receipt. */
+const keptEnvelope = (state, key) => state.unconfirmed().find(([of]) => of === key)[4];
+
+test("follow-up finding 5: no try is counted while the first waits for room, and none goes after the tries are used", async () => {
+  // With a budget of two and no room, three rounds used both tries and left two copies in the queue, which went out when
+  // room came, after unknown had been said.
+  const clock = new Clock();
+  const atA = new CarryState(A);
+  const session = openedPair(atA, new CarryState(B));
+  const medium = new Medium(0);
+  const carrier = new Carrier(atA, medium, readable, [B.publicRaw], { clock: clock.read, wall: () => NOW, retrySeconds: 2, tries: 2 });
+  const key = carrier.send(B.publicRaw, session, bytes("hei"));
+  for (const step of [0, 2.1, 2.1]) {
+    clock.now += step;
+    await carrier.pump(0);
+  }
+  assert.deepEqual([carrier.outcome(key), atA.durable.outbox[key].tries, carrier.queue.length, medium.given], ["waiting", 1, 1, []]);
+  medium.credit = 1000;
+  await carrier.pump(0);
+  const first = medium.given.length;
+  assert.ok(first > 0 && carrier.queue.length === 0, "the one try went when there was room");
+  clock.now += 2.1;
+  await carrier.pump(0);
+  assert.deepEqual([medium.given.length, atA.durable.outbox[key].tries], [2 * first, 2], "the second try, counted as it began");
+  clock.now += 2.1;
+  await carrier.pump(0);
+  assert.deepEqual([carrier.outcome(key), atA.durable.outbox[key].envelope], ["unknown", null]);
+  for (let round = 0; round < 3; round++) {
+    clock.now += 2.1;
+    await carrier.pump(0);
+  }
+  assert.equal(medium.given.length, 2 * first, "nothing goes after the tries are used");
+});
+
+test("follow-up finding 5: a try that waits for room is not begun once its receipt has come", async () => {
+  const clock = new Clock();
+  const atA = new CarryState(A);
+  const atB = new CarryState(B);
+  const session = openedPair(atA, atB);
+  const medium = new Medium(1000);
+  const carrier = new Carrier(atA, medium, readable, [B.publicRaw], { clock: clock.read, wall: () => NOW, retrySeconds: 2, tries: 5 });
+  const key = carrier.send(B.publicRaw, session, bytes("hei"));
+  await carrier.pump(0);
+  const first = medium.given.length;
+  medium.credit = 0;
+  clock.now += 2.1;
+  await carrier.pump(0);
+  assert.ok(queued(carrier, key) && atA.durable.outbox[key].tries === 2);
+  const [, receipt] = atB.deliver(keptEnvelope(atA, key), [A.publicRaw], readable, 1, NOW);
+  medium.events = carry.split(receipt, 64).map((frame) => ["received", null, frame]);
+  await carrier.pump(0);
+  assert.ok(carrier.confirmed(key));
+  medium.credit = 1000;
+  await carrier.pump(0);
+  assert.deepEqual([medium.given.length, carrier.queue.length], [first, 0], "the copy that waited was not sent after the receipt");
+});
+
+test("follow-up finding 2: bytes written readable are not taken up under a sealed profile", async () => {
+  // A new owner compared only the partner's key, and sent the old readable bytes though the profile said sealed.
+  const clock = new Clock();
+  const root = mkdtempSync(join(tmpdir(), "aamio-carry-mode-"));
+  try {
+    const file = join(root, "a.json");
+    const atA = new CarryState(A, file);
+    const atB = new CarryState(B);
+    let [session, ask] = atA.ask(B.publicRaw, readable, 0);
+    let [, challenge] = atB.deliver(ask, [A.publicRaw], readable, 0, NOW);
+    atA.deliver(challenge, [B.publicRaw], readable, 0, NOW);
+    const envelope = atA.send(B.publicRaw, session, bytes("lesbar tekst"), readable, { most: 5 });
+    const key = mark(B.publicRaw, session, 1);
+    assert.ok(envelope[4] === carry.READABLE && Buffer.from(envelope).includes("lesbar tekst"));
+    const medium = new Medium(1000);
+    const said = [];
+    let carrier = new Carrier(new CarryState(A, file), medium, sealed, [B.publicRaw], { clock: clock.read, wall: () => NOW, tries: 5, note: (line) => said.push(line) });
+    assert.ok(!carrier.messages.has(key));
+    for (let round = 0; round < 4; round++) {
+      clock.now += 3;
+      await carrier.pump(0);
+    }
+    assert.deepEqual(medium.given, [], "nothing readable went out under the sealed profile");
+    const kept = new CarryState(A, file);
+    assert.deepEqual([kept.outcome(key), kept.durable.outbox[key].envelope], ["unknown", null], "given up, with its mark and hash kept");
+    assert.equal(said.length, 1);
+    for (const words of [key, "readable", "sealed", "not sent again"]) assert.ok(said[0].includes(words), said[0]);
+    // The same mode is taken up as before. One state at a time on the file, as one owner has the home.
+    [session, ask] = kept.ask(B.publicRaw, sealed, 10);
+    [, challenge] = atB.deliver(ask, [A.publicRaw], sealed, 10, NOW);
+    kept.deliver(challenge, [B.publicRaw], sealed, 10, NOW);
+    kept.send(B.publicRaw, session, bytes("forseglet"), sealed, { most: 5 });
+    carrier = new Carrier(new CarryState(A, file), new Medium(1000), sealed, [B.publicRaw], { clock: clock.read, wall: () => NOW, tries: 5, note: (line) => said.push(line) });
+    assert.deepEqual([[...carrier.messages.keys()], said.length], [[mark(B.publicRaw, session, 1)], 1]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A carrier of A's whose profile for the partner is read each time, a message sent in it, and what it was told. */
+function withChangingProfile(room) {
+  const clock = new Clock();
+  const now = { mode: "readable" };
+  const atA = new CarryState(A);
+  const session = openedPair(atA, new CarryState(B));
+  const medium = new Medium(room);
+  const said = [];
+  const carrier = new Carrier(atA, medium, () => (now.mode === "sealed" ? sealed : readable), [B.publicRaw], { clock: clock.read, wall: () => NOW, retrySeconds: 2, note: (line) => said.push(line) });
+  const key = carrier.send(B.publicRaw, session, bytes("lesbar"));
+  return { clock, now, atA, medium, said, carrier, key };
+}
+
+test("follow-up finding 2, while it runs: a try that waits for room is not begun once the profile is of another mode", async () => {
+  const { now, medium, said, carrier, key } = withChangingProfile(0);
+  await carrier.pump(0);
+  assert.ok(queued(carrier, key));
+  now.mode = "sealed";
+  medium.credit = 1000;
+  await carrier.pump(0);
+  assert.deepEqual([medium.given, carrier.queue.length, carrier.messages.has(key)], [[], 0, false]);
+  assert.deepEqual([carrier.outcome(key), said.length], ["unknown", 1]);
+  assert.ok(said[0].includes("not sent again"), said[0]);
+});
+
+test("follow-up finding 2, at the next try: no try is counted or sent once the profile is of another mode", async () => {
+  // The first try went whole while the profile was readable; the next would have gone readable under the sealed one.
+  const { clock, now, atA, medium, said, carrier, key } = withChangingProfile(1000);
+  await carrier.pump(0);
+  const first = medium.given.length;
+  assert.ok(first > 0 && carrier.queue.length === 0);
+  now.mode = "sealed";
+  for (let round = 0; round < 3; round++) {
+    clock.now += 2.1;
+    await carrier.pump(0);
+  }
+  assert.deepEqual([medium.given.length, atA.durable.outbox[key].tries, atA.durable.outbox[key].envelope, carrier.messages.has(key)], [first, 1, null, false]);
+  assert.deepEqual([carrier.outcome(key), said.length], ["unknown", 1]);
+  assert.ok(said[0].includes("not sent again") && said[0].includes(key), said[0]);
+});

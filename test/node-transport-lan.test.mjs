@@ -3,8 +3,8 @@
  *
  * Two carriers, each with its own lan transport on a UDP port of its own and the other named as its peer, broadcast
  * off so nothing leaves 127.0.0.1. A probe opens no port, a port another program holds is down until it opens, and
- * then up with room; a message goes each way with its receipt, readable and sealed; and a datagram of another kind is
- * dropped.
+ * then up with room; a message goes each way with its receipt, readable and sealed; a datagram of another kind is
+ * dropped; and a frame is called sent only when the operating system took a datagram of it.
  */
 
 import { test } from "node:test";
@@ -179,5 +179,50 @@ test("a datagram of another kind is dropped, and one of this kind comes with its
     assert.match(received[0][1], /^lan:127\.0\.0\.1:/);
   } finally {
     await transport.stop();
+  }
+});
+
+// ------------------------------------------------------------------ the follow-up check of 2026-11-15, finding 9
+
+test("follow-up finding 9: a frame is sent only when the operating system took a datagram of it, and an error when it took none", async (t) => {
+  // sent was said before the operating system had answered, so a frame none of whose datagrams went was called sent.
+  // test/lan-send-fails.mjs, loaded into the transport's process, makes every datagram to one port fail as a full buffer
+  // does: a failure put in, not one this machine has.
+  const folder = mkdtempSync(join(tmpdir(), "aamio-lan-"));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const [port, refused, taken] = await freePorts(3);
+  const listener = createSocket("udp4");
+  const arrived = [];
+  listener.on("message", (data) => arrived.push(data));
+  await new Promise((resolve) => listener.bind(taken, "127.0.0.1", resolve));
+  const base = Object.fromEntries(["PATH", "SYSTEMROOT", "TEMP", "TMP"].filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
+  const env = environment(["AAMIO_LAN_PORT", "AAMIO_LAN_BIND", "AAMIO_LAN_BROADCAST", "AAMIO_LAN_PEERS"],
+    { ...base, AAMIO_LAN_PORT: String(port), AAMIO_LAN_BIND: "127.0.0.1", AAMIO_LAN_BROADCAST: "none", AAMIO_LAN_PEERS: `127.0.0.1:${refused},127.0.0.1:${taken}` });
+  env.AAMIO_TEST_SEND_FAILS = String(refused);
+  const said = [];
+  const transport = new TransportProcess("lan", "0.1.0", [process.execPath, "--import", new URL("./lan-send-fails.mjs", import.meta.url).href, script], folder, env,
+    { describeSeconds: 30, log: (line) => said.push(line) });
+  try {
+    await transport.start("0.0.0-test", "node", folder);
+    assert.ok(await waitFor(transport, (t2) => t2.room() > 0), "no room");
+    const frame = Buffer.concat([Buffer.from("AF"), Buffer.alloc(20, 7)]);
+    const answered = async (to) => {
+      const id = transport.send(frame, to);
+      assert.ok(await waitFor(transport, (t2) => t2.status(id) !== "waiting"), `no answer for a frame to ${to}`);
+      return [transport.status(id), transport.frames.get(id).reason ?? null];
+    };
+    assert.deepEqual(await answered(`lan:127.0.0.1:${refused}`), ["not_sent", "send_failed"], "no datagram went, so the frame is not sent, with the reason");
+    assert.deepEqual(await answered(`lan:127.0.0.1:${taken}`), ["sent", null]);
+    assert.deepEqual(await answered(null), ["sent", null], "to nobody in particular, one peer refused and one taken: a datagram went");
+    assert.deepEqual(await answered("lan:127.0.0.1:0"), ["not_sent", "send_failed"], "a port no datagram can go to is that frame's error, and not the end of the transport");
+    assert.ok(await waitFor(transport, (t2) => t2.room() === 32), "the room comes back with the answers");
+    const until = Date.now() + 5000;
+    while ((arrived.length < 2 || !said.some((line) => line.includes("ENOBUFS"))) && Date.now() < until) await sleep(20);
+    assert.equal(arrived.length, 2, "what was called sent went to the port that takes datagrams, and nothing else did");
+    assert.ok(arrived.every((data) => data.subarray(11).equals(frame)));
+    assert.ok(said.some((line) => line.includes(`a frame to 127.0.0.1:${refused} did not go`) && line.includes("ENOBUFS")), JSON.stringify(said));
+  } finally {
+    await transport.stop();
+    await new Promise((resolve) => listener.close(resolve));
   }
 });

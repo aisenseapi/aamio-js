@@ -6,6 +6,8 @@
 // AAMIO_LAN_PEERS; a frame to an address goes to that address alone. An address is lan:<ip>:<port>. Each datagram is
 // "AL1", eight bytes that name this process, and the frame: a transport drops what it sent itself, which a broadcast
 // brings back to it, and anything that is not of this kind. The core seals and verifies; the network sees that frames go.
+// A frame is answered once the operating system has said how each datagram of it went: sent when it took at least one,
+// and an error when it took none.
 //
 // The port is opened after hello, and never when hello says probe: enable then only sees that this starts and
 // describes itself. A port that cannot be opened, as one another program holds, is said as down and tried again every
@@ -40,6 +42,8 @@ let socket = null;
 let stopping = false;
 let saidDown = false;
 let sendsRead = 0;
+// Frames read whose answer waits for what the operating system says of their datagrams.
+let unanswered = 0;
 let retry = null;
 
 const say = (message) => process.stdout.write(JSON.stringify(message) + "\n");
@@ -84,7 +88,7 @@ function open() {
     socket = made;
     if (saidDown) say({ t: "status", state: "up", reason: `port ${port} is open` });
     saidDown = false;
-    say({ t: "ready", credit: CREDIT, sends_read: sendsRead });
+    ready();
   });
 }
 
@@ -99,24 +103,46 @@ function targets(to) {
   return found;
 }
 
-function send(message) {
+/**
+ * A frame given to the network, and done told how it went, once: sent when the operating system took at least one
+ * datagram of it, and an error when it took none. The answer waits for what the operating system says of each datagram:
+ * said at once, a frame no datagram of which went was called sent (the follow-up check of 15 November 2026). A datagram
+ * the operating system took is on the network, and that is all sent says: only a receipt says the partner has it.
+ */
+function send(message, done) {
   const frame = Buffer.from(String(message.frame ?? ""), "base64url");
-  if (socket === null) return { t: "error", id: message.id, code: "down", message: "the port is not open" };
-  if (frame.length > MAX_FRAME) return { t: "error", id: message.id, code: "too_large", message: `the frame is larger than ${MAX_FRAME} bytes` };
+  if (socket === null) return done({ t: "error", id: message.id, code: "down", message: "the port is not open" });
+  if (frame.length > MAX_FRAME) return done({ t: "error", id: message.id, code: "too_large", message: `the frame is larger than ${MAX_FRAME} bytes` });
   let found;
   try {
     found = targets(message.to);
   } catch {
-    return { t: "error", id: message.id, code: "bad_address", message: "an address is lan:<ip>:<port>" };
+    return done({ t: "error", id: message.id, code: "bad_address", message: "an address is lan:<ip>:<port>" });
   }
-  if (found.length === 0) return { t: "error", id: message.id, code: "nowhere", message: "no broadcast and no peers: a frame to nobody in particular has nowhere to go" };
+  if (found.length === 0) return done({ t: "error", id: message.id, code: "nowhere", message: "no broadcast and no peers: a frame to nobody in particular has nowhere to go" });
   const datagram = Buffer.concat([MAGIC, me, frame]);
+  let left = found.length;
+  let gone = 0;
+  const went = (host, peerPort, error) => {
+    if (error) process.stderr.write(`aamio-lan: a frame to ${host}:${peerPort} did not go: ${error.message}\n`);
+    else gone += 1;
+    left -= 1;
+    if (left > 0) return;
+    done(gone > 0 ? { t: "sent", id: message.id } : { t: "error", id: message.id, code: "send_failed", message: "the frame could not be given to the network" });
+  };
   for (const [host, peerPort] of found) {
-    socket.send(datagram, peerPort, host, (error) => {
-      if (error) process.stderr.write(`aamio-lan: a frame to ${host}:${peerPort} did not go: ${error.message}\n`);
-    });
+    try {
+      socket.send(datagram, peerPort, host, (error) => went(host, peerPort, error));
+    } catch (error) {
+      // Refused before it was tried, as a port no datagram can go to: that datagram did not go either.
+      went(host, peerPort, error);
+    }
   }
-  return { t: "sent", id: message.id };
+}
+
+/** Room for as many frames as the operating system is not still busy with. */
+function ready() {
+  say({ t: "ready", credit: Math.max(0, CREDIT - unanswered), sends_read: sendsRead });
 }
 
 function finish() {
@@ -142,12 +168,16 @@ lines.on("line", (line) => {
     if (message.probe !== true) open();
   } else if (message.t === "send") {
     sendsRead += 1;
-    say(send(message));
-    say({ t: "ready", credit: CREDIT, sends_read: sendsRead });
+    unanswered += 1;
+    send(message, (answer) => {
+      unanswered -= 1;
+      say(answer);
+      ready();
+    });
   } else if (message.t === "stop") {
     lines.close();
     finish();
   }
-  // cancel: a datagram is on the network as soon as it is given, so nothing is left to cancel
+  // cancel: a datagram is with the operating system as soon as it is given, so nothing is left to cancel
 });
 lines.on("close", finish);
