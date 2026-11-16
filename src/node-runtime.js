@@ -3404,11 +3404,12 @@ export class NodeRuntime {
     const content = new TextEncoder().encode(JSON.stringify(body));
     const budget = this.workBudget;
     const wait = budget === undefined || budget === null ? transportTiming.waitDefault : Math.max(1, Math.min(transportTiming.waitDefault, Math.floor(budget)));
-    const result = await this.transportService().send(new Uint8Array(Buffer.from(partner.key, "base64url")), content, wait);
+    // Without a work budget, as on the command line, a send waits as long as the medium needs: over sound, minutes.
+    const result = await this.transportService().send(new Uint8Array(Buffer.from(partner.key, "base64url")), content, wait, budget === undefined || budget === null);
     // The sha256 is of the envelope the transport carries: what their runtime reads it under and names as seen, as the
     // sha256 of a send over HTTPS is what the service stored.
     const sent = { to: partner.name, via: result.via, profile: result.profile, mark: result.mark, sha256: result.sha256, status: result.status,
-      note: CARRIED_NOTES[result.status].replace("%via", result.via).replace("%wait", String(wait)) };
+      note: CARRIED_NOTES[result.status].replace("%via", result.via).replace("%wait", String(result.waited ?? wait)) };
     const archiveError = await this.archiveSafely("sent", { kind: "sent", at: this.now(), to: partner.name, via: result.via, profile: result.profile, mark: result.mark, status: result.status,
       body: archivedData === null || archivedData === undefined ? body : { ...body, data: archivedData } }, `the send ${result.mark}`);
     if (archiveError) sent.archive_error = archiveError;

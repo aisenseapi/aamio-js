@@ -653,3 +653,134 @@ test("follow-up finding 2, at the next try: no try is counted or sent once the p
   assert.deepEqual([carrier.outcome(key), said.length], ["unknown", 1]);
   assert.ok(said[0].includes("not sent again") && said[0].includes(key), said[0]);
 });
+
+// ------------------------------------------------------------------ waits on a slow medium (phase 3, 16 November 2026)
+
+// Bytes a second over sound: a full Earshot packet of 128 bytes takes 16.3 seconds.
+const SOUND = 128 / 16.3;
+const slowMedium = (room = 1000) => {
+  const medium = new Medium(room, 128);
+  Object.assign(medium.properties, { max_frame_down: 128, rate_up: SOUND, rate_down: SOUND });
+  return medium;
+};
+const heard = (medium, envelope) => {
+  medium.events = carry.split(envelope, 128).map((frame) => ["received", null, frame]);
+};
+
+test("on a slow medium a group is kept as long as its frames take there, twice over", () => {
+  // Over sound a frame takes 16 seconds and more, and a message of more than six frames could never be put together
+  // within 120 seconds. The group lives twice as long as its frames take on the medium, and never less than 120 seconds.
+  const envelope = carry.write(A, B.publicRaw, carry.READABLE, carry.MESSAGE, 0, new Uint8Array(8), 1, 1794700300, new Uint8Array(900).fill(121));
+  const frames = carry.split(envelope, 128);
+  assert.equal(frames.length, 9);
+  let clock = new Clock();
+  const slow = new Reassembly(clock.read, 16.3);
+  assert.ok(Math.abs(slow.lifetime(9) - 2 * 9 * 16.3) < 1e-9 && slow.lifetime(1) === 120);
+  for (const frame of frames.slice(0, -1)) {
+    assert.equal(slow.add(frame), null);
+    clock.now += 20;
+  }
+  assert.ok(carry.equal(slow.add(frames.at(-1)), envelope), "nine frames over 160 seconds, put together");
+  clock = new Clock();
+  const fast = new Reassembly(clock.read);
+  for (const frame of frames.slice(0, -1)) {
+    assert.equal(fast.add(frame), null);
+    clock.now += 20;
+  }
+  assert.ok(fast.add(frames.at(-1)) === null && fast.groups.size === 1, "on a fast medium the group went after 120 seconds, as before");
+});
+
+test("on a slow medium an ask goes again after the time it and its answer take there", async () => {
+  // Over sound an ask of two frames and its challenge of two take 65 seconds on the medium, and with slack a turn is 130.
+  // Asked again every 5 seconds, the air was full of asks and nothing else had a turn.
+  const clock = new Clock();
+  const medium = slowMedium();
+  let carrier = new Carrier(new CarryState(A), medium, sealed, [B.publicRaw], { clock: clock.read, wall: () => NOW });
+  carrier.random = () => 0;
+  carrier.open(B.publicRaw);
+  await carrier.pump(0);
+  assert.ok(medium.given.length === 2 && carrier.asking(B.publicRaw), "an ask is two frames over sound");
+  clock.now += 130;
+  await carrier.pump(0);
+  assert.equal(medium.given.length, 2, "not before the ask and its challenge could have gone, twice over");
+  clock.now += 1;
+  await carrier.pump(0);
+  assert.equal(medium.given.length, 4, "asked again, with a new session");
+  const fast = new Medium(1000, 128);
+  carrier = new Carrier(new CarryState(A), fast, sealed, [B.publicRaw], { clock: clock.read, wall: () => NOW });
+  carrier.open(B.publicRaw);
+  await carrier.pump(0);
+  clock.now += 5.1;
+  await carrier.pump(0);
+  assert.equal(fast.given.length, 4, "on a medium that gives no rate, again after 5 seconds as before");
+});
+
+test("on a slow medium an open goes again on a challenge's turn while it can still arrive in the window", async () => {
+  // An open that waited for the message behind it and that message's receipt before it went again had two tries in a
+  // window of 60 seconds at eight times real time; both were lost in collisions, and so was the session. It goes again on
+  // a challenge's turn now, and a try that would come after the window is left out.
+  const clock = new Clock();
+  const windowed = profile({ mode: "sealed", challengeWindow: 400 });
+  const atB = new CarryState(B);
+  const medium = slowMedium();
+  const carrier = new Carrier(new CarryState(A), medium, windowed, [B.publicRaw], { clock: clock.read, wall: () => NOW });
+  carrier.random = () => 0.999;
+  carrier.open(B.publicRaw);
+  await carrier.pump(0);
+  const [, challenge] = atB.deliver(carry.reassemble(medium.given), [A.publicRaw], windowed, 0, NOW);
+  heard(medium, challenge);
+  await carrier.pump(0);
+  const given = medium.given.length;
+  assert.ok(given === 4 && !carrier.asking(B.publicRaw), "the open went, two frames, and nothing is asked any more");
+  // A turn is 130.4 seconds and up to half of it again: 195.5 with the random part near the top.
+  clock.now += 195;
+  await carrier.pump(0);
+  assert.equal(medium.given.length, given);
+  clock.now += 1;
+  await carrier.pump(0);
+  assert.equal(medium.given.length, given + 2, "the open again, one challenge's turn after it went");
+  // The window is 400 seconds. The challenge's time on the medium went before the open began, and the open's own comes
+  // after: a try that begins later than 334.8 seconds after the challenge came is too late. The third would begin at 391.5.
+  clock.now += 196;
+  await carrier.pump(0);
+  clock.now += 200;
+  await carrier.pump(0);
+  assert.ok(medium.given.length === given + 2 && carrier.control.size === 0, "no try that would come after the window, and the open is let go");
+});
+
+test("a challenge ends every ask to that partner, and none is asked again", async () => {
+  // The first ask was answered after it had been asked again with a new session: the second went on being asked again,
+  // and on a half-duplex medium took turns from the message it was asked for.
+  const clock = new Clock();
+  const atB = new CarryState(B);
+  const medium = new Medium(1000, 128);
+  const carrier = new Carrier(new CarryState(A), medium, sealed, [B.publicRaw], { clock: clock.read, wall: () => NOW });
+  carrier.open(B.publicRaw);
+  await carrier.pump(0);
+  const first = carry.reassemble(medium.given);
+  clock.now += 5.1;
+  await carrier.pump(0);
+  assert.ok(carrier.asking(B.publicRaw) && medium.given.length === 4, "no challenge yet: asked again, with a new session");
+  const [, challenge] = atB.deliver(first, [A.publicRaw], sealed, 0, NOW);
+  heard(medium, challenge);
+  await carrier.pump(0);
+  assert.ok(!carrier.asking(B.publicRaw), "the challenge to the first ask ends the second as well");
+  for (let round = 0; round < 4; round++) {
+    clock.now += 5.1;
+    await carrier.pump(0);
+  }
+  assert.ok(!carrier.asking(B.publicRaw) && carrier.openSession(B.publicRaw) !== null);
+});
+
+test("what a slow medium needs for a session and a send is measured in its frames", () => {
+  // A challenge and its open with slack, the window in which an open has three tries, and how long a send waits: over
+  // sound 130.4, 456.4 and 326 seconds. On a medium that gives no rate, nothing.
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  const carrier = new Carrier(new CarryState(A), slowMedium(), sealed, [B.publicRaw], { clock: new Clock().read, wall: () => NOW });
+  assert.ok(near(carrier.handshakeSeconds(), 2 * 16.3 * 4));
+  assert.ok(near(carrier.windowForOpens(), 2 * 2 * 16.3 + 2 * 1.5 * 2 * 16.3 * 4));
+  assert.ok(near(carrier.patience(12), 2 * 16.3 * (4 * 2 + 2)));
+  const fast = new Carrier(new CarryState(A), new Medium(1000, 128), sealed, [B.publicRaw], { clock: new Clock().read, wall: () => NOW });
+  assert.deepEqual([fast.handshakeSeconds(), fast.windowForOpens(), fast.patience(12)], [0, 0, 0]);
+});
+

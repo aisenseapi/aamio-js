@@ -31,6 +31,16 @@ import { mark, TRIES_DEFAULT } from "./node-carry-state.js";
 import { Reassembly } from "./node-transport-host.js";
 
 export const UNVERIFIED_PER_SECOND = 20;
+// A receipt, a challenge or an open, sealed, is under 200 bytes: 192, 163 and 163. An ask is 147.
+export const ANSWER_BYTES = 200;
+// What a sealed message adds to its content, rounded up: 262 bytes carry a body of about 110.
+export const MESSAGE_BYTES = 160;
+// On a slow medium a turn is longer by a random part of up to half of it: two that began together, as two that both ask
+// for a session at once, and lost each other's frames, would otherwise try again together for good.
+export const JITTER = 0.5;
+// How much longer than the bare time on the medium a wait gives: a half-duplex medium takes turns, and what is heard has
+// to be read before it is answered.
+export const SLACK = 2;
 const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 const pairOf = (pk, session) => toHex(pk) + ":" + toHex(session);
 
@@ -44,8 +54,18 @@ export class Carrier {
     this.profileOf = typeof profile === "function" ? profile : () => profile;
     this.given = new Map();      // mark -> the frame ids of each try that was given to the transport whole
     this.handed = new Set();     // marks one try of which the transport said it handed over whole (B6 1)
-    this.reassembly = new Reassembly(clock);
+    const rateDown = process.properties.rate_down;
+    const frameDown = process.properties.max_frame_down;
+    const slow = typeof rateDown === "number" && rateDown > 0 && Number.isInteger(frameDown);
+    this.reassembly = new Reassembly(clock, slow ? frameDown / rateDown : 0);
     this.frameLimit = process.properties.max_frame_up;
+    // A full frame's time on the medium, as the transport's rate says, and what the waits are measured in where the
+    // medium is slow. Over sound a frame is 16 seconds: a try every 2 seconds filled the air with copies of a message
+    // whose receipt then had no turn, and a session could not be opened in the 30 seconds a send waited.
+    const rate = process.properties.rate_up;
+    this.frameSeconds = typeof rate === "number" && rate > 0 ? this.frameLimit / rate : 0;
+    // A number from 0 up to 1, for the random part of a turn; a property, so a test can fix it.
+    this.random = Math.random;
     this.queue = [];
     this.messages = new Map();   // mark -> { envelope, pk, session, next }: sent, and its receipt not come
     this.control = new Map();    // id -> challenges and opens sent again through the window
@@ -93,22 +113,85 @@ export class Carrier {
     this.queue.push([carry.split(envelope, this.frameLimit), to, key, [], counted]);
   }
 
-  #control(envelope, to, kind, pk, session, most) {
+  /** How many frames size bytes take on this medium. */
+  #frames(size) {
+    return Math.ceil(size / Math.max(1, this.frameLimit - carry.FRAME_HEADER));
+  }
+
+  /** The bare time size bytes take on the medium, as the transport's rate says; nothing on a fast medium. */
+  #airtime(size) {
+    return this.frameSeconds * this.#frames(size);
+  }
+
+  /**
+   * How long to wait for the answer to an envelope before it goes again: base, or on a slow medium the time the envelope
+   * and what answers it take there, with slack. A fast medium never reaches base.
+   */
+  #turn(envelope, base) {
+    const slow = SLACK * this.frameSeconds * (this.#frames(envelope.length) + this.#frames(ANSWER_BYTES));
+    return slow <= base ? base : slow * (1 + JITTER * this.random());
+  }
+
+  /** What a challenge and its open take on this medium, with slack: what a profile's challenge window has to give. */
+  handshakeSeconds() {
+    return SLACK * this.frameSeconds * 2 * this.#frames(ANSWER_BYTES);
+  }
+
+  /** A challenge's and its open's time on this medium, at most: every frame counted as a full one. */
+  airtimeOfHandshake() {
+    return 2 * this.#airtime(ANSWER_BYTES);
+  }
+
+  /**
+   * A challenge window in which an open has tries chances to come through on this medium, the longest turns counted:
+   * what a profile for a slow medium is to give. A lost open loses its session.
+   */
+  windowForOpens(tries = 3) {
+    const turn = SLACK * this.frameSeconds * 2 * this.#frames(ANSWER_BYTES) * (1 + JITTER);
+    return 2 * this.#airtime(ANSWER_BYTES) + (tries - 1) * turn;
+  }
+
+  /**
+   * How long a send of size bytes of content takes on this medium when nothing is lost: an ask, its challenge and the
+   * open, the message and its receipt, with slack. Next to nothing on a fast medium.
+   */
+  patience(size) {
+    return SLACK * this.frameSeconds * (4 * this.#frames(ANSWER_BYTES) + this.#frames(size + MESSAGE_BYTES));
+  }
+
+  /**
+   * A challenge or an open, sent again with the same bytes one turn after it went, as long as it can still arrive in the
+   * challenge window: a try that began later would come after the window, and be turned down, so it is left out.
+   *
+   * An open goes again on the same turn as a challenge, though the first receipt in its session is what shows it came:
+   * waiting for the message behind it and that message's receipt as well, an open over sound had two tries within a
+   * window of 60 seconds at eight times real time, and when both were lost, so was the session (16 November 2026).
+   */
+  #control(envelope, to, kind, pk, session, most, window) {
+    const at = this.clock();
     this.counter += 1;
-    this.control.set(`c-${this.counter}`, { envelope, to, kind, pk, session, next: this.clock() + this.retrySeconds, tries: 1, most });
+    this.control.set(`c-${this.counter}`, { envelope, to, kind, pk, session, next: at + this.#turn(envelope, this.retrySeconds), tries: 1, most,
+      until: at + window - this.#airtime(ANSWER_BYTES) });
     this.#queue(envelope, to);
   }
 
   #windowTries(pk) {
-    return Math.max(1, Math.floor(this.profileOf(pk).challengeWindow / this.retrySeconds));
+    // A challenge goes again one turn after it went, a turn being as long as a challenge and its open take.
+    return Math.max(1, Math.floor(this.profileOf(pk).challengeWindow / Math.max(this.retrySeconds, SLACK * this.frameSeconds * 2 * this.#frames(ANSWER_BYTES))));
   }
 
   /** Ask the partner for a session of this party's: the challenge and the open follow in pump. */
   open(partnerPk) {
     const [session, envelope] = this.state.ask(partnerPk, this.profileOf(partnerPk), this.clock());
-    this.asks.set(pairOf(partnerPk, session), { pk: partnerPk, session, next: this.clock() + this.askRetrySeconds, tries: 1 });
+    this.asks.set(pairOf(partnerPk, session), { pk: partnerPk, session, next: this.clock() + this.#turn(envelope, this.askRetrySeconds), tries: 1 });
     this.#queue(envelope, this.addresses.get(toHex(partnerPk)) ?? null);
     return session;
+  }
+
+  /** Whether an ask for a session with the partner is under way: sent, and gone again on its own until answered. */
+  asking(partnerPk) {
+    for (const entry of this.asks.values()) if (carry.equal(entry.pk, partnerPk)) return true;
+    return false;
   }
 
   /** The newest session of this party's with the partner that a challenge has answered, or null. */
@@ -130,7 +213,7 @@ export class Carrier {
   send(partnerPk, session, content, deadline = 0) {
     const envelope = this.state.send(partnerPk, session, content, this.profileOf(partnerPk), { deadline, most: this.tries });
     const key = mark(partnerPk, session, this.state.counterOf(partnerPk, session));
-    this.messages.set(key, { envelope, pk: partnerPk, session, next: this.clock() + this.retrySeconds });
+    this.messages.set(key, { envelope, pk: partnerPk, session, next: this.clock() + this.#turn(envelope, this.retrySeconds) });
     this.#queue(envelope, this.addresses.get(toHex(partnerPk)) ?? null, key);
     return key;
   }
@@ -214,11 +297,15 @@ export class Carrier {
     if (source !== null) this.addresses.set(toHex(got.sender), source);
     const pair = pairOf(got.sender, got.session);
     if (got.kind === carry.CHALLENGE) {
-      this.asks.delete(pair);
+      // A session with the partner is open: every ask to it ends, the one this answers and any made since. Asked again on
+      // a slow medium, each took turns from the messages it was asked for.
+      for (const [asked, entry] of [...this.asks]) if (carry.equal(entry.pk, got.sender)) this.asks.delete(asked);
       if (!this.answered.has(pair)) this.answered.set(pair, [got.sender, got.session, now]);
       // The open is sent again with the same bytes through the challenge window, until the first receipt in the session
-      // shows it came: on a medium that loses frames, one try is not enough.
-      this.#control(reply, source, "open", got.sender, got.session, this.#windowTries(got.sender));
+      // shows it came: on a medium that loses frames, one try is not enough. The window was counted from before the
+      // challenge went, so the challenge's own time on the medium is off it.
+      const window = this.profileOf(got.sender).challengeWindow;
+      this.#control(reply, source, "open", got.sender, got.session, this.#windowTries(got.sender), window - this.#airtime(ANSWER_BYTES));
       return;
     }
     if (got.kind === carry.OPEN) {
@@ -226,7 +313,10 @@ export class Carrier {
       return;
     }
     if (got.kind === carry.ASK) {
-      this.#control(reply, source, "challenge", got.sender, got.session, this.#windowTries(got.sender));
+      // The challenge too is sent again with the same bytes until its open comes, or the window is gone; a try is left out
+      // when the challenge and its open could no longer come through within it.
+      const window = this.profileOf(got.sender).challengeWindow;
+      this.#control(reply, source, "challenge", got.sender, got.session, this.#windowTries(got.sender), window - this.#airtime(ANSWER_BYTES));
       return;
     }
     if (got.kind === carry.RECEIPT) {
@@ -263,7 +353,7 @@ export class Carrier {
         this.messages.delete(key);
         continue;
       }
-      entry.next = now + this.retrySeconds;
+      entry.next = now + this.#turn(entry.envelope, this.retrySeconds);
       // Queued, the try has used nothing: it is counted as it begins, in #flush, when it can be given to the
       // transport. Counted here, every new owner used a try as it took the outbox up, room or not, and a budget went
       // with nothing sent (the check of 16 November 2026).
@@ -271,12 +361,12 @@ export class Carrier {
     }
     for (const [key, entry] of this.control) {
       if (now < entry.next) continue;
-      if (entry.tries >= entry.most) {
+      if (entry.tries >= entry.most || now > entry.until) {
         this.control.delete(key);
         continue;
       }
       entry.tries += 1;
-      entry.next = now + this.retrySeconds;
+      entry.next = now + this.#turn(entry.envelope, this.retrySeconds);
       this.#queue(entry.envelope, this.addresses.get(toHex(entry.pk)) ?? entry.to);
     }
     for (const [pair, entry] of [...this.asks]) {
@@ -284,7 +374,7 @@ export class Carrier {
       this.asks.delete(pair);
       if (entry.tries < this.tries) {
         const [session, envelope] = this.state.ask(entry.pk, this.profileOf(entry.pk), now);
-        this.asks.set(pairOf(entry.pk, session), { pk: entry.pk, session, next: now + this.askRetrySeconds, tries: entry.tries + 1 });
+        this.asks.set(pairOf(entry.pk, session), { pk: entry.pk, session, next: now + this.#turn(envelope, this.askRetrySeconds), tries: entry.tries + 1 });
         this.#queue(envelope, this.addresses.get(toHex(entry.pk)) ?? null);
       }
     }
@@ -314,8 +404,8 @@ export class Carrier {
           }
           this.queue[0][4] = true;
         }
-        // The next try is one wait after this one began, however long it waited for room.
-        entry.next = this.clock() + this.retrySeconds;
+        // The next try is one turn after this one began, however long it waited for room.
+        entry.next = this.clock() + this.#turn(entry.envelope, this.retrySeconds);
       }
       const frame = frames.shift();
       const id = this.process.send(frame, to);

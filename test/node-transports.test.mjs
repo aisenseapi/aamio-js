@@ -20,7 +20,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { probe } from "../src/node-addon-process.js";
 import { describe as describeAddons, enable } from "../src/node-addons.js";
-import { CarryState, mark } from "../src/node-carry-state.js";
+import { Carrier } from "../src/node-carrier.js";
+import { CarryState, mark, profile } from "../src/node-carry-state.js";
 import { initIdentity } from "../src/node-identity.js";
 import { NodeRuntime } from "../src/node-runtime.js";
 import * as transports from "../src/node-transports.js";
@@ -138,6 +139,16 @@ async function commandsOn(c, d, homes) {
   const readable = transports.profileAdd(c, "open-lan", { readable: true, lifetime: 300, window: 30 });
   assert.equal(readable.profile.mode, "readable");
   assert.ok(readable.note.includes("everyone who hears the medium can read"));
+  // A profile whose window is too short for a slow medium is said in attention, with the fix (phase 3, 16 November 2026):
+  // a carrier over a transport that says the rate of sound, 128 bytes in 16.3 seconds.
+  const slowWire = { name: "lan", properties: { max_frame_up: 128, max_frame_down: 128, rate_up: 128 / 16.3, rate_down: 128 / 16.3 } };
+  c.transportService().checkWindows("lan", new Carrier(c.transportService().carry(), slowWire, profile({ mode: "sealed" }), []));
+  const windowNotes = (await c.attentionTaken()).filter((noted) => noted.state === "window_too_short");
+  assert.equal(windowNotes.length, 1);
+  assert.ok(windowNotes[0].channel === "lan" && windowNotes[0].what.includes("the profile sealed gives a challenge 60 seconds"), windowNotes[0].what);
+  assert.ok(windowNotes[0].what.includes("take up to 65 seconds in the air"), windowNotes[0].what);
+  assert.ok(windowNotes[0].what.includes("aamio transport profile add sealed-slow --window 480 --lifetime 3600"), windowNotes[0].what);
+  assert.ok(windowNotes[0].what.includes("aamio transport bind d lan --profile sealed-slow"), windowNotes[0].what);
   assert.equal(await code(Promise.resolve().then(() => transports.profileAdd(c, "short", { lifetime: 20, window: 30 }))), "transport_profile_invalid");
   assert.equal(await code(Promise.resolve().then(() => transports.profileAdd(c, "Big Name"))), "transport_profile_invalid");
   assert.equal(await code(Promise.resolve().then(() => transports.profileRemove(c, "sealed"))), "transport_profile_in_use");

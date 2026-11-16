@@ -400,12 +400,23 @@ export class TransportProcess {
  * Frames from the medium, sorted by tag into envelopes, within the limits of A10. A copy of a frame already held is not
  * held again, and room is made before a frame is held, so what is held never passes FRAME_BYTES, whatever comes before
  * anything is verified.
+ *
+ * A group is let go FRAME_SECONDS after its first frame, or on a slow medium after twice the time its frames take there,
+ * whichever is longer. frameSeconds is a full frame's time on the medium, as the transport's rate says. Over sound a
+ * frame takes 16 seconds and more, so a message of more than six frames could never be put together within 120 seconds,
+ * and went again and again for nothing.
  */
 export class Reassembly {
-  constructor(clock = realSeconds) {
+  constructor(clock = realSeconds, frameSeconds = 0) {
     this.clock = clock;
-    this.groups = new Map();   // tag -> { first, frames: Map(index -> frame), bytes }
+    this.frameSeconds = frameSeconds;
+    this.groups = new Map();   // tag -> { first, frames: Map(index -> frame), bytes, count }
     this.dropped = 0;          // groups and frames let go to stay within A10, counted
+  }
+
+  /** How long a group of count frames is kept after its first frame. */
+  lifetime(count) {
+    return Math.max(FRAME_SECONDS, 2 * count * this.frameSeconds);
   }
 
   held() {
@@ -416,7 +427,7 @@ export class Reassembly {
 
   add(frame) {
     const now = this.clock();
-    for (const [tag, group] of this.groups) if (now - group.first > FRAME_SECONDS) this.groups.delete(tag);
+    for (const [tag, group] of this.groups) if (now - group.first > this.lifetime(group.count)) this.groups.delete(tag);
     if (frame.length < carry.FRAME_HEADER + 1) throw new CarryRefused("frame_bad_length");
     const tag = Array.from(frame.slice(3, 7)).join(",");
     const index = frame[7];
@@ -438,7 +449,7 @@ export class Reassembly {
       if (oldest === tag) group = undefined;
     }
     if (!group) {
-      group = { first: now, frames: new Map(), bytes: 0 };
+      group = { first: now, frames: new Map(), bytes: 0, count: frame[8] };
       this.groups.set(tag, group);
     }
     group.frames.set(index, frame);

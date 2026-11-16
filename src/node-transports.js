@@ -36,6 +36,8 @@ export const UNBOUND_CHANNEL = "carry";
 // bindings: a partner removed meanwhile is taken from no longer than this after, and a transport nobody is bound to any
 // more runs no longer than this after.
 export const KNOWN_REFRESH = 2;
+// The window a profile for a slow medium is told to give, at the least.
+export const CHALLENGE_WINDOW_SLOW = 300;
 // How long a transport that stopped waits before it is started again, and how long a send waits; a test may shorten them.
 export const timing = { restartAfter: [1, 5, 30], waitDefault: 30 };
 
@@ -371,6 +373,46 @@ export class Service {
    * What a carrier has to tell the user, as a message that is not sent again: in attention under the transport's name,
    * where a read shows it, and in the log, where a command that sends and ends shows it.
    */
+  /**
+   * Say it when a partner's profile gives a challenge less time than this medium needs for it and its open.
+   *
+   * Over sound a challenge and its open take close to a minute in the air alone, and two with the waits for a turn, and the
+   * profile sealed gives 60 seconds: most opens would come too late and be turned down, few sessions would open, and sends
+   * would end in carry_not_sent or without a receipt, with nothing to say why. Not private, so a test can give it a
+   * carrier over a slow medium.
+   */
+  checkWindows(name, carrier) {
+    const need = carrier.handshakeSeconds();
+    if (need <= 0) return;
+    let bindings;
+    try {
+      bindings = this.config.bindings();
+    } catch {
+      return;
+    }
+    for (const [key, routes] of Object.entries(bindings)) {
+      const route = routes.find((candidate) => candidate.transport === name);
+      const partner = this.runtime.partnerByKey(key);
+      if (!route || partner === null || partner === undefined) continue;
+      let window;
+      try {
+        window = checked(this.config.profile(route.profile)).challengeWindow;
+      } catch {
+        continue;
+      }
+      if (window >= need) continue;
+      // Long enough for an open to have three tries, in whole minutes, as long as a profile can give at the most.
+      const longer = Math.min(Math.max(CHALLENGE_WINDOW_SLOW, Math.ceil(carrier.windowForOpens() / 60) * 60), 600);
+      const text = `the profile ${route.profile} gives a challenge ${window} seconds to be answered, and on ${name} a challenge and its open take up `
+        + `to ${Math.floor(carrier.airtimeOfHandshake())} seconds in the air, more with the waits for a turn: most sessions with ${partner.name} cannot `
+        + `open, and a send to ${partner.name} ends in carry_not_sent or gets no receipt. A window of ${longer} seconds gives an open three tries: `
+        + `aamio transport profile add ${route.profile}-slow --window ${longer} --lifetime 3600, then aamio transport unbind ${partner.name} and `
+        + `aamio transport bind ${partner.name} ${name} --profile ${route.profile}-slow`;
+      this.runtime.log?.(`transport ${name}: ${text}`);
+      if (typeof this.runtime.note === "function") this.runtime.note(name, "window_too_short", text);
+    }
+  }
+
   #say(name, text) {
     this.runtime.log?.(`transport ${name}: ${text}`);
     if (typeof this.runtime.note === "function") this.runtime.note(name, "not_sent_again", text);
@@ -431,6 +473,7 @@ export class Service {
           { log: (line) => this.runtime.log?.(line), note: (text) => this.#say(name, text) });
         entry.process = transport;
         this.runtime.log?.(`transport ${name}: up`);
+        this.checkWindows(name, entry.carrier);
       } catch (error) {
         await transport.stop();
         if (error instanceof TransportFailed) {
@@ -551,16 +594,24 @@ export class Service {
    * how far it came, and for the trace its size and whether it went sealed. The sha256 is the one the partner's runtime
    * reads it under and names as seen once it has read it.
    *
+   * With stretch, the wait is as long as the medium needs as well, once its carrier is up and has said its rate: a session
+   * and a message over sound take minutes. waited says how long it was.
+   *
    * status is confirmed when the receipt came, handed_over when every frame of a try was given to the medium and no
    * receipt came within wait, queued when the message waits in the outbox for room, and unknown when its tries are used
    * without a receipt. A partner that gives no challenge within wait gets nothing: carry_not_sent.
    */
-  async send(pk, content, wait = timing.waitDefault) {
+  async send(pk, content, wait = timing.waitDefault, stretch = false) {
     const route = this.routeOf(pk);
     if (!route) throw coded("transport_unbound", "that partner has no transport");
     const name = route.transport;
-    const until = now() + wait;
+    const began = now();
+    let until = began + wait;
     await this.start();
+    if (stretch && (await this.wait(() => this.#carrierOf(name) !== null, until))) {
+      const carrier = this.#carrierOf(name);
+      if (carrier) until = Math.max(until, began + carrier.patience(content.length));
+    }
     let asked = null;
     const opened = () => {
       // A carrier that started again after a stop knows nothing of the ask, so it asks again.
@@ -568,13 +619,15 @@ export class Service {
       if (!carrier) return false;
       if (this.#session(carrier, pk) !== null) return true;
       if (asked !== carrier) {
-        carrier.open(pk);
+        // An ask under way, as one an earlier send made before it gave up, is answered all the same: a new one beside it
+        // only adds frames, and on a half-duplex medium they take each other's turns.
+        if (!carrier.asking(pk)) carrier.open(pk);
         asked = carrier;
       }
       return false;
     };
     if (!(await this.wait(opened, until))) {
-      throw coded("carry_not_sent", `the partner did not answer on ${name} within ${wait} seconds, so nothing was sent. Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ${name}`);
+      throw coded("carry_not_sent", `the partner did not answer on ${name} within ${Math.floor(until - began)} seconds, so nothing was sent. Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ${name}`);
     }
     const carrier = this.#carrierOf(name);
     let key;
@@ -591,7 +644,8 @@ export class Service {
     await this.wait(() => state.outcome(key) !== "waiting", until);
     let outcome = state.outcome(key);
     if (outcome === "waiting") outcome = this.running.get(name)?.carrier?.handedOver(key) ? "handed_over" : "queued";
-    return { via: name, profile: route.profile, mark: key, status: outcome, sha256: written.sha256, bytes: envelope.length, sealed: envelope[MAGIC.length] === SEALED };
+    return { via: name, profile: route.profile, mark: key, status: outcome, sha256: written.sha256, bytes: envelope.length, sealed: envelope[MAGIC.length] === SEALED,
+      waited: Math.floor(until - began) };
   }
 
   /** What was sent over a transport, as aamio transport list shows it: mark and outcome, oldest first. */
