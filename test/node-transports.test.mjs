@@ -30,6 +30,7 @@ import { FakeAamio } from "./fake-aamio.mjs";
 const bin = fileURLToPath(new URL("../bin/aamio.js", import.meta.url));
 const lanDir = fileURLToPath(new URL("../addons/lan/", import.meta.url));
 const NOWHERE = "http://127.0.0.1:9";
+const bytes = (value) => new TextEncoder().encode(value);
 
 async function freePorts(count) {
   const sockets = [];
@@ -149,6 +150,20 @@ async function commandsOn(c, d, homes) {
   assert.ok(windowNotes[0].what.includes("take up to 65 seconds in the air"), windowNotes[0].what);
   assert.ok(windowNotes[0].what.includes("aamio transport profile add sealed-slow --window 480 --lifetime 3600"), windowNotes[0].what);
   assert.ok(windowNotes[0].what.includes("aamio transport bind d lan --profile sealed-slow"), windowNotes[0].what);
+  // Over MCP, decided 17 November 2026: a send whose wait ran out before a session could open on a slow medium says that
+  // the ask goes on and when its answer is due. A carrier over sound stands in for the running transport.
+  const service = c.transportService();
+  const askingCarrier = new Carrier(new CarryState(c.keys), { name: "lan", properties: slowWire.properties }, profile({ mode: "sealed" }), [d.keys.publicRaw]);
+  askingCarrier.open(d.keys.publicRaw);
+  const runningBefore = service.running.get("lan");
+  service.running.set("lan", { manifest: null, process: null, carrier: askingCarrier, crashes: [], next: 0, down: null });
+  const hint = service.notSentHint("lan", d.keys.publicRaw, bytes("hei"), 5);
+  const afterPatience = service.notSentHint("lan", d.keys.publicRaw, bytes("hei"), 400);
+  if (runningBefore === undefined) service.running.delete("lan");
+  else service.running.set("lan", runningBefore);
+  const due = /due in about (\d+) seconds: send again then/.exec(hint);
+  assert.ok(hint.includes("The ask for a session is still under way on lan") && due && Number(due[1]) >= 125 && Number(due[1]) <= 200, hint);
+  assert.equal(afterPatience, "");
   assert.equal(await code(Promise.resolve().then(() => transports.profileAdd(c, "short", { lifetime: 20, window: 30 }))), "transport_profile_invalid");
   assert.equal(await code(Promise.resolve().then(() => transports.profileAdd(c, "Big Name"))), "transport_profile_invalid");
   assert.equal(await code(Promise.resolve().then(() => transports.profileRemove(c, "sealed"))), "transport_profile_in_use");

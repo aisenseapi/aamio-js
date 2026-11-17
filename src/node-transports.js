@@ -627,7 +627,8 @@ export class Service {
       return false;
     };
     if (!(await this.wait(opened, until))) {
-      throw coded("carry_not_sent", `the partner did not answer on ${name} within ${Math.floor(until - began)} seconds, so nothing was sent. Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ${name}`);
+      const hint = stretch ? "" : this.notSentHint(name, pk, content, until - began);
+      throw coded("carry_not_sent", `the partner did not answer on ${name} within ${Math.floor(until - began)} seconds, so nothing was sent.${hint} Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ${name}`);
     }
     const carrier = this.#carrierOf(name);
     let key;
@@ -646,6 +647,23 @@ export class Service {
     if (outcome === "waiting") outcome = this.running.get(name)?.carrier?.handedOver(key) ? "handed_over" : "queued";
     return { via: name, profile: route.profile, mark: key, status: outcome, sha256: written.sha256, bytes: envelope.length, sealed: envelope[MAGIC.length] === SEALED,
       waited: Math.floor(until - began) };
+  }
+
+  /**
+   * What carry_not_sent adds when the wait was shorter than a send takes on the medium, as over MCP, where it is the work
+   * budget: the ask goes on in the background, and a send after its answer came uses the session it opened. Empty
+   * otherwise. Not private, so a test can give it a carrier over a slow medium.
+   */
+  notSentHint(name, pk, content, waited) {
+    let carrier;
+    try {
+      carrier = this.#carrierOf(name);
+    } catch {
+      return "";
+    }
+    if (!carrier || waited >= carrier.patience(content.length)) return "";
+    const due = carrier.askDue(pk);
+    return due === null ? "" : ` The ask for a session is still under way on ${name}, and its answer is due in about ${Math.max(5, Math.floor(due))} seconds: send again then, and that send uses the session it opens.`;
   }
 
   /** What was sent over a transport, as aamio transport list shows it: mark and outcome, oldest first. */

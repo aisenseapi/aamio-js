@@ -381,6 +381,25 @@ export class CarryState {
     return true;
   }
 
+  /**
+   * Whether a message of this party's in its session with the partner went tries tries without a receipt, or ran out of
+   * them, while no later message in the session has one: then the partner may no longer have the session, as after a
+   * restart, where it is taken as expired (A6.8) and nothing it refuses is answered over the medium (A7).
+   */
+  unanswered(partnerPk, session, tries) {
+    this.#check();
+    const prefix = pairOf(partnerPk, session) + ":";
+    let confirmed = 0;
+    let silent = 0;
+    for (const [key, entry] of Object.entries(this.durable.outbox)) {
+      if (!key.startsWith(prefix)) continue;
+      const counter = Number(key.slice(prefix.length));
+      if (entry.receipt) confirmed = Math.max(confirmed, counter);
+      else if (entry.envelope === null || entry.tries >= tries) silent = Math.max(silent, counter);
+    }
+    return silent > confirmed;
+  }
+
   /** What was sent and waits for its receipt, oldest first: [mark, partner pk, session, counter, envelope]. */
   unconfirmed() {
     this.#check();
@@ -424,9 +443,31 @@ export class CarryState {
 
   // ---------------------------------------------------------- receiving
 
-  #bindingFor(pk, session) {
-    const record = this.durable.incoming[pairOf(pk, session)];
-    return Object.hasOwn(this.durable.incoming, pairOf(pk, session)) && record.challenged ? fromHex(record.nonce) : null;
+  /**
+   * N for a bound message: its session's, or, where the session is not opened, that of a challenge given for it that waits
+   * unused in its window, which the message then opens as an open would (A6.2 point 6).
+   */
+  #bindingFor(pk, session, mono = null) {
+    const pair = pairOf(pk, session);
+    if (Object.hasOwn(this.durable.incoming, pair)) {
+      const record = this.durable.incoming[pair];
+      return record.challenged ? fromHex(record.nonce) : null;
+    }
+    const entry = this.waiting.get(pair);
+    if (entry && mono !== null && !entry.used && mono - entry.t0 <= entry.window) return entry.nonce;
+    return null;
+  }
+
+  /** The session the challenge entry was given for, opened: by its open, or by a bound message that came first. */
+  #opened(pk, pair, entry, profileIn, t) {
+    this.#room(pk);
+    entry.used = true;
+    // The lifetime goes with the session: a profile changed later can shorten it, never lengthen it (A6.6.4).
+    const record = { challenged: true, nonce: toHex(entry.nonce), highest: 0, closed: false, deadline: null, opened: t, closed_at: null, lifetime: profileIn.lifetime };
+    this.durable.incoming[pair] = record;
+    this.#save();
+    this.anchors.set(pair, entry.t0);
+    return record;
   }
 
   /**
@@ -459,7 +500,7 @@ export class CarryState {
 
   #take(envelope, known, profileIn, mono, now, rnd, sealRnd) {
     const t = this.#tick(now);
-    const got = carry.read(envelope, this.keys, known, (pk, session) => this.#bindingFor(pk, session));
+    const got = carry.read(envelope, this.keys, known, (pk, session) => this.#bindingFor(pk, session, mono));
     if (typeof profileIn === "function") profileIn = profileIn(got.sender);
     if (got.mode !== (profileIn.mode === "sealed" ? carry.SEALED : carry.READABLE)) throw new CarryRefused("carry_mode_refused");
     const pk = got.sender;
@@ -513,12 +554,7 @@ export class CarryState {
       // have a longer window (the check of 16 November 2026). A profile changed later neither lengthens nor
       // shortens what was given.
       if (mono - entry.t0 > entry.window) throw new CarryRefused("carry_nonce_expired");
-      this.#room(pk);
-      entry.used = true;
-      // The lifetime goes with the session: a profile changed later can shorten it, never lengthen it (A6.6.4).
-      incoming[pair] = { challenged: true, nonce: toHex(entry.nonce), highest: 0, closed: false, deadline: null, opened: t, closed_at: null, lifetime: profileIn.lifetime };
-      this.#save();
-      this.anchors.set(pair, entry.t0);
+      this.#opened(pk, pair, entry, profileIn, t);
       return ["accepted", null, got];
     }
     if (got.kind === carry.CLOSE) {
@@ -574,6 +610,12 @@ export class CarryState {
     let record = Object.hasOwn(incoming, pair) ? incoming[pair] : null;
     let isNew = false;
     const bound = Boolean(got.flags & carry.BOUND);
+    if (bound && !record) {
+      // carry.read found N in a challenge that waits in its window, and the message is signed over it as an open is: it
+      // opens the session as the open would, with the same t0 (A6.2 point 6, decided 17 November 2026). Over sound the
+      // open was lost in collisions, and the session with it, while the messages behind it came.
+      record = this.#opened(pk, pair, this.waiting.get(pair), profileIn, t);
+    }
     if (!bound && Object.hasOwn(this.durable.outgoing, pair)) throw new CarryRefused("carry_wrong_direction");
     if (!bound) {
       if (record && record.challenged) throw new CarryRefused("carry_binding_mismatch");

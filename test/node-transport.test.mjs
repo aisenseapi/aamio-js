@@ -784,3 +784,57 @@ test("what a slow medium needs for a session and a send is measured in its frame
   assert.deepEqual([fast.handshakeSeconds(), fast.windowForOpens(), fast.patience(12)], [0, 0, 0]);
 });
 
+// ------------------------------------------------------------------ decided 17 November 2026
+
+async function askedAndAnswered(clock, medium, atB, chosen) {
+  const carrier = new Carrier(new CarryState(A), medium, chosen, [B.publicRaw], { clock: clock.read, wall: () => NOW });
+  const session = carrier.open(B.publicRaw);
+  await carrier.pump(0);
+  const [, challenge] = atB.deliver(carry.reassemble(medium.given), [A.publicRaw], chosen, 0, NOW);
+  heard(medium, challenge);
+  await carrier.pump(0);
+  assert.ok(carry.equal(carrier.usableSession(B.publicRaw, 3600), session));
+  return { carrier, session };
+}
+
+test("a session a message went three tries in without a receipt takes no new message", async () => {
+  // B started again takes A's session as expired (A6.8) and refuses what comes in it without a word over the medium
+  // (A7). Once a message in it has gone three tries without a receipt, the next message asks for a new session; a receipt
+  // that comes after all makes the session usable again.
+  const clock = new Clock();
+  const atB = new CarryState(B);
+  const medium = new Medium(1000, 128);
+  const { carrier, session } = await askedAndAnswered(clock, medium, atB, sealed);
+  const key = carrier.send(B.publicRaw, session, bytes("hei"));
+  await carrier.pump(0);
+  clock.now += 2.1;
+  await carrier.pump(0);
+  assert.ok(carry.equal(carrier.usableSession(B.publicRaw, 3600), session), "two tries without a receipt: the session still takes messages");
+  clock.now += 2.1;
+  await carrier.pump(0);
+  assert.equal(carrier.state.durable.outbox[key].tries, 3);
+  assert.equal(carrier.usableSession(B.publicRaw, 3600), null, "three: the next message asks for a new session");
+  const [, receipt] = atB.deliver(keptEnvelope(carrier.state, key), [A.publicRaw], sealed, 10, NOW);
+  heard(medium, receipt);
+  await carrier.pump(0);
+  assert.ok(carrier.confirmed(key) && carry.equal(carrier.usableSession(B.publicRaw, 3600), session), "the receipt came after all");
+});
+
+test("a bound message whose open was lost opens its session, and the challenge goes no more", async () => {
+  // Over sound the open was lost in collisions, the session with it, and the messages behind it were refused. A bound
+  // message is signed over the challenge as the open is, so it opens the session itself, and the challenge stops.
+  const clock = new Clock();
+  const atA = new CarryState(A);
+  const medium = new Medium(1000, 128);
+  const carrier = new Carrier(new CarryState(B), medium, sealed, [A.publicRaw], { clock: clock.read, wall: () => NOW });
+  const [session, ask] = atA.ask(B.publicRaw, sealed, 0);
+  heard(medium, ask);
+  await carrier.pump(0);
+  assert.deepEqual([...carrier.control.values()].map((entry) => entry.kind), ["challenge"]);
+  atA.deliver(carry.reassemble(medium.given), [B.publicRaw], sealed, 0, NOW);
+  heard(medium, atA.send(B.publicRaw, session, bytes("hei uten open"), sealed));
+  await carrier.pump(0);
+  assert.deepEqual(carrier.inbox.map((entry) => new TextDecoder().decode(entry[3])), ["hei uten open"]);
+  assert.equal(carrier.control.size, 0, "the challenge is not sent again: the message opened the session");
+});
+

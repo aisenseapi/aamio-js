@@ -41,6 +41,10 @@ export const JITTER = 0.5;
 // How much longer than the bare time on the medium a wait gives: a half-duplex medium takes turns, and what is heard has
 // to be read before it is answered.
 export const SLACK = 2;
+// A session a message went this many tries in without a receipt, with no later message in it confirmed, takes no new
+// message: the partner may have started again and taken it as expired (A6.8), and what it refuses is never answered over
+// the medium (A7), so every message after would be lost in it too. The next one asks for a new session.
+export const UNANSWERED_TRIES = 3;
 const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 const pairOf = (pk, session) => toHex(pk) + ":" + toHex(session);
 
@@ -201,12 +205,23 @@ export class Carrier {
     return found;
   }
 
-  /** The newest session of this party's with the partner whose challenge came less than seconds ago, or null. */
+  /**
+   * The newest session of this party's with the partner whose challenge came less than seconds ago, or null. Null too when
+   * a message in it went UNANSWERED_TRIES tries without a receipt and nothing later in it was confirmed (A7): the next
+   * message asks for a new session.
+   */
   usableSession(partnerPk, seconds) {
     let found = null;
     const now = this.clock();
     for (const [pk, session, at] of this.answered.values()) if (carry.equal(pk, partnerPk) && now - at < seconds) found = session;
+    if (found !== null && this.state.unanswered(partnerPk, found, UNANSWERED_TRIES)) return null;
     return found;
+  }
+
+  /** Seconds until the answer to the ask under way with the partner is due on this medium, or null without one. */
+  askDue(partnerPk) {
+    const due = [...this.asks.values()].filter((entry) => carry.equal(entry.pk, partnerPk)).map((entry) => entry.next);
+    return due.length === 0 ? null : Math.max(0, Math.min(...due) - this.clock());
   }
 
   /** A message in an open session, sent again with the same bytes until its receipt comes: its mark. */
@@ -325,6 +340,9 @@ export class Carrier {
       this.#settled(pair, "open");
       return;
     }
+    // A message: its receipt goes back. A bound one may have opened its session itself, its open lost (A6.2 point 6), so the
+    // challenge is not sent again either.
+    this.#settled(pair, "challenge");
     if (reply) this.#queue(reply, source);
   }
 
