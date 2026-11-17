@@ -114,3 +114,26 @@ test("every module the command line reaches is in the package", () => {
   assert.deepEqual(missing, [], "reached and not in package.json's files");
   assert.ok(reached.has("src/node-doctor.js") && reached.size > 10, [...reached].join(", "));
 });
+
+test("transport profile add and remove are two commands, as in aamio-python and aamio-php", (t) => {
+  // The release check of 17 November 2026: the command overview named them as one command here, with add or remove as
+  // its first argument, and as two in the other two runtimes. What a user types is the same in all three.
+  const dir = mkdtempSync(join(tmpdir(), "aamio-cli-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, "home");
+  assert.equal(cli(home, ["--home", home, "init"]).status, 0);
+  const added = cli(home, ["--home", home, "transport", "profile", "add", "sound", "--window", "480", "--lifetime", "3600"]);
+  assert.equal(added.status, 0, added.stderr);
+  assert.deepEqual([JSON.parse(added.stdout).profile.challenge_window, JSON.parse(added.stdout).profile.lifetime], [480, 3600]);
+  for (const args of [["transport", "profile", "sound"], ["transport", "profile"], ["transport", "profile", "remove", "sound", "--window", "60"],
+    ["transport", "profile", "add"], ["transport", "profile", "remove", "sound", "other"]]) {
+    const refused = cli(home, ["--home", home, ...args]);
+    assert.equal(refused.status, 2, `${args.join(" ")}: ${refused.stderr}`);
+    assert.equal(refused.stdout, "");
+  }
+  const removed = cli(home, ["--home", home, "transport", "profile", "remove", "sound"]);
+  assert.equal(removed.status, 0, removed.stderr);
+  const listed = JSON.parse(cli(home, ["--home", home, "transport", "list"]).stdout);
+  assert.ok(!JSON.stringify(listed.profiles ?? listed).includes('"sound"'), JSON.stringify(listed));
+});
+

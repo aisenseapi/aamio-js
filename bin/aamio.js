@@ -125,11 +125,14 @@ const SPEC = {
   "board channel": { positional: ["key"], options: ["--ttl", "--reply-to", "--note"] },
   archive: { positional: ["policy"], optional: 1, options: ["--max-mb"], switches: ["--all"] },
   "transport list": { positional: [] },
-  "transport profile": { positional: ["action", "name"], options: ["--lifetime", "--window", "--max-content"], switches: ["--readable"] },
+  "transport profile add": { positional: ["name"], options: ["--lifetime", "--window", "--max-content"], switches: ["--readable"] },
+  "transport profile remove": { positional: ["name"] },
   "transport bind": { positional: ["partner", "transport"], options: ["--profile"] },
   "transport unbind": { positional: ["partner", "transport"], optional: 1 },
 };
 const GROUPS = ["partner", "outbox", "board", "scope", "channel", "transport"];
+// Commands one word deeper, as aamio-python and aamio-php have them: transport profile add and transport profile remove.
+const SUBGROUPS = ["transport profile"];
 
 function parse(argv) {
   let home;
@@ -164,7 +167,8 @@ function parse(argv) {
   if (args.length === 1 && args[0] === "--version") return { command: "version" };
   // An add-on's commands are its manifest's to say, so the words after addon are read later, against it.
   if (args[0] === "addon") return { command: "addon", home: resolve(home ?? (process.env.AAMIO_HOME || join(homedir(), ".aamio"))), host, words: args.slice(1), archive };
-  const command = GROUPS.includes(args[0]) ? `${args[0]} ${args[1] ?? ""}`.trim() : args[0];
+  let command = GROUPS.includes(args[0]) ? `${args[0]} ${args[1] ?? ""}`.trim() : args[0];
+  if (SUBGROUPS.includes(command)) command = `${command} ${args[2] ?? ""}`.trim();
   const spec = SPEC[command];
   if (!spec) throw new Error(`Expected one of: ${Object.keys(SPEC).join(", ")}. Run aamio --help for usage.`);
   const positional = [];
@@ -433,16 +437,13 @@ function plan(command, positional, options) {
       return (runtime) => runtime.scopeRemove(first);
     case "transport list":
       return (runtime) => transportListing(runtime);
-    case "transport profile": {
-      if (!["add", "remove"].includes(first)) throw wrong("transport profile add NAME [--readable] [--lifetime N] [--window N] [--max-content N], or transport profile remove NAME.");
-      if (first === "remove") {
-        if (["readable", "lifetime", "window", "max-content"].some((name) => name in options)) throw wrong("transport profile remove takes the name and nothing else.");
-        return (runtime) => profileRemove(runtime, second);
-      }
+    case "transport profile add": {
       const chosen = { readable: options.readable === true, lifetime: whole(options.lifetime, "--lifetime", 11, 86400) ?? null,
         window: whole(options.window, "--window", 10, 600) ?? null, maxContent: whole(options["max-content"], "--max-content", 0, 65431) ?? null };
-      return (runtime) => profileAdd(runtime, second, chosen);
+      return (runtime) => profileAdd(runtime, first, chosen);
     }
+    case "transport profile remove":
+      return (runtime) => profileRemove(runtime, first);
     case "transport bind":
       return (runtime) => transportBind(runtime, first, second, options.profile ?? null);
     case "transport unbind":
