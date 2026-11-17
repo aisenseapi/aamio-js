@@ -599,6 +599,7 @@ are the exact ones the site served, since a list is checked as it was published.
 A partner can be bound to a transport. Messages to it then go over that medium and never over HTTPS, and messages from it come in over it. The add-on `aamio-lan` carries them over the local network, and `earshot-link` in `aamio-earshot` carries them as sound, between a speaker and a microphone, in aamio-python for now. The core seals each message to the partner's key and signs it, opens a session with a challenge so nothing old can be played again, and takes a signed receipt from the partner's runtime; the transport only moves frames. https://aamio.at/docs/addons#transports says what a transport is, what the others on the medium can see, and how to write one.
 
 ```bash
+npx aamio init
 npm install --prefix ~/.aamio/addon-packages/npm --ignore-scripts aamio-lan
 npx aamio addon enable lan
 npx aamio transport bind nordlys lan

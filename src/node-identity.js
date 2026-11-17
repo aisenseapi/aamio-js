@@ -11,6 +11,12 @@ function identityError(code, message) {
 
 const missingHome = () => identityError("home_not_initialized", "No Aamio home exists at the selected path.");
 const badKey = () => identityError("key_unreadable", "The Aamio home must contain a readable key file with a 64-character lowercase hexadecimal seed.");
+// A folder with no key file at all, as one that got its add-ons before its identity: the same refusal, said as it is,
+// with what makes the home. aamio makes an identity only in a folder that is not there yet (the release check of
+// 17 November 2026).
+const noKey = (home) => identityError("key_unreadable", `${home} has no key file, so it has no identity yet. aamio makes a home only in a folder that is not there yet, `
+  + `so that nothing is in it before the key. Move the folder aside, run aamio --home "${home}" init, and move what you want to keep from it, `
+  + "such as addon-packages, into the new home.");
 const initFailed = () => identityError("home_init_failed", "Could not create a private Aamio home. Choose a new directory under an existing writable parent on a local disk.");
 
 function publicIdentity(keys) {
@@ -34,8 +40,16 @@ export async function readKeys(home) {
 
   const file = join(home, "key");
   let handle;
+  let absent = false;
   try {
-    if (!(await lstat(file)).isFile()) throw badKey();
+    let entry;
+    try {
+      entry = await lstat(file);
+    } catch (error) {
+      absent = error.code === "ENOENT";
+      throw error;
+    }
+    if (!entry.isFile()) throw badKey();
     handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size < 64 || stat.size > 4096) throw badKey();
@@ -52,7 +66,7 @@ export async function readKeys(home) {
     if (!match) throw badKey();
     return Keys.fromSeedHex(match[1]);
   } catch {
-    throw badKey();
+    throw absent ? noKey(home) : badKey();
   } finally {
     if (handle) await handle.close();
   }

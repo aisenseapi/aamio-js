@@ -55,6 +55,28 @@ test("missing, empty, incomplete and corrupt homes are distinguished without rep
   }
 });
 
+test("a home folder that holds no key file says so, and how to make the home, and nothing is written", async (t) => {
+  // The release check of 17 November 2026: the README for transports installs the add-on into the home's
+  // addon-packages first, so the folder is there before any key. Refused as before, and said as it is.
+  const { home } = await fixture(t);
+  await mkdir(join(home, "addon-packages", "npm"), { recursive: true });
+  for (const action of [readIdentity, initIdentity]) {
+    await assert.rejects(action(home), (error) => {
+      assert.equal(error.code, "key_unreadable");
+      assert.match(error.message, /has no key file/);
+      assert.ok(error.message.includes(`aamio --home "${home}" init`), error.message);
+      return true;
+    });
+  }
+  assert.deepEqual(await readdir(home), ["addon-packages"]);
+  await writeFile(join(home, "key"), "not a seed");
+  await assert.rejects(readIdentity(home), (error) => {
+    assert.equal(error.code, "key_unreadable");
+    assert.ok(!error.message.includes("has no key file") && !error.message.includes("not a seed"), error.message);
+    return true;
+  });
+});
+
 test("racing initializers publish one complete private identity and remove their staging folders", async (t) => {
   const { root, home } = await fixture(t);
   const results = await Promise.all(Array.from({ length: 4 }, () => initIdentity(home)));

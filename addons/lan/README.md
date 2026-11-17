@@ -13,14 +13,17 @@ the core then verifies and refuses when they are not from a partner.
 ## Use
 
 ```bash
+aamio --home "<home>" init
 npm install --prefix "<home>/addon-packages/npm" --ignore-scripts aamio-lan
 aamio addon enable lan
 aamio partner add NAME KEY
 aamio transport bind NAME lan
 ```
 
-From then on a message to that partner goes over the local network, and never
-over HTTPS instead. The partner binds your key the same way. Only the process
+init first, on a new machine: aamio makes a home only in a folder that is not
+there yet, and the install puts the add-on inside the home. From then on a
+message to that partner goes over the local network, and never over HTTPS
+instead. The partner binds your key the same way. Only the process
 that owns the home runs the transport: `aamio serve`, and `aamio send` or
 `aamio read --wait` while they run.
 
