@@ -696,7 +696,8 @@ test("follow-up finding 4, through the runtime: a carrier state that cannot be r
 test("a send and a read over a transport go whole when the trace and the archive cannot be written", async (t) => {
   // The release check of 17 November 2026, point 2. The trace and the archive record a send and a read; they are not the
   // send or the read. With both failing at every write the message still goes, is read once, and both sides are told
-  // what was not written: in the answer, and in attention.
+  // what was not written: in the answer, and in attention. This held before the test was written, and the test is here
+  // so that it stays so.
   const { a, b } = await homes(t);
   await b.startTransports();
   const failing = (runtime, tried) => {

@@ -117,7 +117,9 @@ test("every module the command line reaches is in the package", () => {
 
 test("transport profile add and remove are two commands, as in aamio-python and aamio-php", (t) => {
   // The release check of 17 November 2026: the command overview named them as one command here, with add or remove as
-  // its first argument, and as two in the other two runtimes. What a user types is the same in all three.
+  // its first argument, and as two in the other two runtimes. What a user types is the same in all three, and was so
+  // before: this test keeps what is typed and refused as it was, and the service's self-test is the check that failed on
+  // the old naming.
   const dir = mkdtempSync(join(tmpdir(), "aamio-cli-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const home = join(dir, "home");
