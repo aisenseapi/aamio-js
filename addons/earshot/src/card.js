@@ -20,6 +20,14 @@
  * and must never be taken for one on this. The longest card is 80 bytes, of
  * the 128 a sound can carry. The same as aamio-python's aamio_earshot.card and
  * aamio-php's Aamio\Earshot\Card.
+ *
+ * From 0.5.0 a card may say more, when the one who plays it asks: v, the media
+ * they prefer answers over, in order, at most three (internet, or a transport's
+ * medium as its manifest names it, lan or sound today), and k, their public
+ * key, which a listener binds a transport to; a card that names a medium other
+ * than internet carries it. A medium a listener has no transport for is said
+ * rather than refused. Such a card is up to 128 bytes, and only earshot 0.5.0
+ * and newer reads it. k refuses the shape of a scope's key or a read key.
  */
 
 export const PREFIX = "aamio:scope/";
@@ -30,6 +38,16 @@ export const KEY_SHAPED = /^[a-z0-9]{26,64}$/;
 // Unix seconds, as a card carries them: nine to eleven digits.
 export const EXPIRY = /^[0-9]{9,11}$/;
 export const MAX_BYTES = 128;
+// The media a card may ask answers over: internet, or a transport's medium as its manifest names it.
+export const MEDIUM = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+export const INTERNET = "internet";
+export const VIA_MOST = 3;
+// A public key as aamio prints it: 32 bytes of Ed25519 in base64url without padding.
+export const PUBLIC_KEY = /^[A-Za-z0-9_-]{43}$/;
+const VIA_FIX = "via is the media you prefer answers over, in order, at most three and each once: internet, the scope over aamio.at, "
+  + "or the medium of a transport, lan or sound. As text they are separated by commas, as lan,internet.";
+const KEY_FIX = "key is your public key, the 43 characters aamio whoami shows as key. A card that names a medium other than internet "
+  + "carries it, and everyone within earshot hears it.";
 
 /** Input refused here, before anything was sent anywhere. */
 export class Refused extends Error {
@@ -62,10 +80,47 @@ export function checkName(name) {
   throw new Refused("invalid_name", "The name is a hint the listeners may keep the scope under: 1 to 32 letters, digits, dots, underscores and dashes, starting with a letter or a digit. It can be left out.");
 }
 
-/** The card for a scope's write address, good until expires (Unix seconds) when given, or Refused. */
-export function make(address, name = null, expires = null) {
+/** The media in a v, or null when the text is not one. */
+function mediaOf(via) {
+  const media = via.split(",");
+  if (media.length > VIA_MOST || new Set(media).size !== media.length || media.some((medium) => !MEDIUM.test(medium))) return null;
+  return media;
+}
+
+/** The media a card asks answers over, or null. internet alone is what a card without v says, so it adds nothing. */
+export function checkVia(via) {
+  if (via === null || via === undefined || via === "" || (Array.isArray(via) && via.length === 0)) return null;
+  const text = Array.isArray(via) && via.every((medium) => typeof medium === "string") ? via.join(",") : via;
+  const media = typeof text === "string" ? mediaOf(text) : null;
+  if (media === null) throw new Refused("invalid_via", VIA_FIX);
+  return media.length === 1 && media[0] === INTERNET ? null : media;
+}
+
+/** Whether key is a public key as aamio prints it, and not a secret of the shape a card refuses. */
+function isPublic(key) {
+  if (typeof key !== "string" || !PUBLIC_KEY.test(key) || KEY_SHAPED.test(key)) return false;
+  const raw = Buffer.from(key, "base64url");
+  return raw.length === 32 && raw.toString("base64url") === key;
+}
+
+export function checkKey(key) {
+  if (key === null || key === undefined || key === "") return null;
+  if (typeof key === "string" && KEY_SHAPED.test(key)) {
+    throw new Refused("a_key_not_a_public_key", "That has the shape of a scope's key or a thread's read key, and those never go into the air: anyone who recorded the sound could read with it. Give your public key, the 43 characters aamio whoami shows as key.");
+  }
+  if (!isPublic(key)) throw new Refused("invalid_key", KEY_FIX);
+  return key;
+}
+
+/**
+ * The card for a scope's write address, good until expires (Unix seconds) when given, or Refused. via and key make the
+ * card of 0.5.0; without them it is the card earlier versions made.
+ */
+export function make(address, name = null, expires = null, via = null, key = null) {
   const checked = checkAddress(address);
   const named = checkName(name);
+  const media = checkVia(via);
+  const carried = checkKey(key);
   const parts = named ? ["n=" + named] : [];
   if (expires !== null && expires !== undefined) {
     if (typeof expires !== "number" || !Number.isInteger(expires) || !EXPIRY.test(String(expires))) {
@@ -73,17 +128,28 @@ export function make(address, name = null, expires = null) {
     }
     parts.push("t=" + expires);
   }
-  return PREFIX + checked + (parts.length ? "?" + parts.join("&") : "");
+  const beside = media === null ? [] : media.filter((medium) => medium !== INTERNET);
+  if (beside.length && carried === null) {
+    throw new Refused("key_needed", `A card that asks for answers over ${beside.join(", ")} carries the public key a listener binds that medium to. ${KEY_FIX}`);
+  }
+  if (media !== null) parts.push("v=" + media.join(","));
+  if (carried !== null) parts.push("k=" + carried);
+  const text = PREFIX + checked + (parts.length ? "?" + parts.join("&") : "");
+  const size = Buffer.byteLength(text, "utf8");
+  if (size > MAX_BYTES) {
+    throw new Refused("card_too_long", `The card would be ${size} bytes, and one sound carries ${MAX_BYTES}: shorten the name or leave it out, or name fewer media.`);
+  }
+  return text;
 }
 
-/** The card in what was heard, as {kind: "scope", address, name, expires_at}, or NotUnderstood. */
+/** The card in what was heard, as {kind: "scope", address, name, expires_at}, with via and key when it carries them, or NotUnderstood. */
 export function read(text) {
   if (typeof text !== "string" || !text.startsWith(PREFIX)) throw new NotUnderstood("not_an_aamio_card");
   const rest = text.slice(PREFIX.length);
   const mark = rest.indexOf("?");
   const address = mark < 0 ? rest : rest.slice(0, mark);
   if (!ADDRESS.test(address)) throw new NotUnderstood("not_a_write_address");
-  const found = { n: null, t: null };
+  const found = { n: null, t: null, v: null, k: null };
   const seen = new Set();
   if (mark >= 0) {
     for (const part of rest.slice(mark + 1).split("&")) {
@@ -94,8 +160,14 @@ export function read(text) {
       const value = part.slice(equals + 1);
       if (key === "n" && !NAME.test(value)) throw new NotUnderstood("invalid_name");
       if (key === "t" && !EXPIRY.test(value)) throw new NotUnderstood("invalid_expiry");
+      if (key === "v" && mediaOf(value) === null) throw new NotUnderstood("invalid_via");
+      if (key === "k" && !isPublic(value)) throw new NotUnderstood("invalid_key");
       found[key] = value;
     }
   }
-  return { kind: "scope", address, name: found.n, expires_at: found.t !== null ? Number(found.t) : null };
+  const heard = { kind: "scope", address, name: found.n, expires_at: found.t !== null ? Number(found.t) : null };
+  // A card without v and k reads as it always did, and one with them says them.
+  if (found.v !== null) heard.via = found.v.split(",");
+  if (found.k !== null) heard.key = found.k;
+  return heard;
 }

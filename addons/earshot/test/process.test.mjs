@@ -72,7 +72,7 @@ const run = (asked, w = world()) => process_.handle(asked, w.seams);
 
 test("the probe names the add-on, and card makes the text without sound or network", async () => {
   assert.deepEqual(await process_.handle(request("probe", "probe")), { result: { ok: true, name: "earshot", version: process_.VERSION, aamio_addon: 2 }, exit_code: 0, is_error: false });
-  assert.equal(process_.VERSION, "0.4.0");
+  assert.equal(process_.VERSION, "0.5.0");
   const w = world();
   let said = await run(request("command", "card", { address: ADDRESS, name: "rom-42" }), w);
   assert.deepEqual(said, {
@@ -441,3 +441,49 @@ test("the length of a WAV is read from its header", () => {
   assert.equal(process_.secondsOf(Buffer.from("RIFF0000WAVE")), null);
   assert.ok(service.isWav(wav(0.1)) && !service.isWav(Buffer.from("ID3 not a wav")) && !service.isWav("RIFF0000WAVE"));
 });
+
+// The card of 0.5.0 through the process, as in aamio-python and aamio-php.
+const KEY = "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ";
+const OTHER_KEY = "5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA";
+
+test("the card command puts the media and the key given on the card", async () => {
+  let said = await run(request("command", "card", { address: ADDRESS, name: "rom-42", via: "lan,internet", key: KEY }));
+  assert.equal(said.result.card, `aamio:scope/${ADDRESS}?n=rom-42&t=${NOW + 3600}&v=lan,internet&k=${KEY}`);
+  assert.ok(said.result.note.includes("lan, then internet") && said.result.note.includes("0.5.0") && said.result.note.includes("public key"), said.result.note);
+  said = await run(request("command", "card", { address: ADDRESS, name: "rom-42" }));
+  assert.ok(!said.result.note.includes("0.5.0"), "a card without via and key is said as it was");
+  said = await run(request("command", "card", { address: ADDRESS, via: "lan" }));
+  assert.deepEqual([said.exit_code, said.result.reason], [2, "key_needed"]);
+  assert.ok(said.result.fix.includes("aamio whoami"));
+});
+
+test("over MCP the key on a card is the runtime's own, and only when a medium needs it", async () => {
+  const tool = (args, own = KEY) => ({ ...request("tool", "aamio_addon_earshot_broadcast", args), own_key: own });
+  const w = world();
+  let said = await run(tool({ address: ADDRESS, via: ["lan", "internet"] }), w);
+  assert.equal(said.exit_code, 0);
+  assert.equal(w.encoded.at(-1)[0], `aamio:scope/${ADDRESS}?t=${NOW + 3600}&v=lan,internet&k=${KEY}`);
+  assert.ok(said.result.note.includes("everyone within earshot hears it"));
+  await run(tool({ address: ADDRESS, via: ["sound"], key: OTHER_KEY }), w);
+  assert.ok(w.encoded.at(-1)[0].endsWith(`&v=sound&k=${KEY}`), "a key given in the call is never the one a tool puts on the card");
+  for (const args of [{ address: ADDRESS }, { address: ADDRESS, via: ["internet"] }]) {
+    await run(tool(args), w);
+    assert.equal(w.encoded.at(-1)[0], `aamio:scope/${ADDRESS}?t=${NOW + 3600}`, "without a medium beside internet the card is today's, own key or not");
+  }
+  said = await run(tool({ address: ADDRESS, via: ["lan"] }, null));
+  assert.deepEqual([said.exit_code, said.result.reason], [2, "key_needed"]);
+});
+
+test("a card heard with media and a key says how to bind, and binds nothing", async () => {
+  const heardCard = `aamio:scope/${ADDRESS}?n=rom-42&t=${NOW + 3600}&v=lan,internet&k=${KEY}`;
+  let said = await run(request("command", "listen"), world({ text: heardCard }));
+  assert.equal(said.exit_code, 0);
+  assert.deepEqual([said.result.card.via, said.result.card.key], [["lan", "internet"], KEY]);
+  for (const words of [`aamio partner add rom-42 ${KEY}`, "aamio transport bind rom-42 TRANSPORT", "the medium lan", "not signed"]) assert.ok(said.result.bind.includes(words), words);
+  assert.ok(said.result.next.includes("aamio scope add rom-42"), "the scope is still the way to answer");
+  said = await run(request("tool", "aamio_addon_earshot_listen"), world({ text: `aamio:scope/${ADDRESS}?n=rom-42&v=lan` }));
+  assert.ok(said.result.bind.includes("carries no key"));
+  said = await run(request("tool", "aamio_addon_earshot_listen"), world({ text: `aamio:scope/${ADDRESS}?n=rom-42` }));
+  assert.ok(!("bind" in said.result) && !("via" in said.result.card), "a card of 0.4.0 is heard as it was");
+});
+
