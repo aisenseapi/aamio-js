@@ -141,9 +141,19 @@ export function traceView(book, limit) {
   return { sent, received, no_read_claim: noClaim, note: traceNote(sentRows, receivedRows, delivered, noClaim, elsewhere) };
 }
 
-/** The transport a send in the trace went over, or null for a send over HTTPS. */
+// The id of a send over a transport is its mark: the partner's key, the session and the counter. Over HTTPS it is "m-"
+// and 16 hex digits, so the two are never taken for each other.
+const CARRIED_ID = /^[0-9a-f]{64}:[0-9a-f]{16}:[0-9]+$/;
+
+/**
+ * The transport a send in the trace went over, or null for a send over HTTPS. A runtime from before the transports keeps
+ * only the fields it knows when it writes the trace again, so via is gone from a row it has written; the row is still
+ * known by its message id, which over a transport is the mark (the release check of 17 November 2026: old and new clients
+ * on one home).
+ */
 export function sentOver(row) {
-  return typeof row?.via === "string" && row.via ? row.via : null;
+  if (typeof row?.via === "string" && row.via) return row.via;
+  return typeof row?.message_id === "string" && CARRIED_ID.test(row.message_id) ? "transport" : null;
 }
 
 /**

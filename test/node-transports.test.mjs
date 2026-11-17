@@ -692,3 +692,36 @@ test("follow-up finding 4, through the runtime: a carrier state that cannot be r
     assert.ok(b.channel("inbox") !== null && !notes.some((note) => note.channel === "inbox"), "the read went on to the inbox");
   }
 });
+
+test("a send and a read over a transport go whole when the trace and the archive cannot be written", async (t) => {
+  // The release check of 17 November 2026, point 2. The trace and the archive record a send and a read; they are not the
+  // send or the read. With both failing at every write the message still goes, is read once, and both sides are told
+  // what was not written: in the answer, and in attention.
+  const { a, b } = await homes(t);
+  await b.startTransports();
+  const failing = (runtime, tried) => {
+    const save = runtime.saveJson.bind(runtime);
+    runtime.saveJson = async (name, value) => {
+      if (name === "trace.json") {
+        tried.push(name);
+        throw Object.assign(new Error("no room for trace.json (test)"), { code: "ENOSPC" });
+      }
+      return save(name, value);
+    };
+    runtime.archive = async (label) => {
+      tried.push(`archive ${label}`);
+      throw Object.assign(new Error("no room in the archive (test)"), { code: "ENOSPC" });
+    };
+  };
+  const tried = { a: [], b: [] };
+  failing(a, tried.a);
+  const sent = await a.send("b", { text: "uten spor" });
+  assert.deepEqual([sent.status, sent.via], ["confirmed", "lan"], JSON.stringify(sent));
+  assert.ok(sent.trace_error && sent.archive_error && tried.a.includes("trace.json"), JSON.stringify([sent, tried]));
+  failing(b, tried.b);
+  const got = await b.read({ wait: 10 });
+  assert.deepEqual(got.map((message) => [message.body.text, message.archived]), [["uten spor", false]], JSON.stringify(got));
+  assert.ok((await b.attentionTaken()).length > 0, "the read said nothing of what it could not write");
+  assert.deepEqual(await b.read({ wait: 0 }), [], "handed over once, though nothing was archived or traced");
+});
+

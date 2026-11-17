@@ -14,7 +14,7 @@ import { Aamio, GateStop, Keys, sha256hex, threadSigningInput } from "../src/aam
 import { initIdentity } from "../src/node-identity.js";
 import { serveMcp } from "../src/node-mcp.js";
 import { NodeRuntime, OUTBOX_NOTES, outboxOpen, outboxOutcome, outboxRetryable, sendAdvice, stopFields } from "../src/node-runtime.js";
-import { TRACE_FIELDS, TRACE_FIELD_CHARS, TRACE_KEEP, TRACE_KEYS, normalizeTraces, traceView } from "../src/node-trace.js";
+import { TRACE_FIELDS, TRACE_FIELD_CHARS, TRACE_KEEP, TRACE_KEYS, normalizeTraces, sentOver, traceView } from "../src/node-trace.js";
 import { BOARD, FakeAamio } from "./fake-aamio.mjs";
 import { serveFake } from "./serve-fake.mjs";
 
@@ -979,6 +979,20 @@ test("a send over a transport is matched by the sha256 of its envelope, and said
   assert.ok(!view.note.includes("retry it from the outbox") && !view.note.includes("the service stored it"), view.note);
   const key = Keys.generate().public;
   assert.deepEqual(normalizeTraces({ [key]: { ...book, active: 1 } })[key].sent, book.sent, "via is kept when the file is read back");
+});
+
+test("a send over a transport that an older runtime wrote again without via is still known by its mark", () => {
+  // A runtime from before the transports keeps only the fields it knows when it writes the trace again: via is gone, and
+  // the mark the send is known by says it went over a transport (the release check of 17 November 2026).
+  const named = carried(2, "handed_over");
+  const received = [{ at: 1794852100, channel: "lan", sha256: sha256hex("10"), seen: named.sha256, encrypted: true, format: "json", fields: ["from", "seen", "text"] }];
+  const withVia = { sent: [carried(1), named, carried(3, "handed_over")], received, last_read: null };
+  const stripped = { sent: withVia.sent.map(({ via, ...rest }) => rest), received, last_read: null };
+  const before = traceView(withVia, 50);
+  const after = traceView(stripped, 50);
+  assert.deepEqual(after.sent.map((row) => row.seen_by_them), [null, true, null]);
+  assert.deepEqual([after.no_read_claim, after.note], [before.no_read_claim, before.note]);
+  assert.deepEqual([sentOver(stripped.sent[0]), sentOver({ message_id: "m-0123456789abcdef", status: 201 }), sentOver(carried(1))], ["transport", null, "lan"]);
 });
 
 test("a send over a transport under a readable profile is not said to be sealed", () => {
