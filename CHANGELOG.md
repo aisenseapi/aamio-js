@@ -35,6 +35,10 @@ not what moved in the source.
   has written the row again without saying which transport it went over.
 - `aamio-lan` 0.1.0 ships beside it, over the local network. Sound is in
   aamio-python for now.
+- A home folder that has no key file, as one an add-on was installed into
+  before `init`, is refused as before, and the answer now says that it has no
+  key file and what makes the home, as `addon enable` already did. It said the
+  key file was unreadable.
 
 ## 0.7.3 - 2026-11-14
 
