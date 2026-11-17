@@ -49,5 +49,5 @@ datagrams it sent itself, which a broadcast brings back, and anything that does
 not start with `AL1`. The same datagrams are sent by the LAN transports of
 aamio-python and aamio-php, so any of them can talk to any other.
 
-The specification is part B of `docs/aamio-tillegg-kontrakt-3-2026-11-15.md` in
-the service repository.
+What a transport is, and how to write one, is at
+https://aamio.at/docs/addons#transports.

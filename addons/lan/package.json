@@ -8,6 +8,7 @@
     "aamio-addon.json",
     "transport.js",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {

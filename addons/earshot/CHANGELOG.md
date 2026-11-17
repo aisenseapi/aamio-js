@@ -6,6 +6,11 @@ aisenseapi/aamio-earshot, whose changelogs say what each version changed.
 Dates are the day the version was committed. Every entry says what changed for
 somebody using it.
 
+## 0.4.0 - 2026-11-17
+
+- The number follows aamio-earshot in Python, which now carries earshot-link,
+  a transport over sound. Nothing changed in this runtime.
+
 ## 0.3.4 - 2026-11-14
 
 - Every program is looked for only in the folders `PATH` names by a full path,
