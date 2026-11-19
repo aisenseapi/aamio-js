@@ -11,7 +11,9 @@
 //
 // The port is opened after hello, and never when hello says probe: enable then only sees that this starts and
 // describes itself. A port that cannot be opened, as one another program holds, is said as down and tried again every
-// two seconds, and said as up with room once it opens.
+// two seconds, and said as up with room once it opens. Each ready says where this machine is reached, here: the address
+// it listens on, or with 0.0.0.0 its own addresses on the network, as they were when the port opened, at most four, so a
+// card can carry one and a partner can bind it. Standard error is UTF-8, as contract 3 asks, as Node writes it to a pipe.
 //
 //   AAMIO_LAN_PORT       the UDP port this transport listens on, 47474 if left out
 //   AAMIO_LAN_BIND       the address it listens on, 0.0.0.0 if left out
@@ -20,14 +22,16 @@
 
 import { createSocket } from "node:dgram";
 import { randomBytes } from "node:crypto";
+import { networkInterfaces } from "node:os";
 import { createInterface } from "node:readline";
 
 const NAME = "lan";
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const MAGIC = Buffer.from("AL1");
 const CREDIT = 32;
 const MAX_FRAME = 1200;
 const RETRY_MS = 2000;
+const HERE_MOST = 4;
 const portText = process.env.AAMIO_LAN_PORT ?? "47474";
 if (!/^[0-9]{1,5}$/.test(portText) || Number(portText) < 1 || Number(portText) > 65535) {
   process.stderr.write(`aamio-lan: AAMIO_LAN_PORT is no port: ${portText}\n`);
@@ -45,8 +49,67 @@ let sendsRead = 0;
 // Frames read whose answer waits for what the operating system says of their datagrams.
 let unanswered = 0;
 let retry = null;
+// Where this machine is reached, as lan:<ip>:<port>, found when the port opened.
+let here = [];
 
 const say = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+
+/** The address a route out of this machine would leave from, found without sending anything, or null. */
+function routeAddress() {
+  return new Promise((resolve) => {
+    let probe;
+    const done = (address) => {
+      try {
+        probe.close();
+      } catch {
+        // Closed already.
+      }
+      resolve(address);
+    };
+    try {
+      probe = createSocket("udp4");
+      probe.unref();
+      probe.on("error", () => done(null));
+      setTimeout(() => done(null), 1000).unref();
+      // Nothing goes: connect on UDP only picks the interface a route would take. Without a route it fails, and says so here.
+      probe.connect(9, "10.254.254.254", (error) => {
+        let address = null;
+        try {
+          address = error ? null : probe.address().address;
+        } catch {
+          address = null;
+        }
+        done(address);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * Where this machine is reached: the address the port is bound to, or with 0.0.0.0 its own IPv4 addresses, the one a
+ * route out would use first, without loopback and link-local ones, at most HERE_MOST, as lan:<ip>:<port>.
+ */
+async function addresses() {
+  if (!["0.0.0.0", ""].includes(bind)) return [`lan:${bind}:${port}`];
+  const found = [];
+  const first = await routeAddress();
+  if (first !== null) found.push(first);
+  try {
+    for (const entries of Object.values(networkInterfaces())) {
+      for (const entry of entries ?? []) if ((entry.family === "IPv4" || entry.family === 4) && !entry.internal) found.push(entry.address);
+    }
+  } catch {
+    // No list of interfaces: the route's address, if any, is what there is.
+  }
+  const mine = [];
+  for (const ip of found) {
+    if (mine.includes(ip) || ip === "0.0.0.0" || ip.startsWith("127.") || ip.startsWith("169.254.")) continue;
+    mine.push(ip);
+  }
+  return mine.slice(0, HERE_MOST).map((ip) => `lan:${ip}:${port}`);
+}
 
 const peers = [];
 for (const part of (process.env.AAMIO_LAN_PEERS ?? "").split(",").map((text) => text.trim()).filter(Boolean)) {
@@ -82,9 +145,11 @@ function open() {
     if (frame.length > MAX_FRAME) return;
     say({ t: "received", from: `lan:${from.address}:${from.port}`, frame: frame.toString("base64url") });
   });
-  made.bind({ port, address: bind, exclusive: true }, () => {
+  made.bind({ port, address: bind, exclusive: true }, async () => {
     bound = true;
     made.setBroadcast(true);
+    // Where this machine is reached, as it is when the port opens; no frame is given to it before the ready below.
+    here = await addresses();
     socket = made;
     if (saidDown) say({ t: "status", state: "up", reason: `port ${port} is open` });
     saidDown = false;
@@ -140,9 +205,11 @@ function send(message, done) {
   }
 }
 
-/** Room for as many frames as the operating system is not still busy with. */
+/** Room for as many frames as the operating system is not still busy with, and once the port is open, where this machine is reached (contract 3, B3). */
 function ready() {
-  say({ t: "ready", credit: Math.max(0, CREDIT - unanswered), sends_read: sendsRead });
+  const said = { t: "ready", credit: Math.max(0, CREDIT - unanswered), sends_read: sendsRead };
+  if (socket !== null && here.length) said.here = here;
+  say(said);
 }
 
 function finish() {

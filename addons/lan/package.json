@@ -1,6 +1,6 @@
 {
   "name": "aamio-lan",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "aamio over the local network: a transport under contract 3 that sends each frame as one UDP datagram, to an address or to everyone on the network, so two machines exchange aamio messages directly, also when aamio.at cannot be reached. Used through aamio transport bind PARTNER lan.",
   "type": "module",
   "aamioAddon": "./aamio-addon.json",

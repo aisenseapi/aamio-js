@@ -29,6 +29,7 @@ import { FakeAamio } from "./fake-aamio.mjs";
 
 const bin = fileURLToPath(new URL("../bin/aamio.js", import.meta.url));
 const lanDir = fileURLToPath(new URL("../addons/lan/", import.meta.url));
+const LAN_VERSION = JSON.parse(readFileSync(join(lanDir, "package.json"), "utf8")).version;
 const NOWHERE = "http://127.0.0.1:9";
 const bytes = (value) => new TextEncoder().encode(value);
 
@@ -53,7 +54,7 @@ async function homeWithLan(dir, name) {
   const root = join(home, "addon-packages", "npm");
   const pkg = join(root, "node_modules", "aamio-lan");
   mkdirSync(pkg, { recursive: true });
-  writeFileSync(join(root, "package.json"), JSON.stringify({ private: true, dependencies: { "aamio-lan": "0.1.0" } }));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ private: true, dependencies: { "aamio-lan": LAN_VERSION } }));
   for (const file of ["package.json", "aamio-addon.json", "transport.js"]) copyFileSync(join(lanDir, file), join(pkg, file));
   return home;
 }

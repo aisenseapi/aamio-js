@@ -21,6 +21,8 @@ import { TransportProcess, environment } from "../src/node-transport-host.js";
 
 const lanDir = fileURLToPath(new URL("../addons/lan/", import.meta.url));
 const script = join(lanDir, "transport.js");
+// The version the transport describes itself as, read where it is set: describe must name the manifest's.
+const LAN_VERSION = JSON.parse(readFileSync(join(lanDir, "aamio-addon.json"), "utf8")).version;
 const A = Keys.fromSeedHex("01".repeat(32));
 const B = Keys.fromSeedHex("02".repeat(32));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -41,7 +43,7 @@ function lanProcess(port, peer, folder) {
   const base = Object.fromEntries(["PATH", "SYSTEMROOT", "TEMP", "TMP"].filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
   const env = environment(["AAMIO_LAN_PORT", "AAMIO_LAN_BIND", "AAMIO_LAN_BROADCAST", "AAMIO_LAN_PEERS"],
     { ...base, AAMIO_LAN_PORT: String(port), AAMIO_LAN_BIND: "127.0.0.1", AAMIO_LAN_BROADCAST: "none", AAMIO_LAN_PEERS: `127.0.0.1:${peer}` });
-  return new TransportProcess("lan", "0.1.0", [process.execPath, script], folder, env, { describeSeconds: 30 });
+  return new TransportProcess("lan", LAN_VERSION, [process.execPath, script], folder, env, { describeSeconds: 30 });
 }
 
 /** Events until condition holds of them, all of them kept; null when it did not within seconds. */
@@ -200,7 +202,7 @@ test("follow-up finding 9: a frame is sent only when the operating system took a
     { ...base, AAMIO_LAN_PORT: String(port), AAMIO_LAN_BIND: "127.0.0.1", AAMIO_LAN_BROADCAST: "none", AAMIO_LAN_PEERS: `127.0.0.1:${refused},127.0.0.1:${taken}` });
   env.AAMIO_TEST_SEND_FAILS = String(refused);
   const said = [];
-  const transport = new TransportProcess("lan", "0.1.0", [process.execPath, "--import", new URL("./lan-send-fails.mjs", import.meta.url).href, script], folder, env,
+  const transport = new TransportProcess("lan", LAN_VERSION, [process.execPath, "--import", new URL("./lan-send-fails.mjs", import.meta.url).href, script], folder, env,
     { describeSeconds: 30, log: (line) => said.push(line) });
   try {
     await transport.start("0.0.0-test", "node", folder);
