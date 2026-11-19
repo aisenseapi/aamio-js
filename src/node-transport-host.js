@@ -11,13 +11,21 @@
 // until it says up and a new ready gives room, and one that has said down for
 // 60 seconds is stopped to be started again. Lines go to the transport through
 // the stream of its standard input, which never holds up the owner.
+//
+// A ready may say where others reach the transport now (B3: here). That is a
+// hint for cards and bindings: the latest one is kept, a change is an event,
+// and one that cannot be taken is said and left out, never a reason to stop a
+// transport that moves frames. What a transport says of a frame it could not
+// send is kept too, for the send that ends without an answer.
 
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { b64url, unb64url } from "./aamio.js";
 import * as carry from "./carry.js";
 import { CarryRefused } from "./carry.js";
-import { ENVIRONMENT } from "./node-addon-process.js";
+import { ENVIRONMENT, textOf } from "./node-addon-process.js";
+
+export { textOf };
 
 export const LINE_LIMIT = 262144;
 export const DESCRIBE_SECONDS = 10;
@@ -29,8 +37,27 @@ export const FORGET_SECONDS = 600;
 export const FRAME_GROUPS = 32;
 export const FRAME_BYTES = 262144;
 export const FRAME_SECONDS = 120;
+// here on a ready (B3): where others reach this transport now, at most this many addresses.
+export const HERE_MOST = 4;
+// An address in here is printable ASCII without spaces, as a card can carry it: medium:rest.
+const HERE_ADDRESS = /^[\x21-\x7e]{1,128}$/;
 const NEVER_PASSED = new Set(["AAMIO_HOME", "AAMIO_ADDONS", "AAMIO_ADDON"]);
 const realSeconds = () => performance.now() / 1000;
+
+/**
+ * The addresses in a ready's here, or null when they cannot be taken: a list of at most HERE_MOST addresses, each
+ * medium:rest in printable ASCII without spaces, at most 128 characters, each once.
+ */
+export function hereOf(value, medium) {
+  if (!Array.isArray(value) || value.length > HERE_MOST) return null;
+  if (value.some((address) => typeof address !== "string" || !HERE_ADDRESS.test(address) || !address.startsWith(`${medium}:`) || address.length === `${medium}`.length + 1)) {
+    return null;
+  }
+  if (new Set(value).size !== value.length) return null;
+  return [...value];
+}
+
+const sameList = (one, other) => Array.isArray(one) && Array.isArray(other) && one.length === other.length && one.every((item, index) => item === other[index]);
 
 /** The transport cannot be used as it is: it said something the contract does not allow, or stopped answering. */
 export class TransportFailed extends Error {
@@ -96,6 +123,9 @@ export class TransportProcess {
     this.downSince = null;     // when the transport said down, while it has not said up again
     this.afterDown = false;    // down was said: no room until a ready that comes after up
     this.failed = null;
+    this.here = null;          // where others reach it now, as its latest ready said, or null while it has said nothing
+    this.readied = false;      // a ready has come since the start
+    this.lastError = null;     // { at, code, message } of the latest error it gave for a frame, at on this clock
   }
 
   // ---------------------------------------------------------- the process
@@ -114,16 +144,18 @@ export class TransportProcess {
       }
       if (Buffer.byteLength(this.buffer) > LINE_LIMIT) this.#arrive(["too_long"]);
     });
-    this.child.stderr.setEncoding("utf8");
-    let errors = "";
+    // Standard error as bytes, line by line, each read as UTF-8, as contract 3 asks, or else in the system's own code
+    // page: a transport in Python on Windows writes its errors in the ANSI code page (textOf).
+    let errors = Buffer.alloc(0);
     this.child.stderr.on("data", (chunk) => {
-      errors = (errors + chunk).slice(-65536);
+      errors = Buffer.concat([errors, chunk]);
+      if (errors.length > 65536) errors = errors.subarray(errors.length - 65536);
       let at;
-      while ((at = errors.indexOf("\n")) !== -1) {
-        const words = errors.slice(0, at).trimEnd();
+      while ((at = errors.indexOf(0x0a)) !== -1) {
+        const words = textOf(errors.subarray(0, at)).trimEnd();
         this.lastWords = [...this.lastWords, words.slice(0, 200)].slice(-3);
         this.log(`transport ${this.name}: ${words}`);
-        errors = errors.slice(at + 1);
+        errors = errors.subarray(at + 1);
       }
     });
     this.child.on("error", () => this.#arrive(["closed"]));
@@ -266,8 +298,9 @@ export class TransportProcess {
   }
 
   /**
-   * What the transport said since last time, waiting up to timeoutMs for the first line: a list of events. What it
-   * said before start returned comes first, and is not waited behind.
+   * What the transport said since last time, waiting up to timeoutMs for the first line: a list of events, each
+   * ["received", from, frame], ["answer", id], ["status", state, reason] or ["here", addresses] when where it can be
+   * reached changed. What it said before start returned comes first, and is not waited behind.
    */
   async poll(timeoutMs = 0) {
     const events = this.early;
@@ -335,9 +368,21 @@ export class TransportProcess {
         const before = this.room();
         this.credit = credit;
         this.sendsRead = sendsRead;
+        this.readied = true;
         if (this.downSince === null) this.afterDown = false;
         if (this.room() > Math.max(before, 0)) this.waitingForRoomSince = null;
-        return [];
+        if (!Object.hasOwn(message, "here")) return [];
+        // Where others reach it is a hint for cards and bindings, never a reason to stop a transport that moves frames:
+        // one that cannot be taken is said and left out, and the one said before stands.
+        const here = hereOf(message.here, this.medium);
+        if (here === null) {
+          this.log(`transport ${this.name}: here is not taken: it is a list of at most ${HERE_MOST} addresses, each ${this.medium}:... in printable ASCII `
+            + "without spaces, at most 128 characters");
+          return [];
+        }
+        if (sameList(here, this.here)) return [];
+        this.here = here;
+        return [["here", here]];
       }
       case "sent":
       case "error":
@@ -391,6 +436,11 @@ export class TransportProcess {
     else {
       entry.status = "not_sent";
       entry.reason = String(message.code ?? "error");
+      // What the transport said, kept for a send that ends without an answer: its words name the medium's own trouble,
+      // as a Bluetooth address no machine answers on, which the core cannot know (19 November 2026). At most 300
+      // characters, counted as aamio-python counts them.
+      const said = message.message;
+      this.lastError = { at: this.clock(), code: entry.reason, message: typeof said === "string" ? Array.from(said).slice(0, 300).join("") : null };
     }
     return message.id;
   }

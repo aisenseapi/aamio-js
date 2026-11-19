@@ -23,6 +23,16 @@
 // The challenge and the open are sent again with the same bytes through the
 // challenge window, since on a medium that loses frames one try is not enough;
 // an ask no challenge answers is asked again with a new session.
+//
+// Where a partner is reached is learned only from what shows it is fresh: a
+// challenge to an ask of this party's, an open to a challenge of its own, or a
+// new message. An ask can be played again from anywhere, and a copy of a message
+// or a receipt can be sent again by anyone who heard it, so neither moves where
+// the partner is said to be: a replayed ask could otherwise lead every message
+// to a machine in range that never answers. An address known from before, as
+// the home keeps it, is where the first ask goes; when it has stopped answering,
+// every second ask goes to nobody in particular, as one did before anything was
+// known.
 
 import { performance } from "node:perf_hooks";
 import * as carry from "./carry.js";
@@ -49,11 +59,19 @@ const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(
 const pairOf = (pk, session) => toHex(pk) + ":" + toHex(session);
 
 export class Carrier {
+  /**
+   * addresses is where partners are reached on this transport as the home keeps them, partner pk in hex to address.
+   * heard(pk, address) is told where a partner was heard from fresh, so the home can keep it, and onHere(addresses) where
+   * the transport says it is reached; nameOf(pk) is a partner as the user knows it, for the line that says a message came in.
+   */
   constructor(state, process, profile, known, { clock = () => performance.now() / 1000, wall = () => Math.floor(Date.now() / 1000), log = () => {},
-    retrySeconds = 2, askRetrySeconds = 5, tries = TRIES_DEFAULT, note = null } = {}) {
+    retrySeconds = 2, askRetrySeconds = 5, tries = TRIES_DEFAULT, note = null, addresses = null, heard = null, nameOf = null, onHere = null } = {}) {
     Object.assign(this, { state, process, profile, known, clock, wall, log, retrySeconds, askRetrySeconds, tries });
     // What the user is to hear, as a message that is not sent again: where the runtime keeps attention, or the log.
     this.note = note ?? log;
+    this.heard = heard ?? (() => {});
+    this.onHere = onHere ?? (() => {});
+    this.nameOf = nameOf ?? ((pk) => toHex(pk).slice(0, 8));
     // One profile for every partner, or a function from a partner's key to its own (B5).
     this.profileOf = typeof profile === "function" ? profile : () => profile;
     this.given = new Map();      // mark -> the frame ids of each try that was given to the transport whole
@@ -75,7 +93,8 @@ export class Carrier {
     this.control = new Map();    // id -> challenges and opens sent again through the window
     this.asks = new Map();
     this.answered = new Map();   // pair -> [partner pk, session, when its challenge came], in that order
-    this.addresses = new Map();  // partner pk in hex -> the transport address it was last heard from
+    // partner pk in hex -> the transport address it was last heard from fresh, or the home kept from before
+    this.addresses = new Map(addresses ?? []);
     this.refused = [];
     this.budget = UNVERIFIED_PER_SECOND;
     this.budgetAt = clock();
@@ -276,6 +295,7 @@ export class Carrier {
     for (const event of await this.process.poll(timeoutMs)) {
       if (event[0] === "received") this.#received(event[1], event[2]);
       else if (event[0] === "status") this.log(`transport ${this.process.name}: ${event[1]} ${event[2]}`);
+      else if (event[0] === "here") this.onHere(event[1]);
     }
     this.#resend();
     this.#flush();
@@ -300,16 +320,24 @@ export class Carrier {
       return;
     }
     this.budget -= 1;
-    let reply, got;
+    let result, reply, got;
     try {
-      [, reply, got] = this.state.deliver(envelope, this.known, this.profileOf, now, this.wall());
+      [result, reply, got] = this.state.deliver(envelope, this.known, this.profileOf, now, this.wall());
     } catch (error) {
       if (!(error instanceof CarryRefused)) throw error;
       // Refusals stay here (A7): logged and counted, never answered over the medium.
       this.refused.push(error.code);
       return;
     }
-    if (source !== null) this.addresses.set(toHex(got.sender), source);
+    if (source !== null && result === "accepted" && [carry.CHALLENGE, carry.OPEN, carry.MESSAGE].includes(got.kind)) {
+      // Fresh: a challenge answers an ask of ours, an open a challenge of ours, and a new message has a counter never
+      // taken before. The address it came from is where the partner is now.
+      const sender = toHex(got.sender);
+      if (this.addresses.get(sender) !== source) {
+        this.addresses.set(sender, source);
+        this.heard(got.sender, source);
+      }
+    }
     const pair = pairOf(got.sender, got.session);
     if (got.kind === carry.CHALLENGE) {
       // A session with the partner is open: every ask to it ends, the one this answers and any made since. Asked again on
@@ -344,6 +372,11 @@ export class Carrier {
     // challenge is not sent again either.
     this.#settled(pair, "challenge");
     if (reply) this.#queue(reply, source);
+    if (result === "accepted" && got.kind === carry.MESSAGE) {
+      // Said where the owner keeps its log, as aamio serve's window: it said nothing when a message came, and a test
+      // between two machines had nothing to look at until the read (19 November 2026).
+      this.log(`transport ${this.process.name}: a message came in from ${this.nameOf(got.sender)}`);
+    }
   }
 
   #settled(pair, kind) {
@@ -385,15 +418,20 @@ export class Carrier {
       }
       entry.tries += 1;
       entry.next = now + this.#turn(entry.envelope, this.retrySeconds);
-      this.#queue(entry.envelope, this.addresses.get(toHex(entry.pk)) ?? entry.to);
+      // Back where what it answers came from: a challenge to where the ask came from, an open to where the challenge
+      // did. An ask moves no address (see above), so the address known may be another machine's.
+      this.#queue(entry.envelope, entry.to ?? this.addresses.get(toHex(entry.pk)) ?? null);
     }
     for (const [pair, entry] of [...this.asks]) {
       if (now < entry.next) continue;
       this.asks.delete(pair);
       if (entry.tries < this.tries) {
         const [session, envelope] = this.state.ask(entry.pk, this.profileOf(entry.pk), now);
-        this.asks.set(pairOf(entry.pk, session), { pk: entry.pk, session, next: now + this.#turn(envelope, this.askRetrySeconds), tries: entry.tries + 1 });
-        this.#queue(envelope, this.addresses.get(toHex(entry.pk)) ?? null);
+        const tries = entry.tries + 1;
+        this.asks.set(pairOf(entry.pk, session), { pk: entry.pk, session, next: now + this.#turn(envelope, this.askRetrySeconds), tries });
+        // A known address that has stopped answering, as a machine with a Bluetooth address of another day, is not asked
+        // for good: every second ask goes to nobody in particular, as the peers a transport is told of or a broadcast.
+        this.#queue(envelope, tries % 2 === 1 ? this.addresses.get(toHex(entry.pk)) ?? null : null);
       }
     }
   }

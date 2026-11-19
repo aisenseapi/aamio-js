@@ -130,7 +130,7 @@ test("enable probes the add-on and records it beside the other clients' entries,
   assert.deepEqual(await ran(marker), ["probe probe"], "the process ran once, for the probe");
   const row = said.addons[0];
   assert.deepEqual([row.name, row.distribution, row.enabled, row.contract, row.version], ["demo2", "demo2-pkg", true, 2, "0.0.2"]);
-  assert.deepEqual(row.commands, ["allow", "badbytes", "bytes", "check", "crash", "fail", "file", "flood", "forget", "garbage", "grumble", "list", "local", "mutter", "noisy", "orphan", "ping", "sleep", "spill"]);
+  assert.deepEqual(row.commands, ["allow", "badbytes", "bytes", "check", "crash", "fail", "file", "flood", "forget", "garbage", "grumble", "list", "local", "mutter", "noisy", "orphan", "ping", "sleep", "spill", "where"]);
   assert.deepEqual(row.mcp_tools, ["aamio_addon_demo2_ping", "aamio_addon_demo2_check", "aamio_addon_demo2_sleep", "aamio_addon_demo2_bytes"]);
   assert.match(said.note, /^demo2-pkg runs here from now on, in a process of its own for each call\. enable started it once just now, before the choice was recorded/);
   assert.ok(said.note.endsWith(RESTART) && said.note.includes("never the home's key or the rest of your environment") && said.note.includes("It runs with your own file permissions."));
@@ -185,6 +185,11 @@ test("enable refuses what cannot be used, records nothing, and the list says wha
     [{ manifest: manifestFor("demo2", { version: "0.0.3" }) }, /its manifest says version 0\.0\.3 and its package\.json 0\.0\.2/, true, 0],
     [{ manifest: { ...manifestFor("demo2", { hosts: false }), commands: { see: { arguments: [{ name: "site", host: true }] } } } }, /the argument site of the command see is a host, and the manifest has no hosts/, true, 0],
     [{ manifest: { ...manifestFor("demo2"), commands: { allow: {} } } }, /its manifest has a command allow, which aamio provides for an add-on with hosts/, true, 0],
+    // What a call may ask the core for: the runtime's public key and where this machine's transports are reached, as in aamio-python.
+    [{ manifest: { ...manifestFor("demo2"), commands: { see: { needs: ["key"] } } } }, /needs on the command see names something other than own_key and here/, true, 0],
+    [{ manifest: { ...manifestFor("demo2"), commands: { see: { needs: ["own_key", "here"], runtime: false } } } }, /the command see needs own_key and here and says it runs without a runtime/, true, 0],
+    [{ manifest: { ...manifestFor("demo2", { hosts: false }), tools: [{ name: "aamio_addon_demo2_see", description: "x", inputSchema: { type: "object" }, needs: ["partner_address"] }] } },
+      /needs on the tool aamio_addon_demo2_see names something other than own_key and here/, true, 0],
     [{ manifest: { ...manifestFor("demo2", { hosts: false }), tools: [{ name: "aamio_whoami", description: "taken", inputSchema: { type: "object" } }] } }, /the tool aamio_whoami is offered by the core and by demo2-pkg/, false, 0],
     // The manifest is whole, and the process is not the add-on it says.
     [{ probe: { name: "other" } }, /answered the probe as other 0\.0\.2 on contract 2, and its manifest says demo2 0\.0\.2 on contract 2/, false, 1],
@@ -371,11 +376,27 @@ test("a command goes through the process with what the core resolved, and nothin
   const pong = await call(["ping", "--word", "hei"]);
   assert.equal(pong.code, 0);
   assert.deepEqual(pong.out, {
-    pong: true, kind: "command", name: "ping", arguments: { word: "hei" }, subject: null, own_key: null, state_dir: join(home, "addons", "demo2"), deadline_seconds: 2,
+    pong: true, kind: "command", name: "ping", arguments: { word: "hei" }, subject: null, own_key: null, here: null, state_dir: join(home, "addons", "demo2"), deadline_seconds: 2,
     aamio: { version: CORE_VERSION, runtime: "node" }, home_env: null, addons_env: null, addon_env: "2", secret: null, passthru: null,
   });
   assert.equal(existsSync(join(home, "addons", "demo2")), true, "the add-on has a directory of its own");
-  assert.equal((await call(["file"])).out.own_key, runtime.keys.public, "the runtime's public key, where the command asks for it");
+  const file = (await call(["file"])).out;
+  assert.equal(file.own_key, runtime.keys.public, "the runtime's public key, where the command asks for it");
+  assert.equal(file.here, null, "here only where a call asks for it");
+  const where = (await call(["where"])).out;
+  assert.deepEqual([where.here, where.own_key], [[], null], "needs here: where this machine's transports are reached, none here, and no key with it");
+  // Where they are reached that cannot be read stops the call before the process starts, and says so.
+  const service = runtime.transportService();
+  const hereForAddons = service.hereForAddons;
+  service.hereForAddons = async () => {
+    throw Object.assign(new Error("transports/here.json is in the way (test)"), { code: "transport_config_unreadable" });
+  };
+  const ranBefore = (await ran(marker)).length;
+  const unknown = await call(["where"]);
+  service.hereForAddons = hereForAddons;
+  assert.deepEqual(unknown, { code: 2, out: { status: "unreachable", reason: "here_unknown",
+    fix: "Where this machine's transports are reached could not be read: transports/here.json is in the way (test). aamio transport list shows them." } });
+  assert.equal((await ran(marker)).length, ranBefore, "and the process did not start");
   const local = await call(["local", "some/path"], { runtime: null });
   assert.deepEqual([local.out.arguments, local.out.state_dir, local.out.own_key], [{ path: "some/path" }, null, null], "a command that needs no home gets none");
 

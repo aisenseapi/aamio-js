@@ -136,8 +136,8 @@ test("the server offers the tools of the add-ons enabled in its home, and calls 
 
   const pong = await client.call("aamio_addon_demo2_ping", { word: "hei" });
   assert.equal(pong.isError, false);
-  assert.deepEqual([pong.structuredContent.kind, pong.structuredContent.name, pong.structuredContent.arguments, pong.structuredContent.state_dir, pong.structuredContent.own_key],
-    ["tool", "aamio_addon_demo2_ping", { word: "hei" }, join(mine, "addons", "demo2"), null]);
+  assert.deepEqual([pong.structuredContent.kind, pong.structuredContent.name, pong.structuredContent.arguments, pong.structuredContent.state_dir, pong.structuredContent.own_key, pong.structuredContent.here],
+    ["tool", "aamio_addon_demo2_ping", { word: "hei" }, join(mine, "addons", "demo2"), null, null]);
   assert.deepEqual(JSON.parse(pong.content[0].text), pong.structuredContent);
   // What the tool does not take is refused in the answer, with where a key comes from, before anything runs.
   const before = (await ran(marker)).length;
@@ -224,6 +224,7 @@ test("over MCP the user is asked which website they expect, and what they type h
   assert.deepEqual(read.structuredContent.arguments, { site: "firma.example", partner: "bob" });
   assert.deepEqual(read.structuredContent.subject, { key: partner, subject_source: "partner", partner: "bob", signature_checked_locally: null });
   assert.equal(read.structuredContent.own_key, runtime.keys.public, "the runtime's public key, which the tool's manifest asks for");
+  assert.deepEqual(read.structuredContent.here, [], "and where this machine's transports are reached, which it asks for too: none are enabled here");
   assert.deepEqual(await hosts(), ["firma.example"], "a match stays on the list");
   // And is not asked about again.
   const again = await client.call("aamio_addon_demo2_check", check);

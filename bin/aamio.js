@@ -11,7 +11,7 @@ import { archiveStatus, parsePolicy } from "../src/node-archive.js";
 import { doctor, homeCheck } from "../src/node-doctor.js";
 import { BODY_MAX_DEPTH, CHANNEL_TTL, NodeRuntime, SEND_STOPS, checkChannelTtl, checkGate, checkLabel, checkPartner, checkRe, stopFields, tagsFrom, unfitJson } from "../src/node-runtime.js";
 import { checkAccess, checkScopeAdd, checkScopeName } from "../src/node-scopes.js";
-import { bind as transportBind, listing as transportListing, profileAdd, profileRemove, unbind as transportUnbind } from "../src/node-transports.js";
+import { bind as transportBind, here as transportHere, listing as transportListing, profileAdd, profileRemove, unbind as transportUnbind } from "../src/node-transports.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
@@ -71,8 +71,11 @@ const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
                                A security profile: sealed unless --readable, which everyone who hears the medium can read
   transport profile remove NAME
                                Take out a profile no partner is bound to
-  transport bind PARTNER TRANSPORT [--profile NAME]
-                               Send to a partner over a transport, as lan, and never over HTTPS instead
+  transport here TRANSPORT     Where an enabled transport is reached, from a start of a moment when it does not run, kept for cards
+  transport bind PARTNER TRANSPORT [--profile NAME] [--address ADDRESS]
+                               Send to a partner over a transport, as lan, and never over HTTPS instead. --address is
+                               where the partner is reached on it, as its card or aamio transport here on its machine
+                               says it, also for a partner bound already
   transport unbind PARTNER [TRANSPORT]
                                The partner over HTTPS again, or over its next transport
 
@@ -127,7 +130,8 @@ const SPEC = {
   "transport list": { positional: [] },
   "transport profile add": { positional: ["name"], options: ["--lifetime", "--window", "--max-content"], switches: ["--readable"] },
   "transport profile remove": { positional: ["name"] },
-  "transport bind": { positional: ["partner", "transport"], options: ["--profile"] },
+  "transport here": { positional: ["transport"] },
+  "transport bind": { positional: ["partner", "transport"], options: ["--profile", "--address"] },
   "transport unbind": { positional: ["partner", "transport"], optional: 1 },
 };
 const GROUPS = ["partner", "outbox", "board", "scope", "channel", "transport"];
@@ -444,8 +448,10 @@ function plan(command, positional, options) {
     }
     case "transport profile remove":
       return (runtime) => profileRemove(runtime, first);
+    case "transport here":
+      return (runtime) => transportHere(runtime, first);
     case "transport bind":
-      return (runtime) => transportBind(runtime, first, second, options.profile ?? null);
+      return (runtime) => transportBind(runtime, first, second, options.profile ?? null, options.address ?? null);
     case "transport unbind":
       return (runtime) => transportUnbind(runtime, first, second ?? null);
     default:
@@ -561,7 +567,8 @@ const KNOWN = ["home_not_initialized", "key_unreadable", "home_init_failed", "ho
   "invalid_scope", "invalid_access", "scope_exists", "unknown_scope", "scope_write_only", "scope_needs_sealed",
   "invalid_label", "invalid_gate", "invalid_ttl", "invalid_note", "invalid_address", "invalid_archive", "channel_exists", "channel_unavailable", "binding_conflict",
   "transport_config_unreadable", "transport_profile_unknown", "transport_profile_invalid", "transport_profile_incomplete", "transport_profile_in_use", "transport_already_bound",
-  "transport_unbound", "transport_unknown", "transport_down", "carry_not_sent", "carry_too_large", "carry_storage_full", "carry_storage_failed", "carry_rate_limited"];
+  "transport_address_invalid", "transport_unbound", "transport_unknown", "transport_down", "carry_not_sent", "carry_too_large", "carry_storage_full", "carry_storage_failed",
+  "carry_rate_limited"];
 
 // trace of a counterpart nothing is recorded about is said on standard error,
 // with nothing on standard output, as aamio-python and aamio-php say it.

@@ -49,6 +49,32 @@ export const ENVIRONMENT = new Set([
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
+/**
+ * Bytes a process wrote, as text: UTF-8, as contract 3 asks, or else the
+ * system's own code page.
+ *
+ * Python on Windows writes standard error to a pipe in the ANSI code page, so
+ * the system's own words for an error, as Norwegian ones, came out as
+ * replacement characters (the field test over Bluetooth of 19 November 2026).
+ * Node has no call that names the ANSI code page, so on Windows what is not
+ * UTF-8 is read as windows-1252, the code page of Western European Windows;
+ * elsewhere the system's code page is UTF-8, and what is not UTF-8 is read
+ * with replacement characters, as aamio-python reads it there.
+ */
+export function textOf(raw) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw);
+  } catch {
+    if (process.platform !== "win32") return new TextDecoder("utf-8", { ignoreBOM: true }).decode(raw);
+    try {
+      return new TextDecoder("windows-1252").decode(raw);
+    } catch {
+      // A Node built without the full ICU knows no windows-1252.
+      return Buffer.from(raw).toString("latin1");
+    }
+  }
+}
+
 // ------------------------------------------------------------------- limits
 
 /** At most so many calls of one add-on at once, and so many started per minute: a process per call is a cost, and a model can loop. */
@@ -94,6 +120,22 @@ async function ownDirectory(runtime, manifest) {
 
 const busyRefusal = (manifest, busy) => new Refused(busy, `At most ${MAX_AT_ONCE} calls of the add-on ${manifest.NAME} run at once and ${MAX_PER_WINDOW} start per minute here. Nothing was done. Try again shortly.`, "unreachable");
 
+/**
+ * What a call that needs here gets: for each enabled transport its name,
+ * medium, where it is reached and since when, as the transport service's
+ * hereForAddons finds it. A transport that runs says it; one that does not is
+ * started for a moment when the home keeps nothing of it from its version.
+ * An empty list when no transport is enabled.
+ */
+export async function hereOfTransports(runtime) {
+  try {
+    return await runtime.transportService().hereForAddons();
+  } catch (error) {
+    if (!(error instanceof AddonError) && typeof error?.code !== "string") throw error;
+    throw new Refused("here_unknown", `Where this machine's transports are reached could not be read: ${error.message}. aamio transport list shows them.`, "unreachable");
+  }
+}
+
 // ------------------------------------------------------------------ process
 
 function failure(manifest, reason, fix) {
@@ -136,13 +178,13 @@ export function childEnvironment(manifest, declared, from = process.env, windows
  * unreachable result with the reason, and the deadline kills it. It is
  * answered once, whichever of those comes first, and never throws.
  */
-export function run(manifest, kind, name, args, { subject = null, ownKey = null, stateDirectory = null, stderr = null, deadline = null, declared = true, limits = {} } = {}) {
+export function run(manifest, kind, name, args, { subject = null, ownKey = null, here = null, stateDirectory = null, stderr = null, deadline = null, declared = true, limits = {} } = {}) {
   const seconds = deadline ?? manifest.deadline;
   const mostOut = limits.answer ?? MAX_ANSWER_BYTES;
   const mostErr = limits.stderr ?? MAX_STDERR_BYTES;
   const stopWait = limits.stop ?? STOP_WAIT;
   const request = JSON.stringify({
-    aamio_addon: 2, kind, name, arguments: args, subject, own_key: ownKey, state_dir: stateDirectory, deadline_seconds: seconds,
+    aamio_addon: 2, kind, name, arguments: args, subject, own_key: ownKey, here, state_dir: stateDirectory, deadline_seconds: seconds,
     aamio: { version: CORE_VERSION, runtime: "node" },
   });
   const stop = `Reinstall it, or aamio addon disable ${manifest.NAME} to go on without it.`;
@@ -217,7 +259,8 @@ export function run(manifest, kind, name, args, { subject = null, ownKey = null,
         finish(failure(manifest, ...stopped));
         return;
       }
-      const text = Buffer.concat(err).toString("utf8");
+      // UTF-8, or the system's code page, as aamio-python reads it on Windows: an add-on's own words stay readable.
+      const text = textOf(Buffer.concat(err));
       if (stderr !== null && text) stderr(text);
       let answer;
       try {
@@ -371,6 +414,7 @@ export async function runCommand(manifest, parsed, runtime, { stderr = null, lim
   const args = { ...values };
   let subject = null;
   let ownKey = null;
+  let here = null;
   let host = null;
   try {
     for (const argument of spec.arguments ?? []) {
@@ -382,6 +426,7 @@ export async function runCommand(manifest, parsed, runtime, { stderr = null, lim
       if (argument.subject && args[called] !== null) subject = subjectFor(runtime, argument.subject, args[called]);
     }
     if ((spec.needs ?? []).includes("own_key")) ownKey = runtime.keys.public;
+    if ((spec.needs ?? []).includes("here")) here = await hereOfTransports(runtime);
   } catch (refused) {
     if (!(refused instanceof Refused)) throw refused;
     return { code: 2, out: refusal(refused, { host, ...subjectFields(subject) }) };
@@ -393,7 +438,7 @@ export async function runCommand(manifest, parsed, runtime, { stderr = null, lim
   if (busy !== null) return { code: 5, out: refusal(busyRefusal(manifest, busy), { host }) };
   let answer;
   try {
-    answer = await run(manifest, "command", command, args, { subject, ownKey, stateDirectory: directory, stderr, limits });
+    answer = await run(manifest, "command", command, args, { subject, ownKey, here, stateDirectory: directory, stderr, limits });
   } finally {
     held.giveBack();
   }
@@ -476,6 +521,7 @@ export async function callTool(manifest, runtime, name, given, { ask = null, NoD
   let host = null;
   let subject = null;
   let ownKey = null;
+  let here = null;
   try {
     if (spec.host && args[spec.host] !== null && args[spec.host] !== undefined) host = args[spec.host] = normaliseHost(args[spec.host]);
     const roles = Object.entries(spec.subject ?? {});
@@ -483,6 +529,9 @@ export async function callTool(manifest, runtime, name, given, { ask = null, NoD
     if (roles.length && named.length !== 1) throw new Refused("choose_subject", `Name exactly one of ${roles.map(([role, field]) => `${field} (${role})`).join(" or ")}. A key is never given here.`);
     if (named.length) subject = await serial(() => subjectFor(runtime, named[0][0], args[named[0][1]]));
     if ((spec.needs ?? []).includes("own_key")) ownKey = runtime.keys.public;
+    // Outside the turn with the home, as the add-on's process is: a transport started for a moment to say where it is
+    // reached takes up to ten seconds, and presence is still published meanwhile.
+    if ((spec.needs ?? []).includes("here")) here = await hereOfTransports(runtime);
     if (host !== null && !(await serial(() => allowedHosts(runtime, manifest))).includes(host)) {
       const answer = await consent(manifest, runtime, name, host, subject, args, ask, NoDialog, serial);
       if (answer !== null) return [answer, "fix" in answer];
@@ -498,7 +547,7 @@ export async function callTool(manifest, runtime, name, given, { ask = null, NoD
   if (busy !== null) return [refusal(busyRefusal(manifest, busy), { host }), true];
   let answer;
   try {
-    answer = await run(manifest, "tool", name, args, { subject, ownKey, stateDirectory: directory, limits });
+    answer = await run(manifest, "tool", name, args, { subject, ownKey, here, stateDirectory: directory, limits });
   } finally {
     held.giveBack();
   }
