@@ -100,7 +100,7 @@ test("the core lists qrcast from its manifest, enables it with the probe, and ru
   const help = await cli(home, "addon", "qrcast", "--help");
   assert.equal(help.status, 0);
   assert.match(help.stdout, /^Usage: aamio addon qrcast <command> \[arguments\]\n\nThe commands under aamio addon qrcast\.\n/);
-  assert.ok(help.stdout.includes("aamio addon qrcast show ADDRESS [--name NAME] [--valid-for SECONDS] [--out FILE] [--engine ENGINE]"));
+  assert.ok(help.stdout.includes("aamio addon qrcast show ADDRESS [--name NAME] [--valid-for SECONDS] [--via MEDIA] [--key KEY] [--out FILE] [--engine ENGINE]"));
   assert.ok(help.stdout.includes("read FILE [--engine ENGINE]"));
 
   const card = await cli(home, "addon", "qrcast", "card", ADDRESS, "--name", "stue-tv");
@@ -155,19 +155,32 @@ test("the core lists qrcast from its manifest, enables it with the probe, and ru
   const { loaded } = await import("../../../src/node-addons.js");
   const { callTool } = await import("../../../src/node-addon-process.js");
   const { RUNTIME_TOOL_NAMES } = await import("../../../src/node-mcp.js");
+  const { NodeRuntime } = await import("../../../src/node-runtime.js");
   const [manifest] = await loaded(home, { coreTools: RUNTIME_TOOL_NAMES });
   const tools = Object.fromEntries(manifest.tools.map((tool) => [tool.name, tool]));
   assert.equal(tools.aamio_addon_qrcast_show.inputSchema.properties.address.pattern, "^[a-z2-7]{20}$");
   assert.ok(tools.aamio_addon_qrcast_show.description.includes("never a key"));
   assert.equal(tools.aamio_addon_qrcast_scan.annotations.readOnlyHint, true);
-  const [refused, isError] = await callTool(manifest, { home }, "aamio_addon_qrcast_show", { address: READ_KEY });
-  assert.deepEqual([isError, refused.status, refused.reason], [true, "invalid", "a_key_not_an_address"], "over MCP a key is refused by the process");
-  const [extra, wrong] = await callTool(manifest, { home }, "aamio_addon_qrcast_scan", { seconds: 5, engine: "aisense" });
-  assert.deepEqual([wrong, extra.given], [true, ["engine"]], "and scan has no engine: the camera is read here only");
-  const out = join(root, "tool-card.txt");
-  const [wrote, failed] = await callTool(manifest, { home }, "aamio_addon_qrcast_show", { address: ADDRESS, valid_for: 0, out });
-  assert.deepEqual([failed, wrote.status, wrote.format, wrote.engine], [false, "written", "text", "local"]);
-  assert.equal(readFileSync(out, "utf8"), symbol.text(symbol.encode("aamio:scope/" + ADDRESS)));
+  // show asks the core for the runtime's public key and where this machine's transports are reached, so it is called
+  // with the runtime of the home, as the server calls it.
+  const runtime = await NodeRuntime.open({ home, host: "http://127.0.0.1:9" });
+  try {
+    const [refused, isError] = await callTool(manifest, runtime, "aamio_addon_qrcast_show", { address: READ_KEY });
+    assert.deepEqual([isError, refused.status, refused.reason], [true, "invalid", "a_key_not_an_address"], "over MCP a key is refused by the process");
+    const [extra, wrong] = await callTool(manifest, runtime, "aamio_addon_qrcast_scan", { seconds: 5, engine: "aisense" });
+    assert.deepEqual([wrong, extra.given], [true, ["engine"]], "and scan has no engine: the camera is read here only");
+    const out = join(root, "tool-card.txt");
+    const [wrote, failed] = await callTool(manifest, runtime, "aamio_addon_qrcast_show", { address: ADDRESS, valid_for: 0, out });
+    assert.deepEqual([failed, wrote.status, wrote.format, wrote.engine], [false, "written", "text", "local"]);
+    assert.equal(readFileSync(out, "utf8"), symbol.text(symbol.encode("aamio:scope/" + ADDRESS)));
+    // A medium no transport here says where it is reached on goes on the card alone, with the runtime's own key.
+    const withVia = join(root, "tool-card-lan.txt");
+    const [viaLan] = await callTool(manifest, runtime, "aamio_addon_qrcast_show", { address: ADDRESS, valid_for: 0, via: ["lan"], out: withVia });
+    assert.equal(viaLan.card, `aamio:scope/${ADDRESS}?v=lan&k=${runtime.keys.public}`);
+    assert.ok(viaLan.note.includes("No enabled transport on this machine says where it is reached over lan"), viaLan.note);
+  } finally {
+    await runtime.close();
+  }
 
   const disabled = await cli(home, "addon", "disable", "qrcast");
   assert.equal(disabled.status, 0);

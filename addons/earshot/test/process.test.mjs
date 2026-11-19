@@ -8,6 +8,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as audio from "../src/audio.js";
+import * as card from "../src/card.js";
 import * as codec from "../src/codec.js";
 import * as process_ from "../src/process.js";
 import * as service from "../src/service.js";
@@ -487,3 +488,56 @@ test("a card heard with media and a key says how to bind, and binds nothing", as
   assert.ok(!("bind" in said.result) && !("via" in said.result.card), "a card of 0.4.0 is heard as it was");
 });
 
+// Where a medium is reached, as in aamio-python's tests/test_earshot_process.py.
+const BT_HERE = "bt:8C:1D:55:03:7B:53";
+const HERE_SAID = [{ transport: "bt", medium: "bt", here: [BT_HERE], at: NOW },
+  { transport: "lan", medium: "lan", here: ["lan:10.0.0.7:47474", "lan:10.0.0.8:47474"], at: NOW }];
+
+test("over MCP a medium gets where this machine is reached, and a model names no machine", async () => {
+  const tool = (args) => ({ ...request("tool", "aamio_addon_earshot_broadcast", args), own_key: KEY, here: HERE_SAID });
+  const w = world();
+  let said = await run(tool({ address: ADDRESS, via: ["bt"] }), w);
+  assert.equal(said.exit_code, 0);
+  assert.equal(w.encoded.at(-1)[0], `aamio:scope/${ADDRESS}?t=${NOW + 3600}&v=${BT_HERE}&k=${KEY}`);
+  assert.ok(!said.result.note.includes("without where you are reached") && said.result.note.includes(BT_HERE), said.result.note);
+  await run(tool({ address: ADDRESS, via: ["lan", "internet"] }), w);
+  assert.ok(w.encoded.at(-1)[0].endsWith(`&v=lan:10.0.0.7:47474,internet&k=${KEY}`), "the first address the transport said");
+  said = await run(tool({ address: ADDRESS, via: ["sound"] }), w);
+  assert.ok(w.encoded.at(-1)[0].endsWith(`&v=sound&k=${KEY}`), "a medium no transport says where it is reached on goes alone");
+  assert.ok(said.result.note.includes("without where you are reached on it") && said.result.note.includes("aamio transport list"), said.result.note);
+  const sent = w.encoded.length;
+  said = await run(tool({ address: ADDRESS, via: [BT_HERE] }), w);
+  assert.deepEqual([said.exit_code, said.result.reason], [2, "invalid_via"]);
+  assert.ok(said.result.fix.includes("another machine"), said.result.fix);
+  assert.equal(w.encoded.length, sent, "refused before anything was sent");
+  said = await run(tool({ address: ADDRESS, name: "rom-42", via: ["bt", "internet"] }), w);
+  assert.deepEqual([said.exit_code, said.result.reason], [2, "card_too_long"]);
+  assert.ok(said.result.fix.includes("18 bytes"), said.result.fix);
+});
+
+test("on the command line the address is given, and a medium without one says how", async () => {
+  let said = await run(request("command", "card", { address: ADDRESS, via: `${BT_HERE},internet`, key: KEY }));
+  assert.equal(said.exit_code, 0);
+  assert.ok(said.result.card.endsWith(`&v=${BT_HERE},internet&k=${KEY}`), said.result.card);
+  assert.ok(!said.result.note.includes("aamio transport here"), said.result.note);
+  said = await run(request("command", "card", { address: ADDRESS, via: "bt", key: KEY }));
+  assert.equal(said.exit_code, 0);
+  assert.ok(said.result.note.includes("aamio transport here bt") && said.result.note.includes("--via bt:ADDRESS"), said.result.note);
+});
+
+test("a card heard with where a medium is reached says the bind with the address, and binds nothing", async () => {
+  let said = await run(request("command", "listen"), world({ text: card.make(ADDRESS, "rom-42", NOW + 3600, [BT_HERE], KEY) }));
+  assert.deepEqual([said.result.status, said.result.card.via, said.result.card.key], ["heard", [BT_HERE], KEY]);
+  assert.ok(said.result.bind.includes(`aamio partner add rom-42 ${KEY}, then aamio transport bind rom-42 TRANSPORT --address ${BT_HERE}`), said.result.bind);
+  assert.ok(said.result.bind.includes("medium bt") && said.result.bind.includes("user's choice"), said.result.bind);
+  said = await run(request("command", "listen"), world({ text: card.make(ADDRESS, "rom-42", NOW + 3600, ["bt"], KEY) }));
+  assert.ok(!said.result.bind.includes("--address") && said.result.bind.includes("nobody in particular"), said.result.bind);
+});
+
+
+test("a bad address is said before a bad via, as before 0.5.0", async () => {
+  for (const [kind, call] of [["command", "card"], ["tool", "aamio_addon_earshot_broadcast"]]) {
+    const said = await run(request(kind, call, { address: "not-an-address", via: "x y", key: KEY }));
+    assert.deepEqual([said.exit_code, said.result.reason], [2, "not_a_write_address"], kind);
+  }
+});

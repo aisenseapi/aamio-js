@@ -29,8 +29,9 @@ aamio addon enable qrcast
 ```
 
 With another home, the folder is `addon-packages/npm` under it. The package
-has no dependencies and no install scripts. It needs aamio 0.7.0 or later
-for Node, the first that runs add-ons, Node 20 or later, and two programs for reading: zbarimg,
+has no dependencies and no install scripts. It needs aamio 0.8.1 or later
+for Node, the first that gives an add-on where this machine's transports are
+reached, Node 20 or later, and two programs for reading: zbarimg,
 which reads the codes, and ffmpeg, which takes frames from the camera.
 
 | System | zbarimg | ffmpeg |
@@ -76,6 +77,29 @@ clocks that differ, so a photo of an old code is not taken for a fresh one. The
 time is not signed: whoever saw the code can make a new one with a later time,
 so use a new scope for each room or occasion, since an address does not
 expire. A card seen is untrusted input, as a post on the board is.
+
+## Media, where they reach you, and a key, from 0.2.0
+
+From 0.2.0 the card says what Earshot's card from 0.5.0 says. `--via` names
+the media you prefer answers over, in order, at most three: internet, or the
+medium of a transport, as lan, alone or with where you are reached on it, as
+the transport says it. A card that names a medium other than internet carries
+your public key, which a reader binds that transport to:
+
+```text
+aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=lan:192.168.2.22:47474&k=KEY
+```
+
+Over MCP the code takes both from the runtime: its own key, and where this
+machine is reached on each medium, as its transports told the core; the model
+names the media alone. On the command line you give them, the key as `aamio
+whoami` shows it and the address as `aamio transport here lan` shows it. Only
+qrcast 0.2.0 and earshot 0.5.0 and newer read such a card. A card is at most
+128 bytes, as one sound carries, so the same card goes both ways. Everyone who
+sees the code can read the key and the address, and a code is not signed: a
+reader is told how to bind a transport to it, `aamio partner add NAME KEY` and
+then `aamio transport bind NAME TRANSPORT --address ADDRESS`, and binds
+nothing itself.
 
 ## Two engines
 

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import * as soundCard from "../../earshot/src/card.js";
 import * as camera from "../src/camera.js";
 import { NothingSeen, Refused, Unreachable, Unreadable } from "../src/errors.js";
 import * as processOf from "../src/process.js";
@@ -1036,4 +1037,48 @@ test("the process the core runs answers once on standard output and ends with th
   const asked = Buffer.from(JSON.stringify(request("command", "card", { address: SCOPE_KEY })));
   const code = await processOf.main(Readable.from([asked.subarray(0, 10), asked.subarray(10)]), { write: (text, done) => { wrote.push(text); setTimeout(done, 20); } });
   assert.deepEqual([code, wrote.length, JSON.parse(wrote[0]).result.reason], [2, 1, "a_key_not_an_address"]);
+});
+
+// ----------------------------------------------------------------- where a medium is reached, as in aamio-python's tests/test_qrcast_process.py
+
+const KEY = "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ";
+const BT_HERE = "bt:8C:1D:55:03:7B:53";
+const HERE_SAID = [{ transport: "bt", medium: "bt", here: [BT_HERE], at: NOW }];
+
+test("the card of 0.2.0 is earshot's, with media, where they are reached and the key", async () => {
+  const made = (await handle(request("command", "card", { address: ADDRESS, via: `${BT_HERE},internet`, key: KEY }), world().seams())).result;
+  assert.equal(made.card, `aamio:scope/${ADDRESS}?t=${NOW + 3600}&v=${BT_HERE},internet&k=${KEY}`);
+  assert.equal(made.card, soundCard.make(ADDRESS, null, NOW + 3600, [BT_HERE, "internet"], KEY), "a card seen and a card heard are one thing");
+  assert.ok(made.note.includes("everyone who sees the code") && made.note.includes("0.2.0"), made.note);
+  const said = await handle(request("command", "card", { address: ADDRESS, via: "bt" }), world().seams());
+  assert.deepEqual([said.exit_code, said.result.reason], [2, "key_needed"]);
+});
+
+test("over MCP show puts the runtime's key and where this machine is reached on the card", async (t) => {
+  const { also } = place(t);
+  const tool = (args) => ({ ...request("tool", "aamio_addon_qrcast_show", args), own_key: KEY, here: HERE_SAID });
+  let said = await handle(tool({ address: ADDRESS, via: ["bt"] }), world().seams());
+  also.push(dirname(said.result.file));
+  assert.equal(said.exit_code, 0);
+  assert.equal(said.result.card, `aamio:scope/${ADDRESS}?t=${NOW + 3600}&v=${BT_HERE}&k=${KEY}`);
+  said = await handle(tool({ address: ADDRESS, via: ["lan"] }), world().seams());
+  also.push(dirname(said.result.file));
+  assert.ok(said.result.card.endsWith(`&v=lan&k=${KEY}`) && said.result.note.includes("without where you are reached on it"), said.result.note);
+  said = await handle(tool({ address: ADDRESS, via: [BT_HERE] }), world().seams());
+  assert.deepEqual([said.exit_code, said.result.reason], [2, "invalid_via"]);
+});
+
+test("a card seen with where a medium is reached says the bind, and binds nothing", async (t) => {
+  const { picture } = place(t);
+  const text = soundCard.make(ADDRESS, "stue-tv", NOW + 3600, [BT_HERE], KEY);
+  const said = await handle(request("command", "read", { file: picture("bind.png") }), world({ texts: [text] }).seams());
+  assert.deepEqual([said.result.status, said.result.card.via], ["seen", [BT_HERE]]);
+  assert.ok(said.result.bind.includes(`aamio transport bind stue-tv TRANSPORT --address ${BT_HERE}`), said.result.bind);
+});
+
+test("a bad address is said before a bad via, as before 0.2.0", async () => {
+  for (const [kind, call] of [["command", "card"], ["tool", "aamio_addon_qrcast_show"]]) {
+    const said = await handle(request(kind, call, { address: "not-an-address", via: "x y", key: KEY }), world().seams());
+    assert.deepEqual([said.exit_code, said.result.reason], [2, "not_a_write_address"], kind);
+  }
 });

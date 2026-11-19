@@ -17,7 +17,14 @@ import * as service from "./service.js";
  * The request and the answer are contract 2 of aamio's add-ons, written up at
  * https://aamio.at/docs/addons. Nothing here needs the home: a card carries a
  * write address the caller gives, and a card heard goes back to the caller as
- * data, untrusted, for the core's own scope add and board post.
+ * data, untrusted, for the core's own scope add and board post. A card that
+ * names a medium other than internet carries a public key: on the command line
+ * the one the caller gives, and over MCP the runtime's own, which the core
+ * passes as own_key, so a model never puts another key on a card. Over MCP a
+ * medium also gets where this machine is reached on it, as its transport told
+ * the core and the core passes as here; a model gives the medium alone, so it
+ * never puts another machine's address on a card either. Nothing here knows a
+ * medium: any transport that says where it is reached is carried the same way.
  *
  *     kind    command | tool | probe
  *     name    card | broadcast | listen | decode
@@ -229,19 +236,69 @@ function expiresAt(args, now) {
 }
 
 /**
- * The card's text and its expiry. On the command line the key is the one given; over MCP it is the runtime's own, and
- * only when the card names a medium other than internet.
+ * Each bare medium of a transport given where this machine is reached on it, as the core said it (here): the first
+ * address of a transport with that medium that a card can carry. The entries, and the media no address was found for.
  */
-function cardOf(args, kind, ownKey, now) {
+function reached(entries, here) {
+  const found = [];
+  const unknown = [];
+  for (const entry of entries) {
+    const medium = card.mediumOf(entry);
+    if (medium === card.INTERNET || entry !== medium) {
+      found.push(entry);
+      continue;
+    }
+    let address = null;
+    for (const transport of Array.isArray(here) ? here : []) {
+      if (!isObject(transport) || transport.medium !== medium) continue;
+      address = (Array.isArray(transport.here) ? transport.here : []).find((said) => typeof said === "string" && card.ENTRY.test(said) && card.mediumOf(said) === medium) ?? null;
+      if (address !== null) break;
+    }
+    if (address === null) unknown.push(medium);
+    found.push(address ?? entry);
+  }
+  return [found, unknown];
+}
+
+/**
+ * The card's text, its expiry, and the media it names without where they are reached.
+ *
+ * On the command line the key and the addresses are the ones given. Over MCP the key is the runtime's own, only when the
+ * card names a medium other than internet, and each such medium gets where this machine is reached on it from here: the
+ * model gives the medium alone.
+ */
+function cardOf(args, kind, ownKey, here, now) {
   const expires = expiresAt(args, now);
+  // The address and the name first, as card.make checks them: a bad address is said before a bad via, as in 0.4.0.
+  card.checkAddress(args.address);
+  card.checkName(args.name);
+  let via = args.via;
   let key;
+  let unknown;
   if (kind === "tool") {
-    const media = card.checkVia(args.via);
-    key = media !== null && media.some((medium) => medium !== card.INTERNET) ? ownKey : null;
+    let entries = card.checkVia(via);
+    if (entries !== null && entries.some((entry) => entry !== card.mediumOf(entry))) {
+      throw new card.Refused("invalid_via", "Over MCP give the media alone, as bt or lan: where this machine is reached on each comes from its own transports, so a card never names another machine.");
+    }
+    unknown = [];
+    if (entries !== null) [entries, unknown] = reached(entries, here);
+    key = entries !== null && entries.some((entry) => card.mediumOf(entry) !== card.INTERNET) ? ownKey : null;
+    via = entries;
   } else {
     key = args.key;
+    unknown = (card.checkVia(via) ?? []).filter((entry) => entry !== card.INTERNET && entry === card.mediumOf(entry));
   }
-  return [card.make(args.address, args.name, expires, args.via, key), expires];
+  return [card.make(args.address, args.name, expires, via, key), expires, unknown];
+}
+
+/** What a card that names a medium without where it is reached leaves a listener without, or an empty string. */
+function unreached(unknown, kind) {
+  if (!unknown.length) return "";
+  const media = unknown.join(", ");
+  const how = kind === "tool"
+    ? `No enabled transport on this machine says where it is reached over ${media}: aamio transport list shows the transports and what they said.`
+    : `aamio transport here ${unknown[0]} shows where this machine is reached on it, and --via ${unknown[0]}:ADDRESS puts it on the card.`;
+  return ` The card names ${media} without where you are reached on it, so a listener's first ask goes to nobody in particular, as its transport sends that. ${how}`;
 }
 
 /** What a card with via or a key tells everyone within earshot, or an empty string for one without. */
@@ -256,15 +313,16 @@ function saysMore(text) {
 export function cardText(args, now) {
   let expires;
   let text;
+  let unknown;
   try {
-    [text, expires] = cardOf(args, "command", null, now);
+    [text, expires, unknown] = cardOf(args, "command", null, null, now);
   } catch (error) {
     if (!(error instanceof card.Refused)) throw error;
     return refused(error.reason, error.fix);
   }
   return {
     status: "card", card: text, bytes: Buffer.byteLength(text, "utf8"), expires_at: expires,
-    note: "This is the text the sound carries, and it fits a QR code as well. aamio addon earshot broadcast plays it." + saysMore(text),
+    note: "This is the text the sound carries, and it fits a QR code as well. aamio addon earshot broadcast plays it." + saysMore(text) + unreached(unknown, "command"),
   };
 }
 
@@ -279,15 +337,16 @@ async function privateFolder() {
 
 const clean = (folder) => rm(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }).catch(() => {});
 
-export async function broadcast(args, kind, encode, play, pause, now, write = null, ownKey = null) {
+export async function broadcast(args, kind, encode, play, pause, now, write = null, ownKey = null, here = null) {
   let expires;
   let text;
+  let unknown;
   let mode;
   let repeat;
   let engine;
   let out = null;
   try {
-    [text, expires] = cardOf(args, kind, ownKey, now);
+    [text, expires, unknown] = cardOf(args, kind, ownKey, here, now);
     mode = modeOf(args.mode, service.MODES, "audible");
     repeat = whole(args.repeat, 1, REPEAT_MAX, 1, "repeat");
     engine = engineOf(args.engine);
@@ -335,7 +394,7 @@ export async function broadcast(args, kind, encode, play, pause, now, write = nu
     if (reason !== null) return refused("out_not_written", `${out} could not be written whole: ${why(failure)}. Nothing was left there, so the same name can be given again.`);
     return {
       ...said, status: "written", file: out, bytes: sound.length,
-      note: "Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it.",
+      note: "Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it." + unreached(unknown, kind),
     };
   }
   const folder = await privateFolder();
@@ -365,7 +424,7 @@ export async function broadcast(args, kind, encode, play, pause, now, write = nu
     : "The card has no end, and neither does the address: use a new scope for the next room or occasion.";
   return {
     ...said, status: "played", repeat, player,
-    note: `Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with ${readPosts}, and answer one with ${by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer")}. ${good}${saysMore(text)}`,
+    note: `Played on this machine's speaker. Agents within earshot that were listening can now post into the scope: read their posts with ${readPosts}, and answer one with ${by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer")}. ${good}${saysMore(text)}${unreached(unknown, kind)}`,
   };
 }
 
@@ -412,8 +471,13 @@ function bindOf(found, name) {
   if (!media.length) {
     return `${trust}aamio partner add ${name} ${found.key} keeps the key in your address book. The card names no medium beside internet: answer in the scope.`;
   }
-  return `${trust}aamio partner add ${name} ${found.key}, then aamio transport bind ${name} TRANSPORT, where TRANSPORT is the one aamio transport list shows with the medium ${media[0]}, `
-    + "sends your messages to them over it. That is the user's choice, on the command line. Until then, answer in the scope, over aamio.at.";
+  const entry = media[0];
+  const medium = card.mediumOf(entry);
+  const [bind, where] = entry !== medium
+    ? [`aamio transport bind ${name} TRANSPORT --address ${entry}`, " The first ask goes to that address, where the card says they are reached."]
+    : [`aamio transport bind ${name} TRANSPORT`, ` The card says nothing of where they are reached on ${medium}, so the first ask goes to nobody in particular, as the transport sends that.`];
+  return `${trust}aamio partner add ${name} ${found.key}, then ${bind}, where TRANSPORT is the one aamio transport list shows with the medium ${medium}, `
+    + `sends your messages to them over it.${where} That is the user's choice, on the command line. Until then, answer in the scope, over aamio.at.`;
 }
 
 /** What a recording carries, read by the engine asked for, or here when aisense cannot be reached. */
@@ -569,7 +633,7 @@ export async function handle(request, seams = {}) {
   if (kind === "probe") return { result: { ok: true, name: NAME, version: VERSION, aamio_addon: CONTRACT }, exit_code: 0, is_error: false };
   const short = kind === "command" ? name : (kind === "tool" && typeof name === "string" && name.startsWith(TOOL) ? name.slice(TOOL.length) : null);
   if (kind === "command" && short === "card") return answer(cardText(args, now));
-  if (short === "broadcast") return answer(await broadcast(args, kind, encode, play, pause, now, write, request.own_key ?? null));
+  if (short === "broadcast") return answer(await broadcast(args, kind, encode, play, pause, now, write, request.own_key ?? null, request.here ?? null));
   if (short === "listen") return answer(await listen(args, kind, decode, record, clock));
   if (short === "decode") return answer(await decodeFile(args, kind, decode, clock));
   return answer(refused("unknown_call", `The add-on ${NAME} has no ${said(kind)} called ${said(name)}. aamio addon ${NAME} --help lists its commands, and aamio addon list its tools.`));

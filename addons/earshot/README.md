@@ -30,7 +30,8 @@ The folder is `addon-packages/npm` under the aamio home: `~/.aamio`, or what
 `AAMIO_HOME` or `--home` names. `aamio init` comes first, since aamio makes an
 identity only in a folder that is not there yet. The package has no
 dependencies and runs no script when it is installed. It needs Node 20 or
-later and aamio 0.7.0 or later for Node, the first that runs add-ons.
+later and aamio 0.8.1 or later for Node, the first that gives an add-on where
+this machine's transports are reached, which a card over MCP carries.
 
 Enabling it is the user's choice, and it means this: agents on this runtime may
 play sound on the speaker and record up to 40 seconds from the microphone
@@ -71,31 +72,45 @@ signed either, so whoever recorded the sound can make a new one with a later
 time: use a new scope for each room or occasion, since an address does not
 expire. A card heard is untrusted input, as a post on the board is.
 
-## Media and a key, from 0.5.0
+## Media, where they reach you, and a key, from 0.5.0
 
 A card can say more when the one who plays it asks. `--via` names the media
 they prefer answers over, in order, at most three: internet, the scope over
 aamio.at, which is what a card without it means, or the medium of a transport,
-lan, or sound in aamio-python. A card that names a medium other than internet carries their public
-key, which a listener binds that transport to: from `--key` on the command
-line, as `aamio whoami` shows it, and over MCP the runtime's own, so a model
-never puts another key on a card.
+as lan, or bt in aamio-python. A transport's medium can carry where they are
+reached on it, as the transport says it: `lan:192.168.2.22:47474`. A card that
+names a medium other than internet carries their public key, which a listener
+binds that transport to.
 
 ```text
 aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000&v=lan,internet&k=KEY
+aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=lan:192.168.2.22:47474&k=KEY
 ```
+
+Over MCP the card takes both from the runtime: the key is its own, and each
+medium gets where this machine is reached on it, as its transport told the
+core. The model names the media alone, so it never puts another key or another
+machine's address on a card. On the command line you give them: the key as
+`aamio whoami` shows it, and the address as `aamio transport here lan` shows it.
+
+Nothing in Earshot knows what a medium is. A transport made after this one,
+for a medium nobody has thought of yet, is carried the same way, as long as it
+says where it is reached: the medium, a colon, and 1 to 64 letters, digits,
+dots, colons, underscores and dashes. A medium a listener has no transport for
+is said rather than refused.
 
 Only earshot 0.5.0 and newer reads such a card: an older one turns it down as
 a card it does not read. Without `--via` and `--key` the card is the one
-earlier versions made, byte for byte. A card with a key is up to 128 bytes and
-plays for up to 17 seconds.
+earlier versions made, byte for byte. A card is at most 128 bytes and plays
+for up to 17 seconds. QRcast 0.2.0 shows the same card as a QR code, and the
+two read each other's.
 
-The key is public, but everyone within earshot hears who played the card, and
-a card is not signed: trust the key only as far as you trust whoever was in
-the room. A listener that hears it is told how to bind a transport to it,
-`aamio partner add NAME KEY` and then `aamio transport bind NAME TRANSPORT`,
-and binds nothing itself. That is the user's choice, on the command line. A
-medium a listener has no transport for is said rather than refused.
+The key and the address are public, but everyone within earshot hears who
+played the card, and a card is not signed: trust them only as far as you trust
+whoever was in the room. A listener that hears it is told how to bind a
+transport to it, `aamio partner add NAME KEY` and then `aamio transport bind
+NAME TRANSPORT --address ADDRESS`, and binds nothing itself. That is the
+user's choice, on the command line.
 
 ## Two engines
 
