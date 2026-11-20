@@ -237,31 +237,36 @@ function draw(text, format) {
 
 /**
  * Each bare medium of a transport given where this machine is reached on it, as the core said it (here): the first
- * address of a transport with that medium that a card can carry. The entries, and the media no address was found for.
+ * address of a transport with that medium that a card can carry. The entries; the media no transport of this machine
+ * said anything of, as one that is off (unknown); and the media its transport gives no address on that a card can carry,
+ * as sound or Bluetooth LE (silent): those go on the card alone, and nothing is wrong.
  */
 function reached(entries, here) {
   const found = [];
   const unknown = [];
+  const silent = [];
+  const transports = (Array.isArray(here) ? here : []).filter(isObject);
   for (const entry of entries) {
     const medium = card.mediumOf(entry);
     if (medium === card.INTERNET || entry !== medium) {
       found.push(entry);
       continue;
     }
+    const carriers = transports.filter((transport) => transport.medium === medium);
     let address = null;
-    for (const transport of Array.isArray(here) ? here : []) {
-      if (!isObject(transport) || transport.medium !== medium) continue;
+    for (const transport of carriers) {
       address = (Array.isArray(transport.here) ? transport.here : []).find((said) => typeof said === "string" && card.ENTRY.test(said) && card.mediumOf(said) === medium) ?? null;
       if (address !== null) break;
     }
-    if (address === null) unknown.push(medium);
+    if (address === null) (carriers.length ? silent : unknown).push(medium);
     found.push(address ?? entry);
   }
-  return [found, unknown];
+  return [found, unknown, silent];
 }
 
 /**
- * The card's text, its expiry, and the media it names without where they are reached.
+ * The card's text, its expiry, the media it names without where they are reached, and those of them this machine's
+ * transport gives no address on (silent, over MCP alone).
  *
  * On the command line the key and the addresses are the ones given. Over MCP the key is the runtime's own, only when the
  * card names a medium other than internet, and each such medium gets where this machine is reached on it from here: the
@@ -275,30 +280,40 @@ function cardOf(args, kind, ownKey, here, now) {
   let via = args.via;
   let key;
   let unknown;
+  let silent = [];
   if (kind === "tool") {
     let entries = card.checkVia(via);
     if (entries !== null && entries.some((entry) => entry !== card.mediumOf(entry))) {
       throw new Refused("invalid_via", "Over MCP give the media alone, as bt or lan: where this machine is reached on each comes from its own transports, so a card never names another machine.");
     }
     unknown = [];
-    if (entries !== null) [entries, unknown] = reached(entries, here);
+    if (entries !== null) [entries, unknown, silent] = reached(entries, here);
     key = entries !== null && entries.some((entry) => card.mediumOf(entry) !== card.INTERNET) ? ownKey : null;
     via = entries;
   } else {
     key = args.key;
     unknown = (card.checkVia(via) ?? []).filter((entry) => entry !== card.INTERNET && entry === card.mediumOf(entry));
   }
-  return [card.make(args.address, args.name, expires, via, key), expires, unknown];
+  return [card.make(args.address, args.name, expires, via, key), expires, unknown, silent];
 }
 
-/** What a card that names a medium without where it is reached leaves a reader without, or an empty string. */
-function unreached(unknown, kind) {
-  if (!unknown.length) return "";
+/**
+ * What a card that names a medium without where it is reached leaves a reader without, or an empty string. A medium
+ * this machine's transport gives no address on is said as such, and not as something to put right.
+ */
+function unreached(unknown, kind, silent = []) {
+  let said = "";
+  if (silent.length) {
+    const media = silent.join(" and ");
+    said += ` The card names ${media} without an address, as this machine's transport over ${media} gives none a card can carry: `
+      + "a reader's first ask goes to nobody in particular, as its transport sends that.";
+  }
+  if (!unknown.length) return said;
   const media = unknown.join(", ");
   const how = kind === "tool"
     ? `No enabled transport on this machine says where it is reached over ${media}: aamio transport list shows the transports and what they said.`
     : `aamio transport here ${unknown[0]} shows where this machine is reached on it, and --via ${unknown[0]}:ADDRESS puts it on the card.`;
-  return ` The card names ${media} without where you are reached on it, so a reader's first ask goes to nobody in particular, as its transport sends that. ${how}`;
+  return `${said} The card names ${media} without where you are reached on it, so a reader's first ask goes to nobody in particular, as its transport sends that. ${how}`;
 }
 
 /** What a card with via or a key tells everyone who sees the code, or an empty string for one without. */
@@ -336,11 +351,12 @@ export async function show(args, kind, encode, display, now, write = null, ownKe
   let expires;
   let text;
   let unknown;
+  let silent;
   let engine;
   let out;
   let format;
   try {
-    [text, expires, unknown] = cardOf(args, kind, ownKey, here, now);
+    [text, expires, unknown, silent] = cardOf(args, kind, ownKey, here, now);
     engine = engineOf(args.engine);
     [out, format] = outOf(args.out);
     if (engine === "aisense" && format !== null && format !== "png") {
@@ -381,7 +397,7 @@ export async function show(args, kind, encode, display, now, write = null, ownKe
     const how = format === "text" ? "Drawn as text, it reads on a terminal with a dark background; on a light one, use .png or .svg. " : "";
     return {
       ...said, status: "written", file: out, format, bytes: picture.length,
-      note: `Nothing was shown. ${how}Show the whole code with its white margin where the agents with a camera can see it: a cropped or squeezed code may not be read.${saysMore(text)}${unreached(unknown, kind)}`,
+      note: `Nothing was shown. ${how}Show the whole code with its white margin where the agents with a camera can see it: a cropped or squeezed code may not be read.${saysMore(text)}${unreached(unknown, kind, silent)}`,
     };
   }
   let folder;
@@ -407,28 +423,68 @@ export async function show(args, kind, encode, display, now, write = null, ownKe
   const read = by(kind, "aamio board find --scope NAME --wait 25", "aamio_board_find with scope and wait");
   return {
     ...said, status: "shown", file: path, viewer,
-    note: `Shown on this machine's screen, from ${path}, which stays there for the viewer. Agents whose camera sees it can now post into the scope: read their posts with ${read}, and answer one with ${by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer")}. ${good(expires)}${saysMore(text)}${unreached(unknown, kind)}`,
+    note: `Shown on this machine's screen, from ${path}, which stays there for the viewer. Agents whose camera sees it can now post into the scope: read their posts with ${read}, and answer one with ${by(kind, "aamio board answer POST TEXT --scope NAME", "aamio_board_answer")}. ${good(expires)}${saysMore(text)}${unreached(unknown, kind, silent)}`,
   };
 }
 
-/** What a card that names media or carries a key lets a reader do, said and never done: binding is the user's choice. */
-function bindOf(found, name) {
-  const media = (found.via ?? []).filter((entry) => entry !== card.INTERNET);
-  if (!media.length && found.key === undefined) return null;
-  if (media.length && found.key === undefined) {
-    return `The card asks for answers over ${media.join(", ")}, and carries no key to bind one to: answer in the scope, over aamio.at.`;
+/**
+ * This machine's transports as [name, medium], from what the core said of them (media), or null when it said nothing:
+ * on the command line, and from a core before 0.8.1.
+ */
+function ours(media) {
+  if (!Array.isArray(media)) return null;
+  return media.filter((item) => isObject(item) && ["transport", "medium"].every((field) => typeof item[field] === "string" && card.ENTRY.test(item[field]) && card.mediumOf(item[field]) === item[field]))
+    .map((item) => [item.transport, item.medium]);
+}
+
+/**
+ * What a card that names media or carries a key lets a reader do, said and never done: binding is the user's choice.
+ *
+ * With media, what the core said of this machine's transports over MCP, the first medium on the card that one of them
+ * carries is the one to bind, under that transport's name, so nobody has to know which transport carries which medium.
+ * Without it, on the command line, TRANSPORT stands for the transport (the review of 19 November 2026).
+ */
+function bindOf(found, name, media = null) {
+  const entries = (found.via ?? []).filter((entry) => entry !== card.INTERNET);
+  if (!entries.length && found.key === undefined) return null;
+  if (entries.length && found.key === undefined) {
+    return `The card asks for answers over ${entries.join(", ")}, and carries no key to bind one to: answer in the scope, over aamio.at.`;
   }
   const trust = "The card carries a public key, and a card is not signed: anyone who can put a code in front of the camera could have shown it. If you trust whoever showed it, ";
-  if (!media.length) {
+  if (!entries.length) {
     return `${trust}aamio partner add ${name} ${found.key} keeps the key in your address book. The card names no medium beside internet: answer in the scope.`;
   }
-  const entry = media[0];
+  const mine = ours(media);
+  let entry = entries[0];
+  let transport = null;
+  if (mine !== null) {
+    entry = null;
+    for (const candidate of entries) {
+      const carrier = mine.find(([, medium]) => medium === card.mediumOf(candidate));
+      if (carrier === undefined) continue;
+      [entry, transport] = [candidate, carrier[0]];
+      break;
+    }
+    if (entry === null) {
+      const asked = entries.map((candidate) => card.mediumOf(candidate)).join(", ");
+      return `${trust}aamio partner add ${name} ${found.key} keeps the key in your address book. The card asks for answers over ${asked}, and no transport on this machine `
+        + `carries ${entries.length === 1 ? "it" : "any of them"}: an add-on for one, enabled with aamio addon enable, lets you bind them over it. Until then, answer in the scope, over aamio.at.`;
+    }
+  }
   const medium = card.mediumOf(entry);
-  const [bind, where] = entry !== medium
-    ? [`aamio transport bind ${name} TRANSPORT --address ${entry}`, " The first ask goes to that address, where the card says they are reached."]
-    : [`aamio transport bind ${name} TRANSPORT`, ` The card says nothing of where they are reached on ${medium}, so the first ask goes to nobody in particular, as the transport sends that.`];
-  return `${trust}aamio partner add ${name} ${found.key}, then ${bind}, where TRANSPORT is the one aamio transport list shows with the medium ${medium}, `
-    + `sends your messages to them over it.${where} That is the user's choice, on the command line. Until then, answer in the scope, over aamio.at.`;
+  let bind = `aamio transport bind ${name} ${transport ?? "TRANSPORT"}`;
+  let where;
+  if (entry !== medium) {
+    bind += ` --address ${entry}`;
+    where = " The first ask goes to that address, where the card says they are reached.";
+  } else {
+    where = ` The card says nothing of where they are reached on ${medium}, so the first ask goes to nobody in particular, as the transport sends that.`;
+  }
+  const [which, over] = transport === null
+    ? [`, where TRANSPORT is the one aamio transport list shows with the medium ${medium},`, "it"]
+    : ["", transport === medium ? transport : `${transport}, this machine's transport for ${medium}`];
+  return `${trust}aamio partner add ${name} ${found.key}, then ${bind}${which} sends your messages to them over ${over}.${where} That is the user's choice, on the command line. `
+    + "Until then, answer in the scope, over aamio.at.";
 }
 
 /**
@@ -440,7 +496,7 @@ export function seenText(text) {
   return Array.from(String(text)).slice(0, SEEN_CHARS).join("");
 }
 
-function cardsSeen(texts, kind, now) {
+function cardsSeen(texts, kind, now, media = null) {
   const fresh = [];
   const old = [];
   const other = [];
@@ -468,7 +524,7 @@ function cardsSeen(texts, kind, now) {
       `aamio_scope_add with name ${name} and address ${found.address}, then aamio_board_post with scope ${name}. The post opens an inbox of its own, and an answer to it comes there: read it with aamio_read.`);
     const age = found.expires_at !== null ? ` It is good until ${when(found.expires_at)}.` : " It says no time it stops being good, so it may be a photo of any age.";
     const said = { status: "seen", card: found, note: SEEN + age, next: steps };
-    const bound = bindOf(found, name);
+    const bound = bindOf(found, name, media);
     if (bound !== null) said.bind = bound;
     if (fresh.length > 1) said.also_seen = fresh.slice(1, SEEN_KEPT);
     return said;
@@ -487,7 +543,7 @@ function cardsSeen(texts, kind, now) {
  * cannot be reached. A card is judged by the clock when it has been read, not
  * when the call began.
  */
-async function seenIn(data, pictureKind, kind, engine, decode, readLocal, clock) {
+async function seenIn(data, pictureKind, kind, engine, decode, readLocal, clock, media = null) {
   let used = engine;
   let reserve = null;
   let texts;
@@ -515,10 +571,10 @@ async function seenIn(data, pictureKind, kind, engine, decode, readLocal, clock)
     throw error;
   }
   if (!texts.length) return fallback({ status: "nothing_seen", reason: "nothing_seen", fix: NOTHING_HERE, engine: used }, reserve, "read");
-  return fallback({ ...cardsSeen(texts, kind, Math.floor(clock())), engine: used }, reserve, "read");
+  return fallback({ ...cardsSeen(texts, kind, Math.floor(clock()), media), engine: used }, reserve, "read");
 }
 
-export async function readFile(args, kind, decode, readLocal, clock) {
+export async function readFile(args, kind, decode, readLocal, clock, media = null) {
   let engine;
   try {
     engine = engineOf(args.engine);
@@ -561,7 +617,7 @@ export async function readFile(args, kind, decode, readLocal, clock) {
   if (size > most || data.length > most) return refused("too_big", `${name} is over 10 MiB, more than is read. Send a smaller picture of the code.`);
   const pictureKind = reader.kindOf(data.subarray(0, 16));
   if (pictureKind === null) return refused("not_a_picture", `${name} is not a PNG, JPEG, GIF or WebP picture. Take the picture in one of those formats, or convert it.`);
-  return seenIn(data, pictureKind, kind, engine, decode, readLocal, clock);
+  return seenIn(data, pictureKind, kind, engine, decode, readLocal, clock, media);
 }
 
 /**
@@ -569,7 +625,7 @@ export async function readFile(args, kind, decode, readLocal, clock) {
  * minute, so each frame's codes are judged by the clock when that frame was
  * read: a card that runs out halfway through is turned down.
  */
-export async function scan(args, kind, frames, readFrame, clock) {
+export async function scan(args, kind, frames, readFrame, clock, media = null) {
   let seconds;
   let chosen;
   try {
@@ -593,7 +649,7 @@ export async function scan(args, kind, frames, readFrame, clock) {
         return unreachable(error.reason, error.fix, null, { engine: "local" });
       }
       if (!texts.length) continue;
-      const said = cardsSeen(texts, kind, Math.floor(clock()));
+      const said = cardsSeen(texts, kind, Math.floor(clock()), media);
       if (said.status === "seen" || said.status === "expired") return { ...said, engine: "local", frames: count, frame_size: [width, height] };
       for (const item of said.seen) if (!other.some((held) => same(held, item))) other.push(item);
     }
@@ -634,8 +690,8 @@ export async function handle(request, seams = {}) {
   const short = kind === "command" ? name : (kind === "tool" && typeof name === "string" && name.startsWith(TOOL) ? name.slice(TOOL.length) : null);
   if (kind === "command" && short === "card") return answer(cardText(args, now));
   if (short === "show") return answer(await show(args, kind, encode, display, now, write, request.own_key ?? null, request.here ?? null));
-  if (short === "read") return answer(await readFile(args, kind, decode, readLocal, clock));
-  if (short === "scan") return answer(await scan(args, kind, frames, readFrame, clock));
+  if (short === "read") return answer(await readFile(args, kind, decode, readLocal, clock, request.media ?? null));
+  if (short === "scan") return answer(await scan(args, kind, frames, readFrame, clock, request.media ?? null));
   // A name is said as it is, and anything else as JSON, as Earshot says it: an object came out as [object Object].
   const said = (value) => (typeof value === "string" ? value : JSON.stringify(value ?? null));
   return answer(refused("unknown_call", `The add-on ${NAME} has no ${said(kind)} called ${said(name)}. aamio addon ${NAME} --help lists its commands, and aamio addon list its tools.`));

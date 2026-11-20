@@ -1076,6 +1076,44 @@ test("a card seen with where a medium is reached says the bind, and binds nothin
   assert.ok(said.result.bind.includes(`aamio transport bind stue-tv TRANSPORT --address ${BT_HERE}`), said.result.bind);
 });
 
+// Which transports this machine has, as the core says them over MCP (media).
+const MEDIA_SAID = [{ transport: "bt", medium: "bt" }, { transport: "lan", medium: "lan" }];
+
+test("over MCP the bind names the transport of the first medium on the card this machine has", async (t) => {
+  // Nobody has to know which transport carries which medium: the core says which this machine has (media), and the
+  // reader names the one to bind (the review of 19 November 2026).
+  const { picture } = place(t);
+  const text = soundCard.make(ADDRESS, "stue-tv", NOW + 3600, ["ble", BT_HERE], KEY);
+  const file = picture("media.png");
+  let said = await handle({ ...request("tool", "aamio_addon_qrcast_read", { file }), media: MEDIA_SAID }, world({ texts: [text] }).seams());
+  assert.equal(said.result.status, "seen");
+  assert.ok(said.result.bind.includes(`aamio partner add stue-tv ${KEY}, then aamio transport bind stue-tv bt --address ${BT_HERE} sends your messages to them over bt.`), said.result.bind);
+  said = await handle({ ...request("tool", "aamio_addon_qrcast_read", { file }), media: [{ transport: "lan", medium: "lan" }] }, world({ texts: [text] }).seams());
+  assert.ok(said.result.bind.includes("no transport on this machine carries any of them") && !said.result.bind.includes("aamio transport bind"), said.result.bind);
+  said = await handle({ ...request("tool", "aamio_addon_qrcast_scan", { seconds: 5 }), media: MEDIA_SAID }, world({ frames: [frame(4, 2, "card")], seen: { card: [text] } }).seams());
+  assert.ok(said.result.status === "seen" && said.result.bind.includes(`aamio transport bind stue-tv bt --address ${BT_HERE}`), said.result.bind);
+  const manifest = JSON.parse(readFileSync(new URL("../aamio-addon.json", import.meta.url), "utf8"));
+  for (const name of ["aamio_addon_qrcast_read", "aamio_addon_qrcast_scan"]) {
+    assert.deepEqual(manifest.tools.find((tool) => tool.name === name).needs, ["media"], `${name} asks which transports this machine has, and for nothing that starts one`);
+  }
+});
+
+test("over MCP a medium whose transport has no address goes on the card alone and nothing is wrong", async (t) => {
+  // As sound or Bluetooth LE: the core says the transport with an empty here (the review of 19 November 2026).
+  const { also } = place(t);
+  const tool = (here) => ({ ...request("tool", "aamio_addon_qrcast_show", { address: ADDRESS, via: ["ble", "bt"] }), own_key: KEY, here });
+  let said = await handle(tool([{ transport: "ble", medium: "ble", here: [], at: NOW }, ...HERE_SAID]), world().seams());
+  also.push(dirname(said.result.file));
+  assert.equal(said.exit_code, 0);
+  assert.ok(said.result.card.endsWith(`&v=ble,${BT_HERE}&k=${KEY}`), said.result.card);
+  assert.ok(said.result.note.endsWith(" The card names ble without an address, as this machine's transport over ble gives none a card can carry: "
+    + "a reader's first ask goes to nobody in particular, as its transport sends that."), said.result.note);
+  assert.ok(!said.result.note.includes("No enabled transport on this machine says"), "nothing to put right");
+  said = await handle(tool(HERE_SAID), world().seams());
+  also.push(dirname(said.result.file));
+  assert.ok(said.result.note.includes("No enabled transport on this machine says where it is reached over ble"), "no transport said anything of ble");
+});
+
 test("a bad address is said before a bad via, as before 0.2.0", async () => {
   for (const [kind, call] of [["command", "card"], ["tool", "aamio_addon_qrcast_show"]]) {
     const said = await handle(request(kind, call, { address: "not-an-address", via: "x y", key: KEY }), world().seams());

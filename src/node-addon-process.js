@@ -136,6 +136,21 @@ export async function hereOfTransports(runtime) {
   }
 }
 
+/**
+ * What a call that needs media gets: each enabled transport's name and
+ * medium, as the transport service's mediaForAddons finds it, from the
+ * manifests alone. Nothing is started. An empty list when no transport is
+ * enabled.
+ */
+export async function mediaOfTransports(runtime) {
+  try {
+    return await runtime.transportService().mediaForAddons();
+  } catch (error) {
+    if (!(error instanceof AddonError) && typeof error?.code !== "string") throw error;
+    throw new Refused("media_unknown", `Which transports this machine has could not be read: ${error.message}. aamio transport list shows them.`, "unreachable");
+  }
+}
+
 // ------------------------------------------------------------------ process
 
 function failure(manifest, reason, fix) {
@@ -178,13 +193,13 @@ export function childEnvironment(manifest, declared, from = process.env, windows
  * unreachable result with the reason, and the deadline kills it. It is
  * answered once, whichever of those comes first, and never throws.
  */
-export function run(manifest, kind, name, args, { subject = null, ownKey = null, here = null, stateDirectory = null, stderr = null, deadline = null, declared = true, limits = {} } = {}) {
+export function run(manifest, kind, name, args, { subject = null, ownKey = null, here = null, media = null, stateDirectory = null, stderr = null, deadline = null, declared = true, limits = {} } = {}) {
   const seconds = deadline ?? manifest.deadline;
   const mostOut = limits.answer ?? MAX_ANSWER_BYTES;
   const mostErr = limits.stderr ?? MAX_STDERR_BYTES;
   const stopWait = limits.stop ?? STOP_WAIT;
   const request = JSON.stringify({
-    aamio_addon: 2, kind, name, arguments: args, subject, own_key: ownKey, here, state_dir: stateDirectory, deadline_seconds: seconds,
+    aamio_addon: 2, kind, name, arguments: args, subject, own_key: ownKey, here, media, state_dir: stateDirectory, deadline_seconds: seconds,
     aamio: { version: CORE_VERSION, runtime: "node" },
   });
   const stop = `Reinstall it, or aamio addon disable ${manifest.NAME} to go on without it.`;
@@ -415,6 +430,7 @@ export async function runCommand(manifest, parsed, runtime, { stderr = null, lim
   let subject = null;
   let ownKey = null;
   let here = null;
+  let media = null;
   let host = null;
   try {
     for (const argument of spec.arguments ?? []) {
@@ -427,6 +443,7 @@ export async function runCommand(manifest, parsed, runtime, { stderr = null, lim
     }
     if ((spec.needs ?? []).includes("own_key")) ownKey = runtime.keys.public;
     if ((spec.needs ?? []).includes("here")) here = await hereOfTransports(runtime);
+    if ((spec.needs ?? []).includes("media")) media = await mediaOfTransports(runtime);
   } catch (refused) {
     if (!(refused instanceof Refused)) throw refused;
     return { code: 2, out: refusal(refused, { host, ...subjectFields(subject) }) };
@@ -438,7 +455,7 @@ export async function runCommand(manifest, parsed, runtime, { stderr = null, lim
   if (busy !== null) return { code: 5, out: refusal(busyRefusal(manifest, busy), { host }) };
   let answer;
   try {
-    answer = await run(manifest, "command", command, args, { subject, ownKey, here, stateDirectory: directory, stderr, limits });
+    answer = await run(manifest, "command", command, args, { subject, ownKey, here, media, stateDirectory: directory, stderr, limits });
   } finally {
     held.giveBack();
   }
@@ -522,6 +539,7 @@ export async function callTool(manifest, runtime, name, given, { ask = null, NoD
   let subject = null;
   let ownKey = null;
   let here = null;
+  let media = null;
   try {
     if (spec.host && args[spec.host] !== null && args[spec.host] !== undefined) host = args[spec.host] = normaliseHost(args[spec.host]);
     const roles = Object.entries(spec.subject ?? {});
@@ -532,6 +550,7 @@ export async function callTool(manifest, runtime, name, given, { ask = null, NoD
     // Outside the turn with the home, as the add-on's process is: a transport started for a moment to say where it is
     // reached takes up to ten seconds, and presence is still published meanwhile.
     if ((spec.needs ?? []).includes("here")) here = await hereOfTransports(runtime);
+    if ((spec.needs ?? []).includes("media")) media = await mediaOfTransports(runtime);
     if (host !== null && !(await serial(() => allowedHosts(runtime, manifest))).includes(host)) {
       const answer = await consent(manifest, runtime, name, host, subject, args, ask, NoDialog, serial);
       if (answer !== null) return [answer, "fix" in answer];
@@ -547,7 +566,7 @@ export async function callTool(manifest, runtime, name, given, { ask = null, NoD
   if (busy !== null) return [refusal(busyRefusal(manifest, busy), { host }), true];
   let answer;
   try {
-    answer = await run(manifest, "tool", name, args, { subject, ownKey, here, stateDirectory: directory, limits });
+    answer = await run(manifest, "tool", name, args, { subject, ownKey, here, media, stateDirectory: directory, limits });
   } finally {
     held.giveBack();
   }

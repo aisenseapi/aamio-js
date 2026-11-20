@@ -82,8 +82,8 @@ if (short === "orphan") {
   await wait(30000);
 }
 await say({ result: {
-  pong: true, kind: request.kind, name: request.name, arguments: request.arguments, subject: request.subject, own_key: request.own_key, here: request.here, state_dir: request.state_dir,
-  deadline_seconds: request.deadline_seconds, aamio: request.aamio, home_env: process.env.AAMIO_HOME ?? null, addons_env: process.env.AAMIO_ADDONS ?? null,
+  pong: true, kind: request.kind, name: request.name, arguments: request.arguments, subject: request.subject, own_key: request.own_key, here: request.here,
+  media: "media" in request ? request.media : "absent", state_dir: request.state_dir, deadline_seconds: request.deadline_seconds, aamio: request.aamio, home_env: process.env.AAMIO_HOME ?? null, addons_env: process.env.AAMIO_ADDONS ?? null,
   addon_env: process.env.AAMIO_ADDON ?? null, secret: process.env.AAMIO_TEST_SECRET ?? null, passthru: process.env.AAMIO_TEST_PASSTHRU ?? null,
 } });
 `;
@@ -104,6 +104,7 @@ export function manifestFor(name, { deadline = 2, hosts = true, environment = nu
       check: { help: "a website and a partner", arguments: [{ name: "site", help: "the website", host: true }, { name: "--partner", help: "a name in the address book", required: true, subject: "partner" }] },
       file: { help: "the runtime's own key", needs: ["own_key"] },
       where: { help: "where this machine's transports are reached", needs: ["here"] },
+      media: { help: "which transports this machine has", needs: ["media"] },
       local: { help: "no home needed", runtime: false, arguments: [{ name: "path" }] },
       sleep: { help: "never answers" },
       crash: { help: "dies" },
@@ -123,7 +124,7 @@ export function manifestFor(name, { deadline = 2, hosts = true, environment = nu
       {
         name: `aamio_addon_${name}_check`, description: "a website and a subject",
         inputSchema: { type: "object", properties: { site: { type: "string" }, partner: { type: "string" }, message: { type: "string" } }, required: ["site"], additionalProperties: false },
-        host: "site", subject: { partner: "partner", message: "message" }, needs: ["own_key", "here"],
+        host: "site", subject: { partner: "partner", message: "message" }, needs: ["own_key", "here", "media"],
       },
       { name: `aamio_addon_${name}_sleep`, description: "never answers", inputSchema: TOOL },
       { name: `aamio_addon_${name}_bytes`, description: "raw bytes", inputSchema: TOOL },

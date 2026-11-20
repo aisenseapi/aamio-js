@@ -534,6 +534,57 @@ test("a card heard with where a medium is reached says the bind with the address
   assert.ok(!said.result.bind.includes("--address") && said.result.bind.includes("nobody in particular"), said.result.bind);
 });
 
+// Which transports this machine has, as the core says them over MCP (media).
+const MEDIA_SAID = [{ transport: "bt", medium: "bt" }, { transport: "earshot-link", medium: "sound" }, { transport: "lan", medium: "lan" }];
+
+test("over MCP the bind names the transport of the first medium on the card this machine has", async () => {
+  // Nobody has to know which transport carries which medium: the core says which this machine has (media), and the
+  // listener names the one to bind (the review of 19 November 2026).
+  const bindOf = async (text, media) => (await run({ ...request("tool", "aamio_addon_earshot_listen"), media }, world({ text }))).result.bind;
+  const text = card.make(ADDRESS, "rom-42", NOW + 3600, ["ble", BT_HERE], KEY);
+  let bind = await bindOf(text, MEDIA_SAID);
+  assert.ok(bind.includes(`aamio partner add rom-42 ${KEY}, then aamio transport bind rom-42 bt --address ${BT_HERE} sends your messages to them over bt.`), bind);
+  assert.ok(!bind.includes("TRANSPORT"), "ble comes first on the card, and this machine has no transport for it");
+  bind = await bindOf(card.make(ADDRESS, "rom-42", NOW + 3600, ["sound"], KEY), MEDIA_SAID);
+  assert.ok(bind.includes("aamio transport bind rom-42 earshot-link sends your messages to them over earshot-link, this machine's transport for sound."), bind);
+  assert.ok(bind.includes("nobody in particular"), bind);
+  bind = await bindOf(text, [{ transport: "lan", medium: "lan" }]);
+  assert.ok(bind.includes(`aamio partner add rom-42 ${KEY} keeps the key`) && bind.includes("no transport on this machine carries any of them"), bind);
+  assert.ok(!bind.includes("aamio transport bind"), bind);
+  bind = await bindOf(text, [{ transport: "bt x", medium: "bt" }, "bt", { medium: "bt" }, { transport: "bt", medium: "bt:x" }]);
+  assert.ok(bind.includes("no transport on this machine carries"), "what is not a transport's name and medium is left out");
+  bind = await bindOf(text, null);
+  assert.ok(bind.includes("aamio transport bind rom-42 TRANSPORT") && bind.includes("the medium ble"), "a core before 0.8.1 says nothing of media");
+});
+
+test("the listen and decode tools take the media the core gives", async (t) => {
+  const heardCard = card.make(ADDRESS, "rom-42", NOW + 3600, ["lan", "internet"], KEY);
+  const listened = await run({ ...request("tool", "aamio_addon_earshot_listen"), media: MEDIA_SAID }, world({ text: heardCard }));
+  assert.equal(listened.exit_code, 0);
+  assert.ok(listened.result.bind.includes("aamio transport bind rom-42 lan sends your messages to them over lan."), listened.result.bind);
+  const file = join(await folder(t), "heard.wav");
+  await writeFile(file, wav(1));
+  const decoded = await run({ ...request("tool", "aamio_addon_earshot_decode", { file }), media: MEDIA_SAID }, world({ text: heardCard }));
+  assert.ok(decoded.result.bind.includes("aamio transport bind rom-42 lan sends your messages to them over lan."), decoded.result.bind);
+  const manifest = JSON.parse(await readFile(new URL("../aamio-addon.json", import.meta.url), "utf8"));
+  for (const name of ["aamio_addon_earshot_listen", "aamio_addon_earshot_decode"]) {
+    assert.deepEqual(manifest.tools.find((tool) => tool.name === name).needs, ["media"], `${name} asks which transports this machine has, and for nothing that starts one`);
+  }
+});
+
+test("over MCP a medium whose transport has no address goes on the card alone and nothing is wrong", async () => {
+  // As sound or Bluetooth LE: the core says the transport with an empty here (the review of 19 November 2026).
+  const tool = (here) => ({ ...request("tool", "aamio_addon_earshot_broadcast", { address: ADDRESS, via: ["ble", "bt"] }), own_key: KEY, here });
+  const w = world();
+  let said = await run(tool([{ transport: "ble", medium: "ble", here: [], at: NOW }, ...HERE_SAID]), w);
+  assert.equal(said.exit_code, 0);
+  assert.ok(w.encoded.at(-1)[0].endsWith(`&v=ble,${BT_HERE}&k=${KEY}`), w.encoded.at(-1)[0]);
+  assert.ok(said.result.note.endsWith(" The card names ble without an address, as this machine's transport over ble gives none a card can carry: "
+    + "a listener's first ask goes to nobody in particular, as its transport sends that."), said.result.note);
+  assert.ok(!said.result.note.includes("No enabled transport on this machine says"), "nothing to put right");
+  said = await run(tool(HERE_SAID), w);
+  assert.ok(said.result.note.includes("No enabled transport on this machine says where it is reached over ble"), "no transport said anything of ble");
+});
 
 test("a bad address is said before a bad via, as before 0.5.0", async () => {
   for (const [kind, call] of [["command", "card"], ["tool", "aamio_addon_earshot_broadcast"]]) {

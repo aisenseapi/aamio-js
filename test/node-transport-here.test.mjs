@@ -176,6 +176,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 }).on("close", () => process.exit(0));
 `;
 
+/** The stub as npm leaves it in a home: its package.json, its manifest as a transport over the medium stub, and STUB. */
+const STUB_PACKAGE = {
+  "package.json": JSON.stringify({ name: "aamio-stub", version: "0.1.0", aamioAddon: "./aamio-addon.json" }),
+  "aamio-addon.json": JSON.stringify({ aamio_addon: 3, name: "stub", version: "0.1.0", description: "A transport that never says where it is reached.",
+    transport: { medium: "stub", start: { node: "transport.js" }, platforms: ["linux", "darwin", "win32"], permissions: [] } }),
+  "transport.js": STUB,
+};
+
 test("a transport's own words on standard error are read in the system's code page when they are not UTF-8", async (t) => {
   const folder = mkdtempSync(join(tmpdir(), "aamio-here-stub-"));
   t.after(() => rmSync(folder, { recursive: true, force: true }));
@@ -478,31 +486,57 @@ test("a transport that says nothing of where it is reached is started once per v
     rmSync(dir, { recursive: true, force: true });
   });
   stateFolder(t, dir);
-  const manifest = { aamio_addon: 3, name: "stub", version: "0.1.0", description: "A transport that never says where it is reached.",
-    transport: { medium: "stub", start: { node: "transport.js" }, platforms: ["linux", "darwin", "win32"], permissions: [] } };
-  const home = await homeWith(dir, "a", "aamio-stub", "0.1.0", { "package.json": JSON.stringify({ name: "aamio-stub", version: "0.1.0", aamioAddon: "./aamio-addon.json" }),
-    "aamio-addon.json": JSON.stringify(manifest), "transport.js": STUB });
+  const home = await homeWith(dir, "a", "aamio-stub", "0.1.0", STUB_PACKAGE);
   await enable(home, "stub", { probe });
   const a = await NodeRuntime.open({ home, host: NOWHERE });
   opened.push(a);
   const marks = join(transports.workingFolder(home, "stub", { make: false }), "started.txt");
   const starts = () => (existsSync(marks) ? readFileSync(marks, "utf8").split("\n").filter(Boolean).length : 0);
   const service = a.transportService();
-  assert.deepEqual(await service.hereForAddons(), [], "it says nothing of where it is reached");
+  const first = await service.hereForAddons();
+  assert.deepEqual(first.map((item) => [item.transport, item.medium, item.here]), [["stub", "stub", []]],
+    "it says nothing of where it is reached, and is there all the same: a card knows the medium is this machine's");
   const kept = new transports.Config(home).here().stub;
   assert.deepEqual([kept.here, kept.version, starts()], [[], "0.1.0", 1]);
   const learn = service.learnHere;
   service.learnHere = async () => assert.fail("started again for a card");
-  assert.deepEqual(await service.hereForAddons(), []);
+  assert.deepEqual(await service.hereForAddons(), [{ transport: "stub", medium: "stub", here: [], at: kept.at }]);
   assert.deepEqual((await transports.listing(a)).transports.find((item) => item.name === "stub").here, []);
   // What another version said is not taken for this one's: it is asked again, once.
   service.learnHere = learn;
   new transports.Config(home).setHere("stub", "stub", [], 1, "0.0.9");
-  assert.deepEqual(await service.hereForAddons(), []);
+  assert.deepEqual((await service.hereForAddons()).map((item) => [item.transport, item.here]), [["stub", []]]);
   assert.deepEqual([starts(), new transports.Config(home).here().stub.version], [2, "0.1.0"]);
   const said = await transports.here(a, "stub");
   assert.deepEqual([said.here, said.note], [null, "stub says nothing of where it is reached: a version from before here (contract 3, B3), or a medium without addresses. "
     + "A card can name the medium stub without an address."]);
+});
+
+test("an add-on that needs media gets the enabled transports and nothing is started", async (t) => {
+  // A reader of a card asks only which media this machine has. Asking for here instead starts a transport that says
+  // nothing kept for a moment, and one over Bluetooth LE announces the machine as it starts (19 November 2026).
+  const dir = mkdtempSync(join(tmpdir(), "aamio-here-media-"));
+  const opened = [];
+  t.after(async () => {
+    for (const runtime of opened) await runtime.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  stateFolder(t, dir);
+  const home = await homeWith(dir, "a", "aamio-stub", "0.1.0", STUB_PACKAGE);
+  // And lan beside it, as npm leaves a second package.
+  const root = join(home, "addon-packages", "npm");
+  mkdirSync(join(root, "node_modules", "aamio-lan"));
+  for (const file of ["package.json", "aamio-addon.json", "transport.js"]) writeFileSync(join(root, "node_modules", "aamio-lan", file), readFileSync(join(lanDir, file)));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ private: true, dependencies: { "aamio-stub": "0.1.0", "aamio-lan": LAN_VERSION } }));
+  await enable(home, "stub", { probe });
+  await enable(home, "lan", { probe });
+  const a = await NodeRuntime.open({ home, host: NOWHERE });
+  opened.push(a);
+  const service = a.transportService();
+  service.learnHere = async () => assert.fail("started for media");
+  assert.deepEqual(await service.mediaForAddons(), [{ transport: "lan", medium: "lan" }, { transport: "stub", medium: "stub" }]);
+  assert.deepEqual(new transports.Config(home).here(), {}, "nothing was learned, and nothing kept");
+  assert.equal(existsSync(join(transports.workingFolder(home, "stub", { make: false }), "started.txt")), false, "and the stub was not started");
 });
 
 test("the command line says where a transport is reached, and binds a partner to an address it checks", async (t) => {

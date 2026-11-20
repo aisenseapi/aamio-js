@@ -45,9 +45,10 @@ export const ENABLED_FILE = "addons.json";
 // An entry of this runtime's in addons.json: a package of npm's.
 export const PREFIX = "npm:";
 export const KNOWN_CONTRACTS = [2, 3];
-// What a command or a tool may ask the core for: the runtime's public key, and where this machine's transports are
-// reached (here), for a card that says it. Never a partner's address, and never the home's key.
-export const NEEDS = ["own_key", "here"];
+// What a command or a tool may ask the core for: the runtime's public key, where this machine's transports are reached
+// (here), for a card that says it, and which transports it has (media), for a reader of a card that names the one to
+// bind. Never a partner's address, and never the home's key.
+export const NEEDS = ["own_key", "here", "media"];
 // What a transport may say it uses (contract 3, B1): shown before enable, never enforced, the ground for consent.
 export const TRANSPORT_PERMISSIONS = ["network_local", "network_internet", "bluetooth", "serial", "microphone", "speaker", "camera", "screen", "radio"];
 export const TRANSPORT_PLATFORMS = ["linux", "darwin", "win32"];
@@ -250,7 +251,7 @@ export class Manifest {
       if (spec.help !== undefined && typeof spec.help !== "string") this.wrong(`the help of the command ${name} is not text`);
       if (spec.runtime !== undefined && typeof spec.runtime !== "boolean") this.wrong(`runtime on the command ${name} is not true or false`);
       const needs = spec.needs ?? [];
-      if (!Array.isArray(needs) || needs.some((need) => !NEEDS.includes(need))) this.wrong(`needs on the command ${name} names something other than own_key and here`);
+      if (!Array.isArray(needs) || needs.some((need) => !NEEDS.includes(need))) this.wrong(`needs on the command ${name} names something other than own_key, here and media`);
       if (needs.length && spec.runtime === false) this.wrong(`the command ${name} needs ${needs.join(" and ")} and says it runs without a runtime`);
       this.checkArguments(name, spec);
     }
@@ -276,7 +277,7 @@ export class Manifest {
         }
       }
       const needs = spec.needs ?? [];
-      if (!Array.isArray(needs) || needs.some((need) => !NEEDS.includes(need))) this.wrong(`needs on the tool ${spec.name} names something other than own_key and here`);
+      if (!Array.isArray(needs) || needs.some((need) => !NEEDS.includes(need))) this.wrong(`needs on the tool ${spec.name} names something other than own_key, here and media`);
       if (spec.annotations !== undefined && spec.annotations !== null && !isObject(spec.annotations)) this.wrong(`annotations on the tool ${spec.name} is not an object`);
     }
   }
@@ -680,8 +681,8 @@ export function enableNote(distribution, environment, probed = true) {
   const asked = environment.length ? `, and ${environment.join(", ")}, which its manifest asks for` : "";
   const ran = probed ? "enable started it once just now, before the choice was recorded, to see that it answers as its manifest says." : "It was enabled already, and nothing of it ran now.";
   return `${distribution} runs here from now on, in a process of its own for each call. ${ran} ` +
-    "A call gets its arguments, a key aamio resolved for it, the runtime's public key and where this machine's transports are reached " +
-    "where a call asks for them, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, " +
+    "A call gets its arguments, a key aamio resolved for it, the runtime's public key, where this machine's transports are reached " +
+    "and which transports it has, where a call asks for them, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, " +
     `the locale, the interpreter's own settings, TLS roots and the proxy variables, which can carry credentials of their own${asked}, and never the ` +
     "home's key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions.";
 }

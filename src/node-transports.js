@@ -624,7 +624,11 @@ export class Service {
   /**
    * What an add-on that needs here gets: each enabled transport's medium and where it is reached, as the running one says
    * it, else as the home keeps it from this version of the transport, else learned now by a start of a moment, at most
-   * once per version. Never a partner's. A transport that said nothing of it is left out.
+   * once per version. Never a partner's.
+   *
+   * A transport that says nothing of it is there with an empty list: the medium is this machine's, and it has no address
+   * on it, as sound or Bluetooth LE, so a card names the medium alone and says nothing is wrong. One that could not say
+   * now, as when its medium is off, is left out (the review of 19 November 2026).
    */
   async hereForAddons() {
     const manifests = await this.manifests();
@@ -632,7 +636,7 @@ export class Service {
     const out = [];
     for (const [name, manifest] of manifests) {
       const entry = this.running.get(name);
-      const running = entry?.process && entry.process.readied ? entry.process.here : null;
+      const running = entry?.process && entry.process.readied ? [...(entry.process.here ?? [])] : null;
       const said = Object.hasOwn(kept, name) ? kept[name] : null;
       let here;
       let at;
@@ -641,18 +645,31 @@ export class Service {
       } else if (said !== null && said.medium === manifest.medium && (said.version === null || said.version === manifest.version)) {
         [here, at] = [said.here, said.at];
       } else {
+        let how;
         try {
-          [here] = await this.learnHere(name);
+          [here, how] = await this.learnHere(name);
         } catch (error) {
           if (!["transport_down", "transport_unknown"].includes(error?.code)) throw error;
           this.runtime.log?.(`transport ${name}: ${error.message}`);
-          here = null;
+          [here, how] = [null, "failed"];
         }
+        // It said ready: what it said of where it is reached, or nothing, which is an empty list.
+        if (how === "learned" || how === "running") here = [...(here ?? [])];
         at = unixNow();
       }
-      if (here && here.length) out.push({ transport: name, medium: manifest.medium, here: [...here], at });
+      if (here !== null && here !== undefined) out.push({ transport: name, medium: manifest.medium, here: [...here], at });
     }
     return out;
+  }
+
+  /**
+   * What an add-on that needs media gets: each enabled transport's name and medium, as its manifest says them, ordered by
+   * name. From the manifests alone, and nothing is started: a reader of a card asks only which media this machine has,
+   * and a transport over Bluetooth LE announces this machine as it starts (19 November 2026).
+   */
+  async mediaForAddons() {
+    const manifests = await this.manifests();
+    return [...manifests.keys()].sort().map((name) => ({ transport: name, medium: manifests.get(name).medium }));
   }
 
   async #startDue() {

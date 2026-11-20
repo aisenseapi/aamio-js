@@ -212,7 +212,9 @@ test("over MCP the tools come from the manifest, a key is refused by the process
   assert.equal(broadcast.inputSchema.properties.address.pattern, "^[a-z2-7]{20}$");
   assert.ok(broadcast.description.includes("never a key"));
   assert.equal(tools.get("aamio_addon_earshot_listen").annotations.readOnlyHint, true);
-  assert.deepEqual(tools.get("aamio_addon_earshot_decode"), manifest.tools[2], "the tool as its manifest has it");
+  // What a tool asks the core for (needs) is the core's to read, and is not listed.
+  const { needs, ...decode } = manifest.tools[2];
+  assert.deepEqual([tools.get("aamio_addon_earshot_decode"), needs], [decode, ["media"]], "the tool as its manifest has it");
   assert.equal(tools.has("aamio_addon_earshot_card"), false, "card is a command and not a tool");
 
   let reply = (await server.ask("tools/call", { name: "aamio_addon_earshot_broadcast", arguments: { address: READ_KEY } })).result;
