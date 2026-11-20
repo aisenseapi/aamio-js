@@ -3374,7 +3374,13 @@ export class NodeRuntime {
 
   /** The transports of this home, made at first use. */
   transportService() {
-    this.transports ??= new TransportService(this);
+    if (!this.transports) {
+      this.transports = new TransportService(this);
+      // Made first after the runtime let go of its home: stopped from the start, so a lookup through it starts nothing in
+      // a home another runtime may own now (a review of 20 November 2026). Nothing of it runs yet, so that is all its
+      // stop would do.
+      if (this.closed) this.transports.stopping = true;
+    }
     return this.transports;
   }
 

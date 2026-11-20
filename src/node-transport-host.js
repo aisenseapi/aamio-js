@@ -226,8 +226,15 @@ export class TransportProcess {
     } catch {
       // The process may be gone already.
     }
-    const timer = new Promise((resolve) => setTimeout(resolve, STOP_SECONDS * 1000, "late"));
-    if ((await Promise.race([exited, timer])) === "late") {
+    let timer = null;
+    const late = new Promise((resolve) => {
+      timer = setTimeout(resolve, STOP_SECONDS * 1000, "late");
+    });
+    const how = await Promise.race([exited, late]);
+    // Cleared once the process has ended: left to run, the timer kept a command that stopped a transport, as aamio
+    // transport here, alive five seconds more (20 November 2026).
+    clearTimeout(timer);
+    if (how === "late") {
       child.kill();
       await exited;
     }

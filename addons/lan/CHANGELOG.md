@@ -6,6 +6,12 @@ for somebody using it.
 
 ## 0.2.0 - 2026-11-19
 
+- A port is from 1 to 65535 everywhere: in an address a frame goes to, in
+  `AAMIO_LAN_PEERS` and in `AAMIO_LAN_PORT`. An address with a port out of
+  range is refused with `bad_address` before anything reaches the network, and
+  the transport goes on; before, it ended the transport in Python and sent the
+  datagram to another port in PHP. Port 0 in `AAMIO_LAN_PORT` is refused
+  before the transport starts.
 - Says where this machine is reached when the port opens, on each `ready`
   (`here`, contract 3): the address it listens on, or with 0.0.0.0 its own
   addresses on the network, at most four, the one a route out would use

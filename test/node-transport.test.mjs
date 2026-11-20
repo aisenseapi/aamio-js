@@ -10,6 +10,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createSocket } from "node:dgram";
 import { tmpdir } from "node:os";
@@ -19,7 +20,7 @@ import { Keys } from "../src/aamio.js";
 import * as carry from "../src/carry.js";
 import { CarryState, mark, profile } from "../src/node-carry-state.js";
 import { Carrier } from "../src/node-carrier.js";
-import { Reassembly, TransportFailed, TransportProcess, environment } from "../src/node-transport-host.js";
+import { Reassembly, STOP_SECONDS, TransportFailed, TransportProcess, environment } from "../src/node-transport-host.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pythonRepo = join(here, "..", "..", "aamio-python");
@@ -355,6 +356,62 @@ test("finding 5: a transport that stops reading never holds up the owner, its de
     const stopping = performance.now();
     await transport.stop();
     assert.ok(performance.now() - stopping < 6000);
+  } finally {
+    await transport.stop();
+  }
+});
+
+/**
+ * A transport in Node that describes itself as fake 0.1.0 and stops when asked, or with STUBBORN never does: for the stop
+ * itself, with no Python needed.
+ */
+const STOPPER = `"use strict";
+const { createInterface } = require("node:readline");
+const stubborn = process.env.STUBBORN === "1";
+if (stubborn) setInterval(() => {}, 1000);
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.t === "hello") {
+    process.stdout.write(JSON.stringify({ t: "describe", name: "fake", version: "0.1.0", aamio_addon: 3, medium: "fake",
+      properties: { max_frame_up: 1200, max_frame_down: 1200, rate_up: 1000000, rate_down: 1000000, direction: "duplex", addressing: "none",
+        link_ack: false, airtime: null, metadata_visible_to: "range", medium_encrypts: false } }) + "\\n");
+  } else if (message.t === "stop" && !stubborn) {
+    process.exit(0);
+  }
+}).on("close", () => {
+  if (!stubborn) process.exit(0);
+});
+`;
+
+test("a transport that stopped keeps no process alive for the five seconds a kill would have waited", () => {
+  // The timer for the kill ran on after the transport had ended, so a command that started one for a moment, as aamio
+  // transport here, ended five seconds late (20 November 2026). Measured in a process of its own, with nothing else to do.
+  const host = new URL("../src/node-transport-host.js", import.meta.url).href;
+  const script = `import { writeSync } from "node:fs";
+import { TransportProcess, environment } from ${JSON.stringify(host)};
+const transport = new TransportProcess("fake", "0.1.0", [process.execPath, "-e", ${JSON.stringify(STOPPER)}], ${JSON.stringify(tmpdir())},
+  environment([], ${JSON.stringify(baseEnv)}), { describeSeconds: 30 });
+await transport.start("0.0.0-test", "node", ${JSON.stringify(tmpdir())});
+await transport.stop();
+const stopped = performance.now();
+process.on("exit", () => writeSync(1, String(Math.round(performance.now() - stopped))));
+`;
+  const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: baseEnv, encoding: "utf8", timeout: 60_000 });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.ok(ran.stdout !== "" && Number(ran.stdout) < 2500, `the process lived on ${ran.stdout} ms after the stop`);
+});
+
+test("a transport that does not stop when asked is killed after five seconds", async () => {
+  const transport = new TransportProcess("fake", "0.1.0", [process.execPath, "-e", STOPPER], tmpdir(), { ...environment([], baseEnv), STUBBORN: "1" },
+    { describeSeconds: 30 });
+  try {
+    await transport.start("0.0.0-test", "node", tmpdir());
+    const child = transport.child;
+    const began = performance.now();
+    await transport.stop();
+    const took = performance.now() - began;
+    assert.ok(took >= STOP_SECONDS * 1000 - 200 && took < STOP_SECONDS * 1000 + 3000, `the stop took ${Math.round(took)} ms`);
+    assert.ok(child.exitCode !== null || child.signalCode !== null, "and the process has ended");
   } finally {
     await transport.stop();
   }

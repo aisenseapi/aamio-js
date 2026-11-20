@@ -32,12 +32,39 @@ const CREDIT = 32;
 const MAX_FRAME = 1200;
 const RETRY_MS = 2000;
 const HERE_MOST = 4;
-const portText = process.env.AAMIO_LAN_PORT ?? "47474";
-if (!/^[0-9]{1,5}$/.test(portText) || Number(portText) < 1 || Number(portText) > 65535) {
-  process.stderr.write(`aamio-lan: AAMIO_LAN_PORT is no port: ${portText}\n`);
+
+/**
+ * A port from 1 to 65535, from its decimal digits, or null. Out of range, a port went to the socket: in Node the frame's
+ * send failed, in Python the transport ended, and in PHP the datagram went to another port and said sent (a review of
+ * 20 November 2026). Port 0 asks the system to choose, and a ready would then name a port nobody can reach.
+ */
+function portOf(text) {
+  if (typeof text !== "string" || !/^[0-9]+$/.test(text)) return null;
+  const number = Number(text);
+  return number >= 1 && number <= 65535 ? number : null;
+}
+
+/**
+ * text as Python's repr writes it, so the line that leaves a peer out is the same as aamio-python's: in single quotes, or
+ * in double ones when it holds a single quote and no double, with what is not printable escaped.
+ */
+function quoted(text) {
+  const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
+  const named = { "\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r" };
+  return quote + text.replace(/[\\']|(?! )[\p{C}\p{Z}]/gu, (c) => {
+    if (c === "'") return quote === "'" ? "\\'" : c;
+    if (named[c]) return named[c];
+    const code = c.codePointAt(0);
+    const [mark, width] = code < 0x100 ? ["x", 2] : code < 0x10000 ? ["u", 4] : ["U", 8];
+    return `\\${mark}${code.toString(16).padStart(width, "0")}`;
+  }) + quote;
+}
+
+const port = portOf((process.env.AAMIO_LAN_PORT ?? "47474").trim());
+if (port === null) {
+  process.stderr.write("aamio-lan: AAMIO_LAN_PORT must be a port from 1 to 65535\n");
   process.exit(1);
 }
-const port = Number(portText);
 const bind = process.env.AAMIO_LAN_BIND ?? "0.0.0.0";
 const broadcastSetting = (process.env.AAMIO_LAN_BROADCAST ?? "255.255.255.255").trim();
 const broadcast = ["", "none"].includes(broadcastSetting.toLowerCase()) ? null : broadcastSetting;
@@ -114,8 +141,8 @@ async function addresses() {
 const peers = [];
 for (const part of (process.env.AAMIO_LAN_PEERS ?? "").split(",").map((text) => text.trim()).filter(Boolean)) {
   const at = part.lastIndexOf(":");
-  const peerPort = Number(part.slice(at + 1));
-  if (at <= 0 || !Number.isInteger(peerPort) || peerPort < 1 || peerPort > 65535) process.stderr.write(`aamio-lan: ${JSON.stringify(part)} is no host:port, and is left out\n`);
+  const peerPort = portOf(part.slice(at + 1));
+  if (at <= 0 || peerPort === null) process.stderr.write(`aamio-lan: ${quoted(part)} is no host:port with a port from 1 to 65535, and is left out\n`);
   else peers.push([part.slice(0, at), peerPort]);
 }
 
@@ -160,8 +187,10 @@ function open() {
 function targets(to) {
   if (to !== null && to !== undefined) {
     const parts = String(to).split(":");
-    if (parts.length !== 3 || parts[0] !== "lan" || !parts[1] || !/^[0-9]{1,5}$/.test(parts[2])) throw new Error("bad address");
-    return [[parts[1], Number(parts[2])]];
+    // Another medium, no host or a port out of range is refused here, and never reaches the socket.
+    const toPort = parts.length === 3 && parts[0] === "lan" && parts[1] ? portOf(parts[2]) : null;
+    if (toPort === null) throw new Error("bad address");
+    return [[parts[1], toPort]];
   }
   const found = [...peers];
   if (broadcast !== null) found.push([broadcast, port]);
@@ -182,7 +211,7 @@ function send(message, done) {
   try {
     found = targets(message.to);
   } catch {
-    return done({ t: "error", id: message.id, code: "bad_address", message: "an address is lan:<ip>:<port>" });
+    return done({ t: "error", id: message.id, code: "bad_address", message: "an address is lan:<ip>:<port>, with a port from 1 to 65535" });
   }
   if (found.length === 0) return done({ t: "error", id: message.id, code: "nowhere", message: "no broadcast and no peers: a frame to nobody in particular has nowhere to go" });
   const datagram = Buffer.concat([MAGIC, me, frame]);
@@ -199,7 +228,7 @@ function send(message, done) {
     try {
       socket.send(datagram, peerPort, host, (error) => went(host, peerPort, error));
     } catch (error) {
-      // Refused before it was tried, as a port no datagram can go to: that datagram did not go either.
+      // Refused before it was tried, as by a socket that has closed: that datagram did not go either.
       went(host, peerPort, error);
     }
   }

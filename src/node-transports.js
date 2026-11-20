@@ -360,6 +360,9 @@ export class Service {
     this.stopping = false;
     // Starts under way, which stop waits for before it says that nothing of this service runs.
     this.starts = new Set();
+    // A start of a moment under way, by transport name: the promise of its answer. One at a time per transport, never
+    // beside its ordinary start, and none after the stop (a review of 20 November 2026).
+    this.learning = new Map();
     // The environment a transport's variables are read from: process.env, unless a test or an embedder says otherwise.
     this.environ = null;
     this.knownAt = 0;
@@ -594,26 +597,50 @@ export class Service {
    * like any other, not a probe, since a probe takes nothing of the medium in use and so would say nothing.
    */
   async learnHere(name, seconds = LEARN_SECONDS) {
-    const entry = this.running.get(name);
-    // Never a second one beside it: the two would fight over the medium, as a port or a channel.
-    if (entry?.process) return [entry.process.here, entry.process.readied ? "running" : "starting"];
     const manifest = (await this.manifests()).get(name);
     if (!manifest) {
       throw coded("transport_unknown", `no enabled transport is called ${name}. aamio addon list shows what is installed, and aamio addon enable ${name} lets it run here`);
     }
+    // From here to the reservation below nothing is awaited, so no other start comes in between.
+    if (this.stopping) {
+      // Its owner has let go of the home: nothing starts any more, not even for a moment. Two lookups that overlapped a
+      // close started a transport after the next owner held the home (a review of 20 November 2026).
+      return [null, "stopping"];
+    }
+    const entry = this.running.get(name);
+    // Never a second one beside it: the two would fight over the medium, as a port or a channel.
+    if (entry?.process) return [entry.process.here, entry.process.readied ? "running" : "starting"];
+    // Nor beside the ordinary start while that one starts it.
+    if (entry?.starting) return [null, "starting"];
+    // One start of a moment per transport: a second lookup waits for the first one's answer.
+    const under = this.learning.get(name);
+    if (under) return await under;
+    const mine = this.#learnOnce(name, manifest, seconds);
+    this.learning.set(name, mine);
+    try {
+      return await mine;
+    } finally {
+      if (this.learning.get(name) === mine) this.learning.delete(name);
+    }
+  }
+
+  /** The start of a moment itself, reserved by learnHere: started, asked, stopped, and kept unless stopped meanwhile. */
+  async #learnOnce(name, manifest, seconds) {
     const folder = workingFolder(this.runtime.home, name);
     const transport = new TransportProcess(name, manifest.version, [process.execPath, manifest.entry], folder,
       environmentFor(manifest, { base: this.environ ?? process.env }), { log: (line) => this.runtime.log?.(line) });
     try {
       await transport.start(CORE_VERSION, "node", folder);
       const until = now() + seconds;
-      while (!transport.readied && now() < until) await transport.poll(100);
+      while (!transport.readied && now() < until && !this.stopping) await transport.poll(100);
     } catch (error) {
       if (!(error instanceof TransportFailed) && typeof error?.code !== "string") throw error;
       throw coded("transport_down", `${name} did not start to say where it is reached: ${error.message}`);
     } finally {
       await transport.stop();
     }
+    // Stopped while it started: an owner that has let go of the home writes nothing into it.
+    if (this.stopping) return [null, "stopping"];
     if (!transport.readied) return [null, "not_ready"];
     // Said nothing is kept too, as an empty list, so a transport over a medium without addresses is not started again
     // for every card: the microphone of a transport over sound opened each time (the review of 19 November 2026).
@@ -677,6 +704,8 @@ export class Service {
     for (const [name, entry] of this.running) {
       if (this.stopping) return;
       if (entry.carrier || entry.starting || !entry.manifest || entry.down !== null || at < entry.next) continue;
+      // Started for a moment just now, to say where it is reached: the ordinary start waits for that one to end.
+      if (this.learning.has(name)) continue;
       const folder = workingFolder(this.runtime.home, name);
       const transport = new TransportProcess(name, entry.manifest.version, [process.execPath, entry.manifest.entry], folder,
         environmentFor(entry.manifest, { base: this.environ ?? process.env }), { log: (line) => this.runtime.log?.(line) });
@@ -789,8 +818,9 @@ export class Service {
     this.running.clear();
     for (const entry of entries) if (entry.process) await entry.process.stop();
     // A start under way adds and starts nothing more now, and stops what it was starting itself. It is waited for,
-    // so nothing of this service runs when stop returns and the owner lets go of the home.
-    await Promise.allSettled([...this.starts]);
+    // so nothing of this service runs when stop returns and the owner lets go of the home. So is a start of a moment:
+    // it sees the stop, stops its process and keeps nothing.
+    await Promise.allSettled([...this.starts, ...this.learning.values()]);
   }
 
   status() {
@@ -1005,6 +1035,10 @@ export async function here(runtime, name) {
   }
   const [found, how] = await service.learnHere(name);
   const medium = manifests.get(name).medium;
+  if (how === "stopping") {
+    return { transport: name, medium, here: null,
+      note: `This runtime is letting go of the home, so ${name} was not started and nothing was learned. Ask again from the aamio that owns it now.` };
+  }
   if (how === "starting") {
     return { transport: name, medium, here: null, note: `${name} is starting in this process and has not said it is ready yet: ask again in a moment.` };
   }

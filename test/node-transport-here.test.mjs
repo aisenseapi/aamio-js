@@ -566,3 +566,152 @@ test("the command line says where a transport is reached, and binds a partner to
   assert.deepEqual(listed.transports[0].here, [`lan:127.0.0.1:${port}`]);
   assert.deepEqual([listed.bindings[0].addresses.lan.address, listed.bindings[0].addresses.lan.from], ["lan:127.0.0.1:47474", "you"]);
 });
+
+// ------------------------------------------------------------- a start of a moment, one at a time (20 November 2026)
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const ended = (child) => child.exitCode !== null || child.signalCode !== null;
+
+/**
+ * Every start of a transport in this process counted, with the child it started and how many children of earlier starts
+ * still ran beside it, each held back by delay so lookups overlap; as it was again after the test.
+ */
+function countingStarts(t, delay = 0) {
+  const made = [];
+  const start = TransportProcess.prototype.start;
+  TransportProcess.prototype.start = async function (...args) {
+    if (delay) await sleep(delay);
+    const beside = made.filter((earlier) => !ended(earlier.child)).length;
+    const started = start.apply(this, args);
+    made.push({ name: this.name, child: this.child, transport: this, beside });
+    return started;
+  };
+  t.after(() => {
+    TransportProcess.prototype.start = start;
+  });
+  return made;
+}
+
+/** The UDP port held, as another program holds one: the lan transport says down on it and is never ready. */
+async function holdPort(t, port) {
+  const holder = createSocket({ type: "udp4", reuseAddr: false });
+  await new Promise((resolve) => holder.bind({ port, address: "127.0.0.1", exclusive: true }, resolve));
+  let held = true;
+  const release = async () => {
+    if (!held) return;
+    held = false;
+    await new Promise((resolve) => holder.close(resolve));
+  };
+  t.after(release);
+  return release;
+}
+
+async function until(condition, seconds = 15) {
+  const deadline = Date.now() + seconds * 1000;
+  while (!condition()) {
+    assert.ok(Date.now() < deadline, "the condition did not come about in time");
+    await sleep(20);
+  }
+}
+
+test("two lookups at once start the transport once, and both get its answer", async (t) => {
+  // Two overlapping lookups started two children for the same transport (a review of 20 November 2026).
+  const { a, ports } = await lanHomes(t, { partners: false });
+  const made = countingStarts(t, 500);
+  const said = await Promise.all([transports.here(a, "lan"), transports.here(a, "lan")]);
+  assert.deepEqual(made.map((start) => start.name), ["lan"], "one start of a moment, and the second lookup waited for it");
+  for (const answer of said) {
+    assert.deepEqual(answer.here, [`lan:127.0.0.1:${ports.a}`]);
+    assert.ok(answer.note.startsWith("It was started for a moment to say this, and stopped again."), answer.note);
+  }
+  assert.deepEqual([ended(made[0].child), a.transportService().learning.size], [true, 0]);
+  assert.deepEqual(new transports.Config(a.home).here().lan.here, [`lan:127.0.0.1:${ports.a}`]);
+  assert.ok(await portIsFree(ports.a), "the port is given back");
+});
+
+test("after the close nothing starts, not even for a moment, and transport here says why", async (t) => {
+  const { a } = await lanHomes(t, { partners: false });
+  const made = countingStarts(t);
+  const service = a.transportService();
+  await a.close();
+  assert.deepEqual(await service.learnHere("lan"), [null, "stopping"]);
+  assert.deepEqual(await transports.here(a, "lan"), { transport: "lan", medium: "lan", here: null,
+    note: "This runtime is letting go of the home, so lan was not started and nothing was learned. Ask again from the aamio that owns it now." });
+  assert.deepEqual(await service.hereForAddons(), [], "an add-on that needs here gets nothing learned either");
+  assert.deepEqual([made, new transports.Config(a.home).here()], [[], {}]);
+});
+
+test("a close while a transport starts for a moment ends it, waits for it and keeps nothing", async (t) => {
+  // The old owner neither leaves a child behind nor writes where the transport is reached into a home it let go of, and
+  // the lookup ends with the close instead of after its ten seconds (a review of 20 November 2026).
+  const { a, ports } = await lanHomes(t, { partners: false });
+  const made = countingStarts(t);
+  await holdPort(t, ports.a);
+  const service = a.transportService();
+  let answer = null;
+  const lookup = service.learnHere("lan").then((said) => {
+    answer = said;
+  });
+  // Described, and so waiting for a ready that does not come while the port is held.
+  await until(() => service.learning.has("lan") && made.length === 1 && made[0].transport.properties !== null);
+  const began = performance.now();
+  await a.close();
+  assert.deepEqual(answer, [null, "stopping"], "the lookup had ended when the close let go of the home");
+  assert.ok(performance.now() - began < 8000, `it ended with the close: ${Math.round(performance.now() - began)} ms`);
+  await lookup;
+  assert.deepEqual([made.length, ended(made[0].child), service.learning.size], [1, true, 0], "its child has ended");
+  assert.deepEqual(new transports.Config(a.home).here(), {}, "nothing is kept in a home it let go of");
+});
+
+test("the ordinary start waits while a transport starts for a moment, and starts it once that one has ended", async (t) => {
+  const { a, ports } = await lanHomes(t);
+  await transports.bind(a, "b", "lan");
+  const made = countingStarts(t);
+  const release = await holdPort(t, ports.a);
+  const service = a.transportService();
+  const lookup = service.learnHere("lan", 2);
+  await until(() => service.learning.has("lan") && made.length === 1);
+  await service.start();
+  // A few rounds of the service's loop, which would have started it.
+  await sleep(600);
+  assert.deepEqual([made.length, service.running.get("lan").process, service.status()], [1, null, { lan: "down: waiting to start again" }],
+    "only the start of a moment runs, and the ordinary start waits for it");
+  assert.deepEqual(await lookup, [null, "not_ready"]);
+  await release();
+  await until(() => service.status().lan === "up");
+  assert.equal(made.length, 2, "the ordinary start started it once the start of a moment had ended");
+  assert.equal(made[1].beside, 0, "and not beside the child of the moment, which had ended before it");
+});
+
+test("a lookup that ran out of time leaves nothing behind, and a later one learns", async (t) => {
+  const { a, ports } = await lanHomes(t, { partners: false });
+  const release = await holdPort(t, ports.a);
+  const service = a.transportService();
+  assert.deepEqual(await service.learnHere("lan", 2), [null, "not_ready"], "another program holds the port: no ready within the time");
+  assert.deepEqual([service.learning.size, new transports.Config(a.home).here()], [0, {}]);
+  await release();
+  assert.deepEqual(await service.learnHere("lan"), [[`lan:127.0.0.1:${ports.a}`], "learned"]);
+  assert.deepEqual(new transports.Config(a.home).here().lan.here, [`lan:127.0.0.1:${ports.a}`]);
+});
+
+test("a transport service made first after the close is stopped from the start and starts nothing", async (t) => {
+  // A transport service made for the first time after the close started out not stopped, so a lookup through it could
+  // still start a child in a home another runtime may own (a review of 20 November 2026).
+  const dir = mkdtempSync(join(tmpdir(), "aamio-here-closed-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  stateFolder(t, dir);
+  const home = await homeWithLan(dir, "a");
+  await enable(home, "lan", { probe });
+  const made = countingStarts(t);
+  const a = await NodeRuntime.open({ home, host: NOWHERE });
+  await a.close();
+  assert.ok(!a.transports, "no transport service was made before the close");
+  const service = a.transportService();
+  const [port] = await freePorts(1);
+  service.environ = { ...process.env, ...lanOnly(port) };
+  assert.equal(service.stopping, true);
+  assert.deepEqual(await service.learnHere("lan"), [null, "stopping"]);
+  assert.equal((await transports.here(a, "lan")).note,
+    "This runtime is letting go of the home, so lan was not started and nothing was learned. Ask again from the aamio that owns it now.");
+  assert.deepEqual([made, new transports.Config(home).here()], [[], {}]);
+});
