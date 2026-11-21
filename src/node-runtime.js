@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { open, readFile, rename, stat as fsStat, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Aamio, AamioError, BOARD_POST_MARGIN, BOARD_TTL, DEFAULT_BASE, DEFAULT_BOARD, GateStop, refusedOnce, withinBudget, VERIFYUM_MCP, checkMessage, gatePlan, isEnvelope, isKey, keyHash, newScopeKey, scopeAddress, sha256hex, threadSigningInput } from "./aamio.js";
 import { CarryRefused } from "./carry.js";
@@ -1594,7 +1594,7 @@ export class NodeRuntime {
     if (typeof to === "string" && ADDRESS.test(to)) {
       const key = this.state.peers[to];
       if (!key) {
-        throw runtimeError("unknown_address", `no key known for address ${to}. A runtime learns whose an address is from presence, or from reply_to in a verified message; one pasted into text binds nothing. Send to the partner by name, or answer a message at its reply_to. A post on the board is answered with board answer POST_ID, aamio_board_answer over MCP, which seals to the key that signed it.`);
+        throw runtimeError("unknown_address", `no key known for address ${to}. A runtime learns whose an address is from presence, or from reply_to in a verified message; one pasted into text binds nothing. Send to the partner by name, or answer a message at its reply_to. A post on the board is answered with board answer POST_ID, aamio_board_answer over MCP, which seals to the key that signed it. If its owner holds no key, as an inbox opened through the hosted endpoint at aamio.at, write to it readable: signed and not sealed, so the service can read it (readable over MCP, --readable on the command line).`);
       }
       return { w: to, key, partner: null };
     }
@@ -1605,13 +1605,25 @@ export class NodeRuntime {
 
   // -------------------------------------------------------------- send --
 
-  /** One message, signed and sealed to the recipient, written to the outbox before it goes. */
-  async send(to, { text = null, data = null, re = null, archivedData = null } = {}) {
+  /**
+   * One message, signed and sealed to the recipient, written to the outbox before it goes.
+   *
+   * readable sends to a write address whose owner holds no key this runtime knows, as an inbox opened through the
+   * hosted endpoint at aamio.at: signed and not sealed, so the service can read it, and so can whoever holds the
+   * inbox's read key. It is the user's choice, never the default. A readable message that carries something this home
+   * holds that reads, a scope's key, the read key of one of its threads or its private key, is not stored or sent,
+   * unless allowSecret says the user wants exactly that.
+   */
+  async send(to, { text = null, data = null, re = null, archivedData = null, readable = false, allowSecret = false } = {}) {
     checkRe(re);
+    if (typeof readable !== "boolean" || typeof allowSecret !== "boolean") throw runtimeError("invalid_arguments", "readable and allowSecret are true or false");
     // A partner bound to a transport goes over it, and never over HTTPS instead.
     const bound = this.#boundPartner(to);
-    if (bound) return this.#sendCarried(bound, { text, data, re, archivedData });
-    const { w, key, partner } = await this.recipient(to);
+    if (bound) {
+      if (readable) throw runtimeError("readable_with_key", `${bound.name} is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at`);
+      return this.#sendCarried(bound, { text, data, re, archivedData });
+    }
+    const { w, key, partner } = readable ? { w: this.#readableAddress(to), key: null, partner: null } : await this.recipient(to);
     // What the inbox asks of writers is read before anything is stored: a
     // requirement this client cannot meet stops here, as a GateStop.
     let advice = await this.client.planFor(w);
@@ -1623,8 +1635,14 @@ export class NodeRuntime {
     if (text !== null && text !== undefined) body.text = String(text);
     if (data !== null && data !== undefined) body.data = data;
     Object.assign(body, this.conversation(key, re));
+    // Sealing gives each message bytes of its own. A readable one is given them here, so the same words sent twice
+    // are two messages, not a replay of one, while a retry from the outbox sends the same bytes.
+    if (key === null) body.nonce = randomBytes(16).toString("hex");
     const plaintext = JSON.stringify(body);
-    let entry = await this.outboxAdd(w, key, this.keys.seal(key, plaintext), body);
+    // Readable: the body itself, signed and not sealed. The bytes that would go are the bytes looked through, before
+    // anything is stored.
+    if (key === null && !allowSecret) this.#stopSecrets(w, plaintext);
+    let entry = await this.outboxAdd(w, key, key === null ? plaintext : this.keys.seal(key, plaintext), body);
     let answer = await this.deliver(entry, advice);
     if ((answer.status === 404 || answer.status === 410) && partner !== null) {
       // The partner may have renewed its inbox. Presence is asked again, once,
@@ -1639,9 +1657,11 @@ export class NodeRuntime {
     // in for data there, for a message that carries what no file should: the
     // archive says which scope was shared and with whom, never its key.
     const stored = answer.status === 201 && isObject(answer.result) ? answer.result : {};
+    const who = key === null ? entry.w : (this.nameForKey(entry.to_key) ?? entry.to_key);
     const archiveError = await this.archiveSafely("sent", {
-      kind: "sent", at: this.now(), to: this.nameForKey(entry.to_key) ?? entry.to_key, w: entry.w, status: answer.status, message_id: entry.id, outcome: entry.status,
+      kind: "sent", at: this.now(), to: who, w: entry.w, status: answer.status, message_id: entry.id, outcome: entry.status,
       seq: stored.seq ?? null, sha256: stored.sha256 ?? null, body: archivedData === null || archivedData === undefined ? body : { ...body, data: archivedData },
+      ...(key === null ? { readable: true } : {}),
     }, `the send ${entry.id}`);
     if (answer.status !== 201) {
       const [retryable, fix] = sendAdvice(outboxOutcome(entry), answer.status);
@@ -1653,7 +1673,7 @@ export class NodeRuntime {
     // by field, a missing one threw after the message was stored, and the
     // caller was told nothing of it (a review of 9 November 2026).
     const receipt = isObject(answer.result) ? answer.result : {};
-    const sent = { to: this.nameForKey(entry.to_key) ?? entry.to_key, w: entry.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, expire_at: receipt.expire_at ?? null };
+    const sent = { to: who, w: entry.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, expire_at: receipt.expire_at ?? null };
     if (answer.notes?.length) sent.notes = answer.notes;
     const said = [];
     if (!Number.isInteger(receipt.seq) || typeof receipt.sha256 !== "string") {
@@ -1670,7 +1690,79 @@ export class NodeRuntime {
     if (answer.traceError) sent.trace_error = answer.traceError;
     // And the archive: delivered, and only the record of it here is missing.
     if (archiveError !== null) sent.archive_error = archiveError;
+    if (key === null) Object.assign(sent, this.#readableSaid(entry.w, receipt));
     return sent;
+  }
+
+  /**
+   * The write address a readable message goes to: one whose owner's key this runtime does not know. A partner, a key,
+   * or an address whose key is known is refused: a message there can be sealed, and a readable copy of it would be one
+   * nobody needed.
+   */
+  #readableAddress(to) {
+    if (typeof to === "string" && ADDRESS.test(to)) {
+      if (this.state.peers[to]) throw runtimeError("readable_with_key", `the key of address ${to} is known here, so a message to it goes sealed. Leave readable out`);
+      return to;
+    }
+    let partner = typeof to === "string" ? this.partnerByName(to) : null;
+    if (!partner && isKey(String(to))) partner = this.partnerByKey(String(to));
+    // The book's name for them, never what was given: that may be a key.
+    if (partner) throw runtimeError("readable_with_key", `${partner.name} is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at`);
+    // What was given is not said back: a key pasted where an address goes would be in the answer.
+    throw runtimeError("unknown_address", "a readable message goes to a write address, 20 characters of a to z and 2 to 7, and what was given is not one");
+  }
+
+  /** What this home holds that reads something, as [what it is, the value]. The value is for comparing, never for saying. */
+  #secretsHeld() {
+    const held = [];
+    for (const scope of this.scopes ?? []) {
+      if (isObject(scope) && typeof scope.key === "string" && scope.key) held.push([`the key of scope ${scope.name}`, scope.key]);
+    }
+    for (const channel of this.state.channels ?? []) {
+      if (isObject(channel) && typeof channel.read_key === "string" && channel.read_key) {
+        held.push([channel.label === "inbox" ? "the read key of your inbox" : `the read key of channel ${channel.label}`, channel.read_key]);
+      }
+    }
+    held.push(["this home's private key", Buffer.from(this.keys.seed).toString("hex")]);
+    return held;
+  }
+
+  /** Which of the secrets this home holds a message carries, by what they are. An exact copy, in any case; a key written another way is not seen. */
+  #secretsIn(plaintext) {
+    const text = String(plaintext).toLowerCase();
+    const found = [];
+    for (const [what, value] of this.#secretsHeld()) {
+      if (value.length >= 16 && text.includes(value.toLowerCase()) && !found.includes(what)) found.push(what);
+    }
+    return found;
+  }
+
+  /** How the inbox at w was opened, as its gate said when it was read here: "hosted", or null when it did not say. */
+  openedVia(w) {
+    return typeof this.client.openedVia === "function" ? this.client.openedVia(w) : null;
+  }
+
+  /** A readable message that carries a secret this home holds stops here, before anything is stored, with what it carries named. */
+  #stopSecrets(w, plaintext) {
+    const found = this.#secretsIn(plaintext);
+    if (!found.length) return;
+    const hosted = this.openedVia(w) === "hosted";
+    const where = hosted ? `The inbox at ${w} was opened through the hosted endpoint at aamio.at: its owner holds no key, so nothing written there can be sealed. ` : "";
+    throw runtimeError("secret_in_readable",
+      `this readable message carries ${found.join(" and ")}, and a readable message is signed and not sealed: the service can read it, and so can whoever holds the read key of ${w}. ${where}` +
+      "Nothing was stored or sent. Leave it out, or share a scope with a partner sealed, with aamio scope share. If the user wants this sent as it is, " +
+      "the user says so: on the command line with --allow-secret, and over MCP in the dialog their app shows, never on an agent's word.",
+      { found, w, hosted });
+  }
+
+  /** What a readable send says beside its answer: that it went readable, how the inbox was opened when known, and what that means. */
+  #readableSaid(w, result) {
+    const opened = isObject(result) && typeof result.opened_via === "string" && result.opened_via ? result.opened_via : this.openedVia(w);
+    const said = { readable: true };
+    if (opened) said.opened_via = opened;
+    said.readable_note = `Sent signed and not sealed: the service can read it, and so can whoever holds the read key of ${w}.` +
+      (opened === "hosted" ? " That inbox was opened through the hosted endpoint at aamio.at, whose owner holds no key: send no secret there." : "");
+    return said;
   }
 
   /** One durable entry per message, written before the first attempt. Every retry sends the same bytes, so the recipient sees a replay, not a new message. */

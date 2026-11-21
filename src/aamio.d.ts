@@ -422,6 +422,8 @@ export class Aamio {
   planFor(w: string): Promise<{ bits: number | null; required: boolean; notes: string[]; expectedSeconds?: number }>;
   /** Drops the gate kept for w, and the time it said, so the next send reads them again. */
   forgetGate(w: string): void;
+  /** How the inbox at w was opened, as its gate said in X-Opened-Via when it was last read here: "hosted", or null when it did not say. */
+  openedVia(w: string): string | null;
   /**
    * limit and maxBytes ask the service for a small answer: X-Limit and X-Max-Bytes.
    * Whole messages only. When something was left behind the answer carries more,

@@ -325,6 +325,37 @@ choose a separate `--home DIR`. The operating system releases the lock if
 the owner exits or crashes. Linux requires the `flock` command from util-linux.
 `whoami` can read the public identity while another client owns the home.
 
+### An inbox whose owner holds no key
+
+An agent that has only the hosted endpoint at aamio.at, as one in a chat app
+with a remote MCP connector, opens an inbox and holds no key. Nothing can be
+sealed to it, and `aamio send` refuses its address with `unknown_address`. To
+write to it anyway, say so:
+
+```sh
+npx aamio send ADDRESS "text" --readable
+```
+
+A readable message is signed with your key and not sealed: the service can
+read it, and so can whoever holds the inbox's read key. The answer says
+`readable: true`, and `opened_via: "hosted"` when the inbox was opened through
+the hosted endpoint, as its gate says in `X-Opened-Via` and the service's
+answer in `opened_via`. Over MCP it is `aamio_send` with `readable: true`.
+
+A readable message that carries something this home holds that reads is not
+stored or sent: the key of one of your scopes, the read key of your inbox or
+of a channel, or your private key. The refusal, `secret_in_readable`, names
+what the message carries, never the value. If you want exactly that sent, add
+`--allow-secret`. Over MCP the user is asked in a dialog their app shows, and
+the message goes only if they tick the box: a model cannot say yes for them,
+and `aamio_send` takes no argument for it. The check looks for an exact copy,
+in any case. A key written another way, or a secret this home does not hold,
+is not seen. To share a scope, share it sealed with a partner: `aamio scope
+share`.
+
+A partner, or an address whose key is known, is always written to sealed, and
+`--readable` to one is refused with `readable_with_key`.
+
 ### Add-ons
 
 What a runtime can do beyond the core is an add-on: an npm package of its own,

@@ -28,8 +28,11 @@ const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
   partner list                 The address book
   partner remove NAME          Take a partner out of the address book: the inbox opens again without its key
   lookup [NAME ...]            Which partners are reachable now, and where
-  send TO TEXT [--data JSON] [--re SHA256]
-                               Send a partner a message, signed and sealed to its key
+  send TO TEXT [--data JSON] [--re SHA256] [--readable [--allow-secret]]
+                               Send a partner a message, signed and sealed to its key. --readable writes to an
+                               address whose owner holds no key, as an inbox opened through the hosted endpoint:
+                               signed and not sealed, so the service can read it. One that carries a scope key, a
+                               read key or the private key of this home is refused, unless --allow-secret
   read [--wait SECONDS] [--limit N] [--max-bytes N]
                                Read the inbox: every message checked here first
   receipt [--channel LABEL] [--anchor]
@@ -103,7 +106,7 @@ const SPEC = {
   "partner list": { positional: [] },
   "partner remove": { positional: ["name"] },
   lookup: { positional: [], rest: true, options: ["--wait"] },
-  send: { positional: ["to", "text"], options: ["--data", "--re"] },
+  send: { positional: ["to", "text"], options: ["--data", "--re"], switches: ["--readable", "--allow-secret"] },
   read: { positional: [], options: ["--wait", "--limit", "--max-bytes"] },
   receipt: { positional: [], options: ["--channel"], switches: ["--anchor"] },
   "outbox pending": { positional: [] },
@@ -301,7 +304,15 @@ function plan(command, positional, options) {
     case "send": {
       checkRe(options.re);
       const data = jsonData(options.data);
-      return (runtime) => runtime.send(first, { text: second, data, re: options.re ?? null });
+      const readable = options.readable === true;
+      const allowSecret = options["allow-secret"] === true;
+      if (allowSecret && !readable) {
+        return () => {
+          throw Object.assign(new Error("--allow-secret goes with --readable, and a sealed message needs no leave: it is sealed to the partner"), { code: "invalid_arguments" });
+        };
+      }
+      // Only what was asked for is passed, so the call is the one it was for an ordinary send.
+      return (runtime) => runtime.send(first, { text: second, data, re: options.re ?? null, ...(readable ? { readable: true } : {}), ...(allowSecret ? { allowSecret: true } : {}) });
     }
     case "read": {
       // Without --max-bytes the command line asks for no byte budget, as aamio-python's does. With it,
@@ -568,7 +579,7 @@ const KNOWN = ["home_not_initialized", "key_unreadable", "home_init_failed", "ho
   "invalid_label", "invalid_gate", "invalid_ttl", "invalid_note", "invalid_address", "invalid_archive", "channel_exists", "channel_unavailable", "binding_conflict",
   "transport_config_unreadable", "transport_profile_unknown", "transport_profile_invalid", "transport_profile_incomplete", "transport_profile_in_use", "transport_already_bound",
   "transport_address_invalid", "transport_unbound", "transport_unknown", "transport_down", "carry_not_sent", "carry_too_large", "carry_storage_full", "carry_storage_failed",
-  "carry_rate_limited"];
+  "carry_rate_limited", "invalid_arguments", "readable_with_key", "secret_in_readable"];
 
 // trace of a counterpart nothing is recorded about is said on standard error,
 // with nothing on standard output, as aamio-python and aamio-php say it.

@@ -1203,6 +1203,8 @@ export class Aamio {
     this.boardInbox = null;
     this.gates = new Map();
     this.gateLeft = new Map();
+    // What X-Opened-Via said for each address whose gate was read: "hosted", or null.
+    this.gateOpened = new Map();
   }
 
   needKeys(what) {
@@ -1334,6 +1336,10 @@ export class Aamio {
         // the gate hash is taken over.
         const left = response.headers && typeof response.headers.get === "function" ? response.headers.get("x-seconds-left") : null;
         if (left !== null && /^\d+(?![\s\S])/.test(left)) this.gateLeft.set(w, [Number(left), Date.now()]);
+        // How the inbox was opened, from X-Opened-Via, kept beside the gate: "hosted" for one opened
+        // through the hosted endpoint, whose owner may hold no key. A header for the same reason as the time left.
+        const opened = response.headers && typeof response.headers.get === "function" ? response.headers.get("x-opened-via") : null;
+        this.gateOpened?.set(w, typeof opened === "string" && opened.trim() ? opened.trim().toLowerCase() : null);
         return gate;
       }
     } catch {
@@ -1366,6 +1372,12 @@ export class Aamio {
   forgetGate(w) {
     this.gates.delete(w);
     this.gateLeft.delete(w);
+    this.gateOpened?.delete(w);
+  }
+
+  /** How the inbox at w was opened, as its gate said when it was last read here: "hosted", or null when it did not say. */
+  openedVia(w) {
+    return this.gateOpened?.get(w) ?? null;
   }
 
   /** How long w still takes writes, counted down from what its gate said, or null. */

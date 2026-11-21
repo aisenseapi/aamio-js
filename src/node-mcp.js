@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { GateStop, isKey } from "./aamio.js";
 import { readIdentity } from "./node-identity.js";
@@ -51,8 +51,8 @@ const RUNTIME_TOOLS = [
   },
   {
     name: "aamio_send",
-    description: "Send a message to a partner by name, looked up through presence, or to a write address a verified message gave as reply_to. Sealed to the partner and signed by you, and written to the outbox before it goes, so its outcome is kept: delivered, refused, or unknown when no answer came back. Put your text in text and structured values in data. An unknown outcome may have been delivered: see aamio_pending, and never send a replacement for it. aamio_outbox_retry sends the same stored bytes again.",
-    inputSchema: schema({ to: { type: "string" }, text: { type: "string" }, data: { type: "object" }, re: { type: "string", pattern: "^[0-9a-f]{64}$", description: "the sha256 of the message this answers, as aamio_read shows it" } }, ["to"]),
+    description: "Send a message to a partner by name, looked up through presence, or to a write address a verified message gave as reply_to. Sealed to the partner and signed by you, and written to the outbox before it goes, so its outcome is kept: delivered, refused, or unknown when no answer came back. Put your text in text and structured values in data. An unknown outcome may have been delivered: see aamio_pending, and never send a replacement for it. aamio_outbox_retry sends the same stored bytes again. With readable, it writes to a write address whose owner holds no key, as an inbox opened through the hosted endpoint: signed and not sealed, so the service can read it. A readable message that carries a scope key, a read key or this home's private key is sent only if the user says yes in a dialog their app shows; leave such things out.",
+    inputSchema: schema({ to: { type: "string" }, text: { type: "string" }, data: { type: "object" }, re: { type: "string", pattern: "^[0-9a-f]{64}$", description: "the sha256 of the message this answers, as aamio_read shows it" }, readable: { type: "boolean", description: "true to write signed and not sealed to an address whose owner holds no key. Only for such an address: a partner's messages are always sealed" } }, ["to"]),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   {
@@ -300,6 +300,8 @@ async function handle(message, session) {
 // line's way. The same as aamio-python's and aamio-php's servers.
 
 const PARTNER_QUESTION = "aamio_partner_key";
+// aamio_send asks the user whether a readable message may carry a secret, under this name.
+export const SECRET_QUESTION = "aamio_send_secret";
 const CONFIRM_SECONDS = 900;
 // What aamio_read hands over per channel when the caller names no budget: one message's maximum.
 const DEFAULT_MAX_BYTES = 65536;
@@ -435,6 +437,55 @@ function byHand(home, name, key = "KEY") {
 }
 
 /** aamio_partner_add: the name from the model, the key from the user, and nothing added without both. */
+/** The form the user is shown when a readable message carries a secret: what it carries, by name, and one box to tick. */
+function secretQuestion(found, w, hosted) {
+  const message = `Your agent asks to send a readable message to ${w} that carries ${found.join(" and ")}. A readable message is signed and not sealed: the service can read it, ` +
+    `and so can whoever holds the read key of that inbox.${hosted ? " That inbox was opened through the hosted endpoint at aamio.at: its owner holds no key, so nothing written there can be sealed." : ""}` +
+    " Tick the box only if you want exactly this sent as it is; otherwise decline, and nothing is sent.";
+  const send = { type: "boolean", title: "Send it as it is", description: "Ticked and accepted, the message goes readable with what it carries. Anything else sends nothing.", default: false };
+  return { message, requestedSchema: { type: "object", properties: { send }, required: ["send"] } };
+}
+
+/** aamio_send: sealed to a partner, or readable to an address without a key; a readable message carrying a secret goes only on the user's yes. */
+async function sendMessage(runtime, args, ask) {
+  // Whether a secret may go is the user's to say. An argument for it would be the model's.
+  if ("allow_secret" in args) {
+    return [{ error: "aamio_send takes no allow_secret: whether a readable message may carry a secret is the user's to say, in a dialog this server shows them", error_code: "invalid_arguments", fix: "Call aamio_send without it. When a readable message carries a secret this home holds, the user is asked." }, true];
+  }
+  if (args.readable !== undefined && args.readable !== null && typeof args.readable !== "boolean") {
+    return [{ error: "readable is true or false", error_code: "invalid_arguments", fix: "Pass true to write signed and not sealed to an address whose owner holds no key, or leave it out.", given: args.readable }, true];
+  }
+  const readable = args.readable === true;
+  const message = { text: args.text ?? null, data: args.data ?? null, re: args.re ?? null, ...(readable ? { readable: true } : {}) };
+  let held;
+  try {
+    return [await runtime.serial(() => runtime.send(args.to, message)), false];
+  } catch (failure) {
+    if (failure?.code !== "secret_in_readable") throw failure;
+    held = failure;
+  }
+  const carried = held.found;
+  const instead = "Leave it out of the message. If the user wants it sent as it is, they do it themselves on the command line with --readable --allow-secret, while this server is stopped.";
+  if (!ask) {
+    return [{ sent: false, error: `this readable message carries ${carried.join(" and ")}, and this app did not say it can show the user a form (the elicitation capability of MCP), so the user was not asked and nothing was sent`, error_code: "secret_in_readable", carries: carried, fix: instead }, true];
+  }
+  // The answer belongs to this message: the same address and the same words, and no other.
+  const about = createHash("sha256").update(JSON.stringify({ data: args.data ?? null, re: args.re ?? null, readable: true, text: args.text ?? null, to: args.to ?? null })).digest("hex").slice(0, 32);
+  let answer;
+  try {
+    ({ answer } = await ask(secretQuestion(carried, held.w, held.hosted), about, null, { tool: "aamio_send", key: SECRET_QUESTION }));
+  } catch (why) {
+    if (!(why instanceof NoDialog)) throw why;
+    return [{ sent: false, error: `${why.message}, so nothing was sent`, error_code: "no_dialog", carries: carried, fix: `Call aamio_send again to ask the user again. ${instead}` }, true];
+  }
+  const action = object(answer) ? answer.action : undefined;
+  const content = object(answer) && object(answer.content) ? answer.content : {};
+  if (action !== "accept" || content.send !== true) {
+    return [{ sent: false, action: action === "accept" || action === "decline" ? action : "cancel", carries: carried, note: "The user did not say yes, so nothing was sent. Leave the secret out, and do not ask again unless the user says so." }, false];
+  }
+  return [await runtime.serial(() => runtime.send(args.to, { ...message, allowSecret: true })), false];
+}
+
 async function addPartner(runtime, args, ask) {
   const extra = Object.keys(args).filter((field) => field !== "name").sort();
   if (extra.length) {
@@ -631,13 +682,24 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
   const wrong = wrongArguments(tool, params.arguments);
   if (wrong) return complete(toolResult(unfit(tool, wrong, params.arguments ?? {}), true));
   const args = params.arguments ?? {};
+  if (tool.name === "aamio_send") {
+    // Outside the runtime's turn while the user is asked: a dialog can take minutes.
+    try {
+      const [data, isError] = await sendMessage(runtime, args, asker(params, session, version, id));
+      return complete(toolResult(data, isError));
+    } catch (failure) {
+      if (failure instanceof InputRequired) return reply(failure.result);
+      // The call was cancelled while the user was being asked: it is answered with nothing.
+      if (failure instanceof Cancelled) return undefined;
+      return complete(toolResult(failureSaid(failure, tool), true));
+    }
+  }
   try {
     const data = await runtime.serial(async () => {
       switch (tool.name) {
         case "aamio_whoami": return runtime.whoami();
         case "aamio_partners": return { partners: runtime.partnerList() };
         case "aamio_presence_lookup": return runtime.lookup(args.names ?? null, args.wait ?? 0);
-        case "aamio_send": return runtime.send(args.to, { text: args.text ?? null, data: args.data ?? null, re: args.re ?? null });
         case "aamio_trace": return runtime.trace(args.who ?? null, args.limit ?? 20);
         case "aamio_read": {
           // One message's maximum per channel unless the caller says otherwise, as aamio-python's server reads.
@@ -696,16 +758,21 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
     return complete(toolResult(data, false));
   } catch (failure) {
     if (failure instanceof ToolRefusal) return complete(toolResult(failure.data, true));
-    const said = failure instanceof GateStop
-      ? { error: failure.reason ?? failure.message, error_code: "gate", fix: failure.fix ?? null }
-      : { error: failure?.code ? failure.message : "the local Node runtime could not complete this call", error_code: failure?.code ?? "internal", ...(failure?.fix ? { fix: failure.fix } : {}) };
-    if (failure?.code === "send_failed" && tool.name === "aamio_board_answer") said.operation = "board_answer";
-    // The channel is open whatever stopped the message that carries its address.
-    if ((failure?.code === "send_failed" || failure instanceof GateStop) && tool.name === "aamio_open_channel") said.operation = "open_channel";
-    // The message it is about and what became of it, as the command line says them: one function writes both.
-    if (SEND_STOPS.includes(failure?.code) || failure instanceof GateStop || (failure?.code === "not_saved" && failure.message_id)) Object.assign(said, stopFields(failure));
-    return complete(toolResult(said, true));
+    return complete(toolResult(failureSaid(failure, tool), true));
   }
+}
+
+/** What a tool call that failed answers: the error, its code and its fix, and for a stopped send what became of the message. */
+function failureSaid(failure, tool) {
+  const said = failure instanceof GateStop
+    ? { error: failure.reason ?? failure.message, error_code: "gate", fix: failure.fix ?? null }
+    : { error: failure?.code ? failure.message : "the local Node runtime could not complete this call", error_code: failure?.code ?? "internal", ...(failure?.fix ? { fix: failure.fix } : {}) };
+  if (failure?.code === "send_failed" && tool.name === "aamio_board_answer") said.operation = "board_answer";
+  // The channel is open whatever stopped the message that carries its address.
+  if ((failure?.code === "send_failed" || failure instanceof GateStop) && tool.name === "aamio_open_channel") said.operation = "open_channel";
+  // The message it is about and what became of it, as the command line says them: one function writes both.
+  if (SEND_STOPS.includes(failure?.code) || failure instanceof GateStop || (failure?.code === "not_saved" && failure.message_id)) Object.assign(said, stopFields(failure));
+  return said;
 }
 
 // Bound the buffer even if the sender never ends a line. After an oversized

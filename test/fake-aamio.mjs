@@ -47,6 +47,9 @@ export class FakeAamio {
     // takes no gate. An opening answers as told: "network" opens nothing and never answers, "lost" opens the thread
     // and the answer never arrives, and a number is that status with nothing opened.
     this.gates = new Map();
+    // Addresses a test says were opened through the hosted endpoint: their gate says so in X-Opened-Via, and a write
+    // there is answered with opened_via, as the service does.
+    this.hosted = new Set();
     this.closeFailures = [];
     this.openFailures = [];
     // What doctor asks of a service: its health and its descriptor, as the real one answers them.
@@ -141,7 +144,7 @@ export class FakeAamio {
       return this.reply(201, { w, expire_at: thread.expire_at, allow: thread.allow, instance: thread.instance, ...(thread.gate ? { gate: thread.gate } : {}) });
     }
     // The gate of the thread that is there, or of a test's choosing for an address, as the service serves it.
-    if (method === "GET" && parts[1] === "gate") return this.reply(200, this.gates.get(w) ?? this.threads.get(w)?.gate ?? {});
+    if (method === "GET" && parts[1] === "gate") return this.reply(200, this.gates.get(w) ?? this.threads.get(w)?.gate ?? {}, this.hosted.has(w) ? { "X-Opened-Via": "hosted" } : {});
     if (method === "DELETE" && parts.length === 1) {
       // Closed by its owner: gone for everyone holding its address. A test can have the service not answer, or refuse.
       const closing = this.closeFailures.shift();
@@ -169,7 +172,8 @@ export class FakeAamio {
       if (verified) message.sig = sig;
       thread.messages.push(message);
       if (failure === "lost") throw new TypeError("fetch failed");
-      return this.reply(201, { seq: message.seq, at: message.at, sha256: message.sha256, expire_at: thread.expire_at, verified });
+      return this.reply(201, { seq: message.seq, at: message.at, sha256: message.sha256, expire_at: thread.expire_at, verified,
+        ...(this.hosted.has(w) ? { opened_via: "hosted", opened_via_note: "This inbox was opened through the hosted endpoint, which holds no key for whoever opened it." } : {}) });
     }
     if (method === "GET" && parts[1] === "receipt") {
       // The service's account of the thread: one line per message, and the root of the lines.
