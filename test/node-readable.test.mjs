@@ -56,7 +56,27 @@ async function refusal(promise) {
   return null;
 }
 
+// Whether the way on, for a call that sent nothing, says stop: a no stands, and a new send is the user's to ask for.
+// The way it said before, call again without requestState and inputResponses, made a first call of it, which asks only
+// about what the home holds by then, so a no about a secret removed since went unheard (a review of 21 November 2026).
+function saysStop(fix) {
+  return typeof fix === "string" && fix.includes("This call sent nothing") && fix.includes("Do not try again on your own") && fix.includes("decline") &&
+    fix.includes("explicitly asks") && !fix.includes("again without requestState") && !fix.includes("to ask the user again");
+}
+
 // ------------------------------------------------------------- the runtime --
+
+test("a readable message has no line in the trace, and its answer gives the sha256", async (t) => {
+  // What the trace tool says of it: the trace follows a counterpart's key, and this address has none.
+  const { fake, runtime } = await writer(t);
+
+  const sent = await runtime.send(ADDRESS, { text: "hei", readable: true });
+
+  assert.match(sent.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(sent.sha256, posted(fake)[0].sha256);
+  const untraced = await refusal(Promise.resolve().then(() => runtime.trace(ADDRESS)));
+  assert.equal(untraced?.code, "no_trace");
+});
 
 test("a readable message goes signed and not sealed to an address without a key, and the same words twice are two messages", async (t) => {
   const { fake, runtime } = await writer(t);
@@ -382,6 +402,7 @@ test("over 2026-07-28 a yes still sends when the home no longer holds the key, a
   const again = (await mcp.next(reply(3))).result.structuredContent;
   assert.equal(again.sent, false);
   assert.equal(again.error_code, "no_dialog", "an answer is taken once");
+  assert.ok(saysStop(again.fix), "an answer used before may have sent already: the way on says stop");
 
   const second = await scopeKey(runtime, "second");
   const late = { to: ADDRESS, text: `the key is ${second}`, readable: true };
@@ -394,6 +415,7 @@ test("over 2026-07-28 a yes still sends when the home no longer holds the key, a
     const stale = (await mcp.next(reply(5))).result.structuredContent;
     assert.equal(stale.sent, false);
     assert.equal(stale.error_code, "no_dialog", "an answer out of its time");
+    assert.ok(saysStop(stale.fix), stale.fix);
   } finally {
     Date.now = realNow;
   }
@@ -426,7 +448,7 @@ for (const variant of ["no form", "readable false", "readable left out", "an ans
       const said = (await mcp.next(reply(2))).result.structuredContent;
       assert.equal(said.sent, false, JSON.stringify(said));
       assert.equal(said.error_code, "no_dialog");
-      assert.match(said.fix, /requestState/);
+      assert.ok(saysStop(said.fix), said.fix);
       assert.deepEqual(calls, [], "nothing that sends is called");
       assert.equal(posted(fake).length, 0);
     } finally {
@@ -491,6 +513,8 @@ test("aamio_send says readable and takes it, and takes no allow_secret", async (
   const send = tools.find((tool) => tool.name === "aamio_send");
   const trace = tools.find((tool) => tool.name === "aamio_trace");
   assert.match(trace.description, /apart from one sent readable and one over a transport under a readable profile, which are signed and not sealed/);
+  assert.match(trace.description, /The one sent readable goes to an address with no known key and has no line here/);
+  assert.match(trace.description, /keep the sha256 its send answer gave, and read no_trace as nothing recorded, not as nothing sent/);
   assert.equal(send.inputSchema.properties.readable.type, "boolean");
   assert.equal(send.inputSchema.properties.allow_secret, undefined);
   assert.match(send.description, /readable/);
