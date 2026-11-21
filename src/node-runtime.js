@@ -1700,11 +1700,14 @@ export class NodeRuntime {
    * nobody needed.
    */
   #readableAddress(to) {
+    let partner = typeof to === "string" ? this.partnerByName(to) : null;
     if (typeof to === "string" && ADDRESS.test(to)) {
       if (this.state.peers[to]) throw runtimeError("readable_with_key", `the key of address ${to} is known here, so a message to it goes sealed. Leave readable out`);
+      // A partner may be called by twenty letters that read as an address. Taken as one, a message meant for them would
+      // go readable to an address nobody named (a review of 21 November 2026).
+      if (partner) throw runtimeError("readable_with_key", `${to} is the name of a partner as well as the shape of an address, and what goes to a partner is sealed to their key. Leave readable out, or give the address of the inbox itself`);
       return to;
     }
-    let partner = typeof to === "string" ? this.partnerByName(to) : null;
     if (!partner && isKey(String(to))) partner = this.partnerByKey(String(to));
     // The book's name for them, never what was given: that may be a key.
     if (partner) throw runtimeError("readable_with_key", `${partner.name} is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at`);
@@ -1740,6 +1743,20 @@ export class NodeRuntime {
   /** How the inbox at w was opened, as its gate said when it was read here: "hosted", or null when it did not say. */
   openedVia(w) {
     return typeof this.client.openedVia === "function" ? this.client.openedVia(w) : null;
+  }
+
+  /**
+   * What a readable message to `to` would carry of this home's secrets, and how the inbox there was opened: { w, carries,
+   * hosted }. Nothing is stored or sent. The recipient is taken as a readable send takes it, and the gate is read as a
+   * send reads it first, which also says how the inbox was opened. carries names the secrets, never their values. A send
+   * looks again at the bytes it sends; this is for asking the user before anything that sends is called.
+   */
+  async readableCheck(to, { text = null, data = null } = {}) {
+    const bound = this.#boundPartner(to);
+    if (bound) throw runtimeError("readable_with_key", `${bound.name} is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at`);
+    const w = this.#readableAddress(to);
+    await this.client.planFor(w);
+    return { w, carries: this.#secretsIn(JSON.stringify({ text, data })), hosted: this.openedVia(w) === "hosted" };
   }
 
   /** A readable message that carries a secret this home holds stops here, before anything is stored, with what it carries named. */

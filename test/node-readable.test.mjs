@@ -329,6 +329,100 @@ test("over 2026-07-28 the question is the result, and the yes belongs to that me
   await mcp.served;
 });
 
+// Every call to send from here on, written down before it runs.
+function countingSends(runtime) {
+  const calls = [];
+  const original = runtime.send.bind(runtime);
+  runtime.send = (...args) => {
+    calls.push(args[1] ?? null);
+    return original(...args);
+  };
+  return calls;
+}
+
+for (const [how, answer] of [["a decline", { action: "decline" }], ["a cancel", { action: "cancel" }], ["an unticked accept", { action: "accept", content: { send: false } }]]) {
+  test(`over 2026-07-28 ${how} stands although the home no longer holds the key, and nothing that sends is called`, async (t) => {
+    const { fake, runtime } = await writer(t);
+    const key = await scopeKey(runtime);
+    const mcp = connect(runtime);
+    const args = { to: ADDRESS, text: `the key is ${key}`, readable: true };
+    mcp.send(call(1, args, modern()));
+    const first = (await mcp.next(reply(1))).result;
+    assert.equal(first.resultType, "input_required");
+
+    // The scope goes while the question is open: the message no longer carries a key this home holds.
+    await runtime.scopeRemove("team");
+    const calls = countingSends(runtime);
+    mcp.send(call(2, args, modern({ requestState: first.requestState, inputResponses: { [SECRET_QUESTION]: answer } })));
+    const answered = (await mcp.next(reply(2))).result;
+
+    assert.equal(answered.structuredContent.sent, false, JSON.stringify(answered));
+    assert.deepEqual(calls, [], "nothing that sends is called on a no");
+    assert.equal(posted(fake).length, 0);
+    mcp.end();
+    await mcp.served;
+  });
+}
+
+test("over 2026-07-28 a yes still sends when the home no longer holds the key, and an answer out of its time or used before sends nothing", async (t) => {
+  const { fake, runtime } = await writer(t);
+  const key = await scopeKey(runtime);
+  const mcp = connect(runtime);
+  const args = { to: ADDRESS, text: `the key is ${key}`, readable: true };
+  const yes = { [SECRET_QUESTION]: { action: "accept", content: { send: true } } };
+
+  mcp.send(call(1, args, modern()));
+  const first = (await mcp.next(reply(1))).result;
+  await runtime.scopeRemove("team");
+  mcp.send(call(2, args, modern({ requestState: first.requestState, inputResponses: yes })));
+  assert.equal((await mcp.next(reply(2))).result.structuredContent.readable, true);
+  assert.equal(posted(fake).length, 1);
+
+  mcp.send(call(3, args, modern({ requestState: first.requestState, inputResponses: yes })));
+  const again = (await mcp.next(reply(3))).result.structuredContent;
+  assert.equal(again.sent, false);
+  assert.equal(again.error_code, "no_dialog", "an answer is taken once");
+
+  const second = await scopeKey(runtime, "second");
+  const late = { to: ADDRESS, text: `the key is ${second}`, readable: true };
+  mcp.send(call(4, late, modern()));
+  const asked = (await mcp.next(reply(4))).result;
+  const realNow = Date.now;
+  Date.now = () => realNow() + 16 * 60 * 1000;
+  try {
+    mcp.send(call(5, late, modern({ requestState: asked.requestState, inputResponses: yes })));
+    const stale = (await mcp.next(reply(5))).result.structuredContent;
+    assert.equal(stale.sent, false);
+    assert.equal(stale.error_code, "no_dialog", "an answer out of its time");
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(posted(fake).length, 1);
+  mcp.end();
+  await mcp.served;
+});
+
+test("a partner named like an address is not written to readable", async (t) => {
+  const { fake, runtime } = await writer(t);
+  await runtime.partnerAdd(ADDRESS, Keys.generate().public);
+
+  const refused = await refusal(runtime.send(ADDRESS, { text: "hei", readable: true }));
+
+  assert.equal(refused?.code, "readable_with_key");
+  assert.equal(posted(fake).length, 0);
+});
+
+test("the instructions say readable and the user's yes, and still fit", async (t) => {
+  const { runtime } = await writer(t);
+  const mcp = connect(runtime);
+  mcp.send(initialize("2025-06-18", {}));
+  const { instructions } = (await mcp.next(reply(0))).result;
+  assert.match(instructions, /unsealed with readable, where a secret goes only on the user's yes/);
+  assert.ok(Buffer.byteLength(instructions, "utf8") <= 2048, `${Buffer.byteLength(instructions, "utf8")} bytes, and Claude Code keeps 2048`);
+  mcp.end();
+  await mcp.served;
+});
+
 test("aamio_send says readable and takes it, and takes no allow_secret", async (t) => {
   const { runtime } = await writer(t);
   const mcp = connect(runtime);
