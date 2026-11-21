@@ -402,6 +402,64 @@ test("over 2026-07-28 a yes still sends when the home no longer holds the key, a
   await mcp.served;
 });
 
+for (const variant of ["no form", "readable false", "readable left out", "an answer without a state", "another revision"]) {
+  test(`a continuation with ${variant} sends nothing, and nothing that sends is called`, async (t) => {
+    const { fake, runtime } = await writer(t);
+    const key = await scopeKey(runtime);
+    const mcp = connect(runtime);
+    try {
+      const args = { to: ADDRESS, text: `the key is ${key}`, readable: true };
+      mcp.send(call(1, args, modern()));
+      const first = (await mcp.next(reply(1))).result;
+      assert.equal(first.resultType, "input_required");
+      await runtime.scopeRemove("team");
+      const calls = countingSends(runtime);
+      const resumed = { ...args };
+      const extra = { requestState: first.requestState, inputResponses: { [SECRET_QUESTION]: { action: "decline" } } };
+      let params = modern(extra);
+      if (variant === "no form") params = modern(extra, {});
+      if (variant === "readable false") resumed.readable = false;
+      if (variant === "readable left out") delete resumed.readable;
+      if (variant === "an answer without a state") params = modern({ inputResponses: extra.inputResponses });
+      if (variant === "another revision") params = { _meta: { "io.modelcontextprotocol/protocolVersion": "2025-11-25", "io.modelcontextprotocol/clientCapabilities": { elicitation: {} } }, ...extra };
+      mcp.send(call(2, resumed, params));
+      const said = (await mcp.next(reply(2))).result.structuredContent;
+      assert.equal(said.sent, false, JSON.stringify(said));
+      assert.equal(said.error_code, "no_dialog");
+      assert.match(said.fix, /requestState/);
+      assert.deepEqual(calls, [], "nothing that sends is called");
+      assert.equal(posted(fake).length, 0);
+    } finally {
+      mcp.end();
+      await mcp.served;
+    }
+  });
+}
+
+test("a partner named like an address is refused readable with the way to them, and their key reaches them sealed", async (t) => {
+  const { fake, runtime } = await writer(t);
+  const root = await mkdtemp(join(tmpdir(), "aamio-node-readable-c-"));
+  await initIdentity(join(root, "home"));
+  const c = await NodeRuntime.open({ home: join(root, "home"), host: HOST, fetch: fake.fetch, clock: () => fake.time });
+  t.after(async () => {
+    await c.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const inbox = await c.ensureInbox();
+  await c.publishPresence(true);
+  await runtime.partnerAdd(ADDRESS, c.keys.public);
+
+  const refused = await refusal(runtime.send(ADDRESS, { text: "hei", readable: true }));
+  assert.equal(refused?.code, "readable_with_key");
+  assert.match(refused.message, /public key/);
+  assert.match(refused.message, /aamio partner list/);
+
+  const sent = await runtime.send(c.keys.public, { text: "hei, forseglet" });
+  assert.equal(sent.readable, undefined);
+  assert.equal(sent.w, inbox.w);
+  assert.equal(posted(fake, inbox.w).at(-1).sealed, true);
+});
+
 test("a partner named like an address is not written to readable", async (t) => {
   const { fake, runtime } = await writer(t);
   await runtime.partnerAdd(ADDRESS, Keys.generate().public);
@@ -431,6 +489,8 @@ test("aamio_send says readable and takes it, and takes no allow_secret", async (
   mcp.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
   const tools = (await mcp.next(reply(1))).result.tools;
   const send = tools.find((tool) => tool.name === "aamio_send");
+  const trace = tools.find((tool) => tool.name === "aamio_trace");
+  assert.match(trace.description, /apart from one sent readable and one over a transport under a readable profile, which are signed and not sealed/);
   assert.equal(send.inputSchema.properties.readable.type, "boolean");
   assert.equal(send.inputSchema.properties.allow_secret, undefined);
   assert.match(send.description, /readable/);

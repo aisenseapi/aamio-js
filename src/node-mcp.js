@@ -57,7 +57,7 @@ const RUNTIME_TOOLS = [
   },
   {
     name: "aamio_trace",
-    description: "What this runtime sent to one counterpart and what came back, as hashes and shapes, never content. For each message sent: the address, seq and sha256 the service stored, or over a transport its mark, via and the sha256 of the envelope it carried, whether it was sealed and how long it was, seen_by_them when a signed message from them names that sha256 as read and opened, and answered_by_them when one answers it. A claim covers the one message it names: a message nothing names is listed in no_read_claim and is unknown, not unread. For each message received: whether it opened, which fields it had, and which of yours it answers (re) or names as read (seen). Use it when a partner says a message did not arrive or arrived empty: the sha256 is of the bytes that went, what the service stored or the envelope a transport carried, byte for byte, and theirs should match. Every message this runtime sends is sealed to the recipient's key, apart from one over a transport under a readable profile, so a reader without that key sees an envelope and no text. Without who, one line per counterpart.",
+    description: "What this runtime sent to one counterpart and what came back, as hashes and shapes, never content. For each message sent: the address, seq and sha256 the service stored, or over a transport its mark, via and the sha256 of the envelope it carried, whether it was sealed and how long it was, seen_by_them when a signed message from them names that sha256 as read and opened, and answered_by_them when one answers it. A claim covers the one message it names: a message nothing names is listed in no_read_claim and is unknown, not unread. For each message received: whether it opened, which fields it had, and which of yours it answers (re) or names as read (seen). Use it when a partner says a message did not arrive or arrived empty: the sha256 is of the bytes that went, what the service stored or the envelope a transport carried, byte for byte, and theirs should match. Every message this runtime sends is sealed to the recipient's key, so a reader without that key sees an envelope and no text, apart from one sent readable and one over a transport under a readable profile, which are signed and not sealed: sealed on each message says which. Without who, one line per counterpart.",
     inputSchema: schema({ who: { type: "string", description: "a partner name, a key or a write address; leave out for everyone" }, limit: { type: "integer", minimum: 1, maximum: 50, description: "messages each way, newest last; 20 by default" } }),
     annotations: READ_ONLY,
   },
@@ -302,6 +302,10 @@ async function handle(message, session) {
 const PARTNER_QUESTION = "aamio_partner_key";
 // aamio_send asks the user whether a readable message may carry a secret, under this name.
 export const SECRET_QUESTION = "aamio_send_secret";
+// What a call to aamio_send hears when it comes back with an answer it cannot continue with.
+const CONTINUATION_REFUSED = "this call comes back with an answer to a question, and cannot go on as it is: an answer is taken over 2026-07-28, " +
+  "for the same readable message, from an app that can show the user the form, so nothing was sent";
+const CONTINUATION_FIX = "Call aamio_send again without requestState and inputResponses. If the message carries a secret of this home, the user is asked anew.";
 const CONFIRM_SECONDS = 900;
 // What aamio_read hands over per channel when the caller names no budget: one message's maximum.
 const DEFAULT_MAX_BYTES = 65536;
@@ -688,6 +692,16 @@ async function callRuntimeTool(id, params, session, version, reply, complete) {
   if (wrong) return complete(toolResult(unfit(tool, wrong, params.arguments ?? {}), true));
   const args = params.arguments ?? {};
   if (tool.name === "aamio_send") {
+    // A call that comes back with a question's state or an answer is a continuation, whatever else it says, and is
+    // judged as one before a way to send is chosen: over 2026-07-28, readable, with a state, from an app that can show
+    // the form. Anything else sends nothing. A continuation that left out the form or readable, or came over another
+    // revision, went the way of a new send, and the answer in it was never read (a review of 21 November 2026). What the
+    // state binds is checked after this.
+    if (Object.hasOwn(params, "requestState") || Object.hasOwn(params, "inputResponses")) {
+      if (!(version === MODERN && args.readable === true && typeof params.requestState === "string" && canAskTheUser(params, session, version))) {
+        return complete(toolResult({ sent: false, error: CONTINUATION_REFUSED, error_code: "no_dialog", fix: CONTINUATION_FIX }, true));
+      }
+    }
     // Outside the runtime's turn while the user is asked: a dialog can take minutes.
     try {
       const [data, isError] = await sendMessage(runtime, args, asker(params, session, version, id));

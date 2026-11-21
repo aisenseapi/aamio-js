@@ -1705,7 +1705,7 @@ export class NodeRuntime {
       if (this.state.peers[to]) throw runtimeError("readable_with_key", `the key of address ${to} is known here, so a message to it goes sealed. Leave readable out`);
       // A partner may be called by twenty letters that read as an address. Taken as one, a message meant for them would
       // go readable to an address nobody named (a review of 21 November 2026).
-      if (partner) throw runtimeError("readable_with_key", `${to} is the name of a partner as well as the shape of an address, and what goes to a partner is sealed to their key. Leave readable out, or give the address of the inbox itself`);
+      if (partner) throw runtimeError("readable_with_key", `${to} is the name of a partner as well as the shape of a write address, and what goes to a partner is sealed to their key. To reach this partner, leave readable out and give their public key from the address book (aamio partner list)`);
       return to;
     }
     if (!partner && isKey(String(to))) partner = this.partnerByKey(String(to));
