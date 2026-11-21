@@ -362,13 +362,14 @@ test("finding 5: a transport that stops reading never holds up the owner, its de
 });
 
 /**
- * A transport in Node that describes itself as fake 0.1.0 and stops when asked, or with STUBBORN never does: for the stop
- * itself, with no Python needed.
+ * A transport in Node that describes itself as fake 0.1.0 and stops when asked, or with STUBBORN never does, and with
+ * IGNORE_TERM lets SIGTERM pass as well: for the stop itself, with no Python needed.
  */
 const STOPPER = `"use strict";
 const { createInterface } = require("node:readline");
 const stubborn = process.env.STUBBORN === "1";
 if (stubborn) setInterval(() => {}, 1000);
+if (process.env.IGNORE_TERM === "1") process.on("SIGTERM", () => {});
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   if (message.t === "hello") {
@@ -411,6 +412,25 @@ test("a transport that does not stop when asked is killed after five seconds", a
     await transport.stop();
     const took = performance.now() - began;
     assert.ok(took >= STOP_SECONDS * 1000 - 200 && took < STOP_SECONDS * 1000 + 3000, `the stop took ${Math.round(took)} ms`);
+    assert.ok(child.exitCode !== null || child.signalCode !== null, "and the process has ended");
+  } finally {
+    await transport.stop();
+  }
+});
+
+test("a transport that lets SIGTERM pass is killed all the same after five seconds, and the stop ends", { timeout: 30_000 }, async () => {
+  // After the five seconds the stop sent SIGTERM and waited for the exit with no end: on POSIX a transport that catches it,
+  // or whose clean-up never ends, kept the close and the next owner waiting (a review of 21 November 2026). Windows ends
+  // the process whatever the signal, so there this holds as it is; it is run on Linux as well.
+  const transport = new TransportProcess("fake", "0.1.0", [process.execPath, "-e", STOPPER], tmpdir(),
+    { ...environment([], baseEnv), STUBBORN: "1", IGNORE_TERM: "1" }, { describeSeconds: 30 });
+  try {
+    await transport.start("0.0.0-test", "node", tmpdir());
+    const child = transport.child;
+    const began = performance.now();
+    await transport.stop();
+    const took = performance.now() - began;
+    assert.ok(took < STOP_SECONDS * 1000 + 3000, `the stop took ${Math.round(took)} ms`);
     assert.ok(child.exitCode !== null || child.signalCode !== null, "and the process has ended");
   } finally {
     await transport.stop();

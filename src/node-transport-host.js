@@ -235,7 +235,10 @@ export class TransportProcess {
     // transport here, alive five seconds more (20 November 2026).
     clearTimeout(timer);
     if (how === "late") {
-      child.kill();
+      // Killed, as B2 says: SIGKILL. The SIGTERM that kill() sends by default can be caught, or held up by a clean-up that
+      // never ends, and the stop then waited for the exit with no end, and the close and the next owner with it (a review
+      // of 21 November 2026). Windows ends the process whatever the signal.
+      child.kill("SIGKILL");
       await exited;
     }
   }

@@ -11,7 +11,9 @@ not what moved in the source.
   nothing is written. `aamio transport here` says so.
 - A transport that stops when asked no longer keeps the process alive for
   five seconds afterwards: `aamio transport here` ends at once. One that does
-  not stop is still ended after five seconds.
+  not stop is still ended after five seconds, now with SIGKILL on Linux and
+  macOS: the SIGTERM it got could be caught, and the stop then waited for it
+  with no end.
 - Where a machine is reached on a medium. A transport may say it on each
   `ready` (`here`, contract 3), the home keeps it, and `aamio transport here
   TRANSPORT` starts an enabled transport for a moment to say it. `aamio
