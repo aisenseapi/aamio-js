@@ -1580,8 +1580,31 @@ export class NodeRuntime {
   async addressFor(partner) {
     const result = await this.lookupPartners([partner]);
     const entry = result.online.find((o) => o.key === partner.key);
-    if (!entry) throw runtimeError("partner_offline", `${partner.name} is not online right now${result.error ? ": " + result.error : ""}`);
+    if (!entry) throw runtimeError("partner_offline", await this.#offlineSaid(partner, result.error));
     return entry.w;
+  }
+
+  /**
+   * Why a partner was not found over the internet, and the way over a transport when one is enabled here and the partner
+   * is bound to none. A field test over sound, Bluetooth, QR and LoRa on 22 November 2026 sent to a device in earshot that
+   * was bound to no transport, and heard only that it was not online. The same as aamio-python and aamio-php.
+   */
+  async #offlineSaid(partner, failed) {
+    const name = partner.name;
+    const said = `${name} is not online right now${failed ? ": " + failed : ""}`;
+    let enabled;
+    let bound;
+    try {
+      enabled = [...(await this.transportService().manifests()).keys()];
+      bound = this.#boundPartner(partner.key) !== null;
+    } catch {
+      // The advice never stands in the way of the refusal it is added to.
+      return said;
+    }
+    if (enabled.length === 0 || bound) return said;
+    const unbound = `${said}. ${name} is bound to no transport, so it was only looked up over the internet`;
+    if (enabled.length === 1) return `${unbound}. To reach ${name} over ${enabled[0]}, which is enabled here: aamio transport bind ${name} ${enabled[0]}`;
+    return `${unbound}. To reach ${name} over one of the transports enabled here, ${enabled.join(", ")}: aamio transport bind ${name} NAME`;
   }
 
   /**

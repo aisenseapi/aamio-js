@@ -68,6 +68,9 @@ export class CarryRefused extends Error {
     super(code + (detail ? ": " + detail : ""));
     this.name = "CarryRefused";
     this.code = code;
+    // What was read of the envelope when it was refused after its sender was verified, so the carrier can say who it
+    // came from (A7). null for a refusal before that.
+    this.reading = null;
   }
 }
 

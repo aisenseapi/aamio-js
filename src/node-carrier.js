@@ -55,6 +55,14 @@ export const SLACK = 2;
 // message: the partner may have started again and taken it as expired (A6.8), and what it refuses is never answered over
 // the medium (A7), so every message after would be lost in it too. The next one asks for a new session.
 export const UNANSWERED_TRIES = 3;
+// The newest refusal codes kept for a test or a log to read: in a long aamio serve the list grew for as long as it ran.
+export const REFUSALS_KEPT = 1000;
+// Refusals said once for each partner, session and code; the set is emptied when it reaches this, so a line may come again.
+export const SAID_KEPT = 1024;
+// What was turned away before a sender was known is said at most this often, in seconds: anyone in range can send it.
+export const UNVERIFIED_SAID_EVERY = 60;
+const KIND_NAMES = new Map([[carry.MESSAGE, "a message"], [carry.RECEIPT, "a receipt"], [carry.ASK, "an ask"], [carry.CHALLENGE, "a challenge"],
+  [carry.OPEN, "an open"], [carry.CLOSE, "a close"]]);
 const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 const pairOf = (pk, session) => toHex(pk) + ":" + toHex(session);
 
@@ -65,10 +73,13 @@ export class Carrier {
    * the transport says it is reached; nameOf(pk) is a partner as the user knows it, for the line that says a message came in.
    */
   constructor(state, process, profile, known, { clock = () => performance.now() / 1000, wall = () => Math.floor(Date.now() / 1000), log = () => {},
-    retrySeconds = 2, askRetrySeconds = 5, tries = TRIES_DEFAULT, note = null, addresses = null, heard = null, nameOf = null, onHere = null } = {}) {
+    retrySeconds = 2, askRetrySeconds = 5, tries = TRIES_DEFAULT, note = null, addresses = null, heard = null, nameOf = null, onHere = null,
+    attention = null } = {}) {
     Object.assign(this, { state, process, profile, known, clock, wall, log, retrySeconds, askRetrySeconds, tries });
     // What the user is to hear, as a message that is not sent again: where the runtime keeps attention, or the log.
     this.note = note ?? log;
+    // What the user is to hear once, with a state of its own, as a message refused in a session that has expired.
+    this.attention = attention ?? ((state, text) => this.log(`transport ${this.process.name}: ${text}`));
     this.heard = heard ?? (() => {});
     this.onHere = onHere ?? (() => {});
     this.nameOf = nameOf ?? ((pk) => toHex(pk).slice(0, 8));
@@ -95,7 +106,10 @@ export class Carrier {
     this.answered = new Map();   // pair -> [partner pk, session, when its challenge came], in that order
     // partner pk in hex -> the transport address it was last heard from fresh, or the home kept from before
     this.addresses = new Map(addresses ?? []);
-    this.refused = [];
+    this.refused = [];               // the newest codes, for a test or a log to read
+    this.refusalsSaid = new Set();   // partner, session and code of the refusals said once
+    this.unverified = new Map();     // code -> how many were turned away before a sender was known, not said yet
+    this.unverifiedSaidAt = null;
     this.budget = UNVERIFIED_PER_SECOND;
     this.budgetAt = clock();
     this.counter = 0;
@@ -203,6 +217,51 @@ export class Carrier {
     return Math.max(1, Math.floor(this.profileOf(pk).challengeWindow / Math.max(this.retrySeconds, SLACK * this.frameSeconds * 2 * this.#frames(ANSWER_BYTES))));
   }
 
+  /**
+   * A refusal, kept here and never answered over the medium (A7), and said where the user sees it, as A7 asks.
+   *
+   * Once the sender was verified, it is said once for each partner, session and code: a message in a session that has
+   * expired, as each session with a challenge has after aamio starts again (A6.8), goes to attention, since it was not
+   * stored and has to be sent again, and anything else to the log. What was turned away before a sender was known is
+   * counted and said at most once a minute, since anyone in range can send it. Until 22 November 2026 every refusal went
+   * into a list that only tests read. The same as aamio-python's carrier.
+   */
+  #refusedHere(code, reading = null) {
+    this.refused.push(code);
+    if (this.refused.length > REFUSALS_KEPT) this.refused.splice(0, this.refused.length - REFUSALS_KEPT);
+    if (reading === null) {
+      this.unverified.set(code, (this.unverified.get(code) ?? 0) + 1);
+      this.#sayUnverified();
+      return;
+    }
+    const said = `${toHex(reading.sender)}:${toHex(reading.session)}:${code}`;
+    if (this.refusalsSaid.has(said)) return;
+    if (this.refusalsSaid.size >= SAID_KEPT) this.refusalsSaid.clear();
+    this.refusalsSaid.add(said);
+    const who = this.nameOf(reading.sender);
+    if (code === "carry_session_expired") {
+      this.attention("session_expired", `a message from ${who} came in a session this aamio can no longer take messages in, and was refused, so it `
+        + "was not stored: the session was opened before this aamio started again, when its age can no longer be measured, or it has outlived "
+        + `its lifetime (contract 3, A6.8). Refusals are not answered over the medium, so ${who}'s aamio takes a new session after three `
+        + "tries without a receipt (A7), and what it sent in the old session has to be sent again from there.");
+      return;
+    }
+    this.log(`transport ${this.process.name}: ${KIND_NAMES.get(reading.kind) ?? "an envelope"} from ${who} was refused with ${code}, `
+      + "and refusals are not answered over the medium (contract 3, A7)");
+  }
+
+  /** What was turned away before a sender was known, counted by code, said at most once a minute (#refusedHere). */
+  #sayUnverified() {
+    if (this.unverified.size === 0) return;
+    const now = this.clock();
+    if (this.unverifiedSaidAt !== null && now - this.unverifiedSaidAt < UNVERIFIED_SAID_EVERY) return;
+    this.unverifiedSaidAt = now;
+    const counted = [...this.unverified.entries()].sort(([one], [other]) => (one < other ? -1 : one > other ? 1 : 0))
+      .map(([code, count]) => `${code} ${count}`).join(", ");
+    this.unverified.clear();
+    this.log(`transport ${this.process.name}: turned away before a sender was known, said at most once a minute: ${counted}`);
+  }
+
   /** Ask the partner for a session of this party's: the challenge and the open follow in pump. */
   open(partnerPk) {
     const [session, envelope] = this.state.ask(partnerPk, this.profileOf(partnerPk), this.clock());
@@ -297,6 +356,7 @@ export class Carrier {
       else if (event[0] === "status") this.log(`transport ${this.process.name}: ${event[1]} ${event[2]}`);
       else if (event[0] === "here") this.onHere(event[1]);
     }
+    this.#sayUnverified();
     this.#resend();
     this.#flush();
     this.process.checkTime();
@@ -308,7 +368,7 @@ export class Carrier {
       envelope = this.reassembly.add(frame);
     } catch (error) {
       if (!(error instanceof CarryRefused)) throw error;
-      this.refused.push(error.code);
+      this.#refusedHere(error.code);
       return;
     }
     if (envelope === null) return;
@@ -316,7 +376,7 @@ export class Carrier {
     this.budget = Math.min(UNVERIFIED_PER_SECOND, this.budget + (now - this.budgetAt) * UNVERIFIED_PER_SECOND);
     this.budgetAt = now;
     if (this.budget < 1) {
-      this.refused.push("unverified_over_budget");
+      this.#refusedHere("unverified_over_budget");
       return;
     }
     this.budget -= 1;
@@ -325,8 +385,8 @@ export class Carrier {
       [result, reply, got] = this.state.deliver(envelope, this.known, this.profileOf, now, this.wall());
     } catch (error) {
       if (!(error instanceof CarryRefused)) throw error;
-      // Refusals stay here (A7): logged and counted, never answered over the medium.
-      this.refused.push(error.code);
+      // Refusals stay here (A7): said where the user sees it and counted, never answered over the medium.
+      this.#refusedHere(error.code, error.reading);
       return;
     }
     if (source !== null && result === "accepted" && [carry.CHALLENGE, carry.OPEN, carry.MESSAGE].includes(got.kind)) {

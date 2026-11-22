@@ -516,6 +516,15 @@ export class Service {
     if (typeof this.runtime.note === "function") this.runtime.note(name, "not_sent_again", text);
   }
 
+  /** What a carrier has to tell the user once, in attention under the transport's name and the state it gives, and the log. */
+  #attention(name, state, text) {
+    this.runtime.log?.(`transport ${name}: ${text}`);
+    if (typeof this.runtime.note !== "function") return;
+    // Said once while it waits unread: the same text for another session of the same partner adds nothing.
+    if ((this.runtime.attention ?? []).some((note) => note.channel === name && note.state === state && note.what === text)) return;
+    this.runtime.note(name, state, text);
+  }
+
   /**
    * Who each running carrier takes messages from, read again; a transport no partner is bound to any more is stopped, so
    * it no longer holds its port and is not started again after a stop, and one bound meanwhile is started (the follow-up
@@ -737,7 +746,8 @@ export class Service {
         const { medium, version } = entry.manifest;
         entry.carrier = new Carrier(this.carry(), transport, (pk) => this.profileFor(pk), this.knownFor(name),
           { log: (line) => this.runtime.log?.(line), note: (text) => this.#say(name, text), addresses: this.#addressesFor(name),
-            heard: (pk, address) => this.#heard(name, pk, address), nameOf: (pk) => this.#nameOf(pk), onHere: (here) => this.#here(name, medium, here, version) });
+            heard: (pk, address) => this.#heard(name, pk, address), nameOf: (pk) => this.#nameOf(pk), onHere: (here) => this.#here(name, medium, here, version),
+            attention: (state, text) => this.#attention(name, state, text) });
         entry.process = transport;
         this.runtime.log?.(`transport ${name}: up`);
         this.checkWindows(name, entry.carrier);

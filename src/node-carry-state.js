@@ -501,6 +501,18 @@ export class CarryState {
   #take(envelope, known, profileIn, mono, now, rnd, sealRnd) {
     const t = this.#tick(now);
     const got = carry.read(envelope, this.keys, known, (pk, session) => this.#bindingFor(pk, session, mono));
+    try {
+      return this.#taken(envelope, got, profileIn, mono, t, rnd, sealRnd);
+    } catch (error) {
+      // Refused after the sender was verified: who and in which session go with it, so the carrier can say it where the
+      // user sees it (A7). Until 22 November 2026 a refusal said nothing of whom it came from.
+      if (error instanceof CarryRefused) error.reading = got;
+      throw error;
+    }
+  }
+
+  /** What A6 and A7 make of an envelope that was read and its sender verified. */
+  #taken(envelope, got, profileIn, mono, t, rnd, sealRnd) {
     if (typeof profileIn === "function") profileIn = profileIn(got.sender);
     if (got.mode !== (profileIn.mode === "sealed" ? carry.SEALED : carry.READABLE)) throw new CarryRefused("carry_mode_refused");
     const pk = got.sender;

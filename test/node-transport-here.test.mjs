@@ -401,6 +401,60 @@ test("a bound address needs no peers, and the answer goes where the partner was 
   assert.deepEqual((await a2.read({ wait: 10 })).map((message) => message.body.text), ["svar over nettet"]);
 });
 
+test("a message in a session the receiver lost with a new start is said in its attention, once, and not taken", async (t) => {
+  const made = await lanHomes(t);
+  const { a, b, ports } = made;
+  await transports.bind(a, "b", "lan", null, `lan:127.0.0.1:${ports.b}`);
+  await transports.bind(b, "a", "lan");
+  await b.startTransports();
+  const first = await a.send("b", { text: "før omstarten" });
+  assert.equal(first.status, "confirmed", JSON.stringify(first));
+  assert.deepEqual((await b.read({ wait: 10 })).map((message) => message.body.text), ["før omstarten"]);
+  await b.close();
+  // A new owner of b's home: the session a opened has no age there any more (A6.8), so what a sends in it is refused,
+  // and until 22 November 2026 nothing said so on b's side (A7).
+  const b2 = await made.open("b");
+  await b2.startTransports();
+  const wait = transports.timing.waitDefault;
+  transports.timing.waitDefault = 3;
+  t.after(() => { transports.timing.waitDefault = wait; });
+  const again = await a.send("b", { text: "etter omstarten" });
+  assert.notEqual(again.status, "confirmed", JSON.stringify(again));
+  const notes = [];
+  const deadline = Date.now() + 15_000;
+  while (!notes.some((note) => note.state === "session_expired")) {
+    assert.ok(Date.now() < deadline, JSON.stringify(notes));
+    notes.push(...await b2.attentionTaken());
+    await sleep(50);
+  }
+  await sleep(2500); // a tries again with the same bytes meanwhile, and each copy is refused the same way
+  notes.push(...await b2.attentionTaken());
+  const said = notes.filter((note) => note.state === "session_expired");
+  assert.equal(said.length, 1, JSON.stringify(notes));
+  assert.equal(said[0].channel, "lan");
+  assert.ok(said[0].what.includes("not stored") && said[0].what.includes("sent again"), said[0].what);
+  assert.deepEqual(await b2.read({ wait: 0 }), [], "nothing in the old session was taken");
+});
+
+test("a partner bound to no transport while one is enabled is refused with why the lookup failed and the command that binds it", async (t) => {
+  // A field test of 22 November 2026 sent to a device in earshot that was bound to no transport, and heard only that it
+  // was not online.
+  const { a } = await lanHomes(t);
+  await assert.rejects(a.send("b", { text: "hei" }), (error) => {
+    assert.equal(error.code, "partner_offline");
+    assert.ok(error.message.startsWith("b is not online right now: "), error.message);
+    assert.ok(error.message.endsWith(". b is bound to no transport, so it was only looked up over the internet. "
+      + "To reach b over lan, which is enabled here: aamio transport bind b lan"), error.message);
+    return true;
+  });
+  await transports.bind(a, "b", "lan");
+  await assert.rejects(a.addressFor(a.partnerByName("b")), (error) => {
+    assert.equal(error.code, "partner_offline");
+    assert.ok(!error.message.includes("aamio transport bind"), "a partner bound already gets no advice to bind it");
+    return true;
+  });
+});
+
 test("an address that stopped answering gives way to the peers on every second ask", async (t) => {
   const { a, b, ports } = await lanHomes(t);
   await transports.bind(a, "b", "lan", null, `lan:127.0.0.1:${ports.gone}`);
