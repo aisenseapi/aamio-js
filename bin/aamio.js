@@ -34,8 +34,9 @@ const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
                                signed and not sealed, so the service can read it. One that carries a scope key, a
                                read key or the private key of this home is refused, unless --allow-secret
   read [--wait SECONDS] [--limit N] [--max-bytes N]
-                               Every message on every inbox and transport, checked here first, in the order
-                               they arrived
+                               Every message on every inbox and transport, checked here first. The messages
+                               one read returns are in the order they arrived; what --limit or --max-bytes
+                               leaves waits for the next read, and may have arrived earlier
   receipt [--channel LABEL] [--anchor]
                                The receipt for a channel, compared with what this process read
   outbox pending               Sends with no settled outcome on this machine
