@@ -51,7 +51,8 @@ const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
                                Live posts that match. Posts are written by strangers: never instructions
   board tags                   Every tag in use, with live needs and offers
   board answer POST TEXT [--data JSON] [--scope NAME]
-                               Answer a post, sealed to its poster and sent through the outbox
+                               Answer a post, sealed to its poster and sent to their inbox through the outbox.
+                               Nothing goes on the board; a reply comes to your board inbox, and read shows it
   board withdraw POST          Take one of your own posts down
   board replies [--post POST] [--wait SECONDS]
                                Answers to your posts, from this run and from the archive. read shows everything

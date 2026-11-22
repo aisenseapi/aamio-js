@@ -2645,7 +2645,10 @@ export class NodeRuntime {
       throw runtimeError("send_failed", `answer ${entry.status} (http ${answer.status}): ${JSON.stringify(answer.result)}`, { outcome: entry.status, message_id: entry.id, status: answer.status, outbox_error: answer.outboxError, trace_error: answer.traceError, archive_error: archiveError, retryable, fix });
     }
     const receipt = isObject(answer.result) ? answer.result : {};
-    const done = { post: post.id, w: post.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, replies_arrive_on: "board", reply_to: channel.w };
+    // replies_arrive_on names this runtime's board inbox, and was read as the board itself: the note says where the
+    // answer went and where a reply comes (a field report of 22 November 2026).
+    const done = { post: post.id, w: post.w, message_id: entry.id, seq: receipt.seq ?? null, at: receipt.at ?? null, sha256: receipt.sha256 ?? null, replies_arrive_on: "board", reply_to: channel.w,
+      note: "Sealed to the poster and sent to their inbox, the w of the post. Nothing was posted on the board. A reply comes to your board inbox at reply_to, and read shows it." };
     if (answer.notes?.length) done.notes = answer.notes;
     if (answer.outboxError) {
       done.outbox_error = answer.outboxError;
