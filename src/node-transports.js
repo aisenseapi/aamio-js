@@ -38,6 +38,8 @@ export const CRASH_WINDOW = 600;
 export const CRASHES_MOST = 3;
 // How long a start of a moment waits for a transport's first ready, to learn where it is reached (B2).
 export const LEARN_SECONDS = 10;
+// How much of what a transport said of its medium, as status down, transport here passes on: its own words, kept short.
+export const DOWN_SAID_MOST = 300;
 // Where a partner's address on a transport came from: given to bind, or heard in a fresh envelope from the partner.
 export const ADDRESS_FROM = ["you", "heard"];
 // What a carried message is filed under when the partner it came from is no longer bound to a transport.
@@ -363,6 +365,10 @@ export class Service {
     // A start of a moment under way, by transport name: the promise of its answer. One at a time per transport, never
     // beside its ordinary start, and none after the stop (a review of 20 November 2026).
     this.learning = new Map();
+    // What a transport said of its medium the last time a start of a moment did not come up, by name: the reason
+    // transport here gives. A transport says it as status down on the protocol, not on standard error, and here said only
+    // that "the lines it wrote above" said why, with none written (a check of 22 November 2026).
+    this.downSaid = new Map();
     // The environment a transport's variables are read from: process.env, unless a test or an embedder says otherwise.
     this.environ = null;
     this.knownAt = 0;
@@ -629,10 +635,15 @@ export class Service {
     const folder = workingFolder(this.runtime.home, name);
     const transport = new TransportProcess(name, manifest.version, [process.execPath, manifest.entry], folder,
       environmentFor(manifest, { base: this.environ ?? process.env }), { log: (line) => this.runtime.log?.(line) });
+    let said = null;
     try {
       await transport.start(CORE_VERSION, "node", folder);
       const until = now() + seconds;
-      while (!transport.readied && now() < until && !this.stopping) await transport.poll(100);
+      while (!transport.readied && now() < until && !this.stopping) {
+        for (const [kind, state, reason] of await transport.poll(100)) {
+          if (kind === "status" && state === "down" && typeof reason === "string" && reason.trim()) said = [...reason.trim()].slice(0, DOWN_SAID_MOST).join("");
+        }
+      }
     } catch (error) {
       if (!(error instanceof TransportFailed) && typeof error?.code !== "string") throw error;
       throw coded("transport_down", `${name} did not start to say where it is reached: ${error.message}`);
@@ -641,7 +652,11 @@ export class Service {
     }
     // Stopped while it started: an owner that has let go of the home writes nothing into it.
     if (this.stopping) return [null, "stopping"];
-    if (!transport.readied) return [null, "not_ready"];
+    if (!transport.readied) {
+      this.downSaid.set(name, said);
+      return [null, "not_ready"];
+    }
+    this.downSaid.delete(name);
     // Said nothing is kept too, as an empty list, so a transport over a medium without addresses is not started again
     // for every card: the microphone of a transport over sound opened each time (the review of 19 November 2026).
     this.#here(name, manifest.medium, transport.here ?? [], manifest.version);
@@ -1043,9 +1058,10 @@ export async function here(runtime, name) {
     return { transport: name, medium, here: null, note: `${name} is starting in this process and has not said it is ready yet: ask again in a moment.` };
   }
   if (how === "not_ready") {
+    const said = service.downSaid?.get(name) ?? null;
     return { transport: name, medium, here: null,
-      note: `${name} did not say it was ready within ${LEARN_SECONDS} seconds, as when its medium is off or another program holds it, so nothing was learned. `
-        + "The lines it wrote above say why." };
+      note: `${name} did not say it was ready within ${LEARN_SECONDS} seconds, so nothing was learned. `
+        + (said ? `It said: ${said}` : "It said nothing of why, as when its medium is off or another program holds it.") };
   }
   // An empty list says nothing of where it is reached either, and has no first address to name.
   if (found === null || !found.length) {

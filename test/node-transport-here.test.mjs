@@ -694,6 +694,24 @@ test("a lookup that ran out of time leaves nothing behind, and a later one learn
   assert.deepEqual(new transports.Config(a.home).here().lan.here, [`lan:127.0.0.1:${ports.a}`]);
 });
 
+test("transport here says what a transport said of its medium when it did not come up", async (t) => {
+  // A transport says why on the protocol, as status down, and not on standard error: here said that the lines it wrote
+  // above said why, with none written, and the reason was lost (a check of 22 November 2026).
+  const { a, ports } = await lanHomes(t, { partners: false });
+  const release = await holdPort(t, ports.a);
+  const service = a.transportService();
+  assert.deepEqual(await service.learnHere("lan", 2), [null, "not_ready"]);
+  const said = service.downSaid.get("lan");
+  assert.match(said, new RegExp(`^port ${ports.a} on .+ could not be opened: `), "what the transport said, as it said it");
+  // The note passes it on; the lookup is not made again, so this does not wait the ten seconds of a start of a moment.
+  service.learnHere = async () => [null, "not_ready"];
+  const answer = await transports.here(a, "lan");
+  assert.match(answer.note, /did not say it was ready within/);
+  assert.ok(answer.note.includes(`It said: ${said}`), answer.note);
+  assert.doesNotMatch(answer.note, /lines it wrote above/);
+  await release();
+});
+
 test("a transport service made first after the close is stopped from the start and starts nothing", async (t) => {
   // A transport service made for the first time after the close started out not stopped, so a lookup through it could
   // still start a child in a home another runtime may own (a review of 20 November 2026).
