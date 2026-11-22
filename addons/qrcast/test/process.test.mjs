@@ -1042,7 +1042,7 @@ test("the process the core runs answers once on standard output and ends with th
 // ----------------------------------------------------------------- where a medium is reached, as in aamio-python's tests/test_qrcast_process.py
 
 const KEY = "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ";
-const BT_HERE = "bt:8C:1D:55:03:7B:53";
+const BT_HERE = "bt:00:00:5E:00:53:01";
 const HERE_SAID = [{ transport: "bt", medium: "bt", here: [BT_HERE], at: NOW }];
 
 test("the card of 0.2.0 is earshot's, with media, where they are reached and the key", async () => {

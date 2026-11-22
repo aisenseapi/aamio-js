@@ -49,7 +49,7 @@ for (const [name, card] of Object.entries(CARDS)) {
 
 test("the vectors cover where a medium is reached, both ways", () => {
   const made = VECTORS.make.filter((vector) => "card" in vector).map((vector) => vector.card);
-  assert.ok(made.some((text) => text.includes("v=bt:8C:1D:55:03:7B:53")) && made.some((text) => text.includes("v=lan:192.168.2.22:47474,internet")));
+  assert.ok(made.some((text) => text.includes("v=bt:00:00:5E:00:53:01")) && made.some((text) => text.includes("v=lan:192.168.2.22:47474,internet")));
   const refused = new Set(VECTORS.make.map((vector) => vector.refused));
   for (const reason of ["invalid_via", "key_needed", "card_too_long", "invalid_key", "a_key_not_a_public_key"]) assert.ok(refused.has(reason), reason);
   assert.equal(Math.max(...VECTORS.make.filter((vector) => "card" in vector).map((vector) => vector.bytes)), VECTORS.max_bytes);

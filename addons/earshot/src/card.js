@@ -24,7 +24,7 @@
  * From 0.5.0 a card may say more, when the one who plays it asks:
  *
  *     aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000&v=lan,internet&k=KEY
- *     aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:8C:1D:55:03:7B:53&k=KEY
+ *     aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:00:00:5E:00:53:01&k=KEY
  *
  * v is the media they prefer answers over, in order, at most three, each once:
  * internet, the scope over aamio.at as a card without v means, or the medium of
@@ -32,7 +32,7 @@
  * medium may carry where they are reached on it, as the transport says it
  * (contract 3, B3: here): the medium, a colon, and 1 to 64 characters of
  * letters, digits, dots, colons, underscores and dashes, as
- * bt:8C:1D:55:03:7B:53 or lan:192.168.2.22:47474. That is the transport's own
+ * bt:00:00:5E:00:53:01 or lan:192.168.2.22:47474. That is the transport's own
  * address, which a listener's core binds to with aamio transport bind NAME
  * TRANSPORT --address. Nothing here knows what a medium is: a transport made
  * tomorrow is carried the same way. k is their public key, 43 characters of
@@ -64,11 +64,11 @@ export const VIA_MOST = 3;
 export const PUBLIC_KEY = /^[A-Za-z0-9_-]{43}$/;
 const VIA_FIX = "via is the media you prefer answers over, in order, at most three and each once: internet, the scope over aamio.at, "
   + "or the medium of a transport, as lan or bt, alone or with where you are reached on it as aamio transport here shows it, "
-  + "as bt:8C:1D:55:03:7B:53. As text they are separated by commas, as bt:8C:1D:55:03:7B:53,internet.";
+  + "as bt:00:00:5E:00:53:01. As text they are separated by commas, as bt:00:00:5E:00:53:01,internet.";
 const KEY_FIX = "key is your public key, the 43 characters aamio whoami shows as key. A card that names a medium other than internet "
   + "carries it, and everyone within earshot hears it.";
 
-/** The medium of a via entry: bt for bt:8C:1D:55:03:7B:53, internet for internet. */
+/** The medium of a via entry: bt for bt:00:00:5E:00:53:01, internet for internet. */
 export function mediumOf(entry) {
   return entry.split(":", 1)[0];
 }

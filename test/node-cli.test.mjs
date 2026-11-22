@@ -36,6 +36,25 @@ test("help, version and invalid arguments leave the home untouched", (t) => {
   assert.equal(existsSync(home), false);
 });
 
+test("a command's own help says where an answer goes, with 0 and the home untouched", (t) => {
+  // board answer --help was refused with 2, so the route the usage gives was out of reach where it was asked for (a
+  // review of 22 November 2026).
+  const dir = mkdtempSync(join(tmpdir(), "aamio-cli-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, "uninitialized");
+  for (const flag of ["--help", "-h"]) {
+    const said = cli(home, ["board", "answer", flag]);
+    assert.equal(said.status, 0, said.stderr);
+    assert.match(said.stdout, /board answer POST TEXT/);
+    assert.match(said.stdout, /sent to their inbox/);
+    assert.match(said.stdout, /a reply comes to your board inbox/);
+    assert.doesNotMatch(said.stdout, /board withdraw/);
+  }
+  // After -- it is the command's own word.
+  assert.equal(cli(home, ["board", "answer", "--", "--help"]).status, 2);
+  assert.equal(existsSync(home), false);
+});
+
 test("serve creates an identity in the chosen home and emits only protocol messages", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "aamio-cli-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

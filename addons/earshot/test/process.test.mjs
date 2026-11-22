@@ -489,7 +489,7 @@ test("a card heard with media and a key says how to bind, and binds nothing", as
 });
 
 // Where a medium is reached, as in aamio-python's tests/test_earshot_process.py.
-const BT_HERE = "bt:8C:1D:55:03:7B:53";
+const BT_HERE = "bt:00:00:5E:00:53:01";
 const HERE_SAID = [{ transport: "bt", medium: "bt", here: [BT_HERE], at: NOW },
   { transport: "lan", medium: "lan", here: ["lan:10.0.0.7:47474", "lan:10.0.0.8:47474"], at: NOW }];
 

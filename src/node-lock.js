@@ -197,11 +197,11 @@ async function checkOlderOwner(home) {
   if (alive === null) {
     throw lockError("home_in_use",
       `could not determine whether aamio (pid ${last.pid}) is still using ${home}; the lock is left untouched. ` +
-      "Use a home of your own: --home DIR or AAMIO_HOME. If the other runtime is yours, stop it. Do not remove the lock unless you have confirmed its owner has stopped.");
+      "Use a home of your own: --home DIR or AAMIO_HOME. A new home is a separate identity: if you need this one, wait for its owner. If the other runtime is yours, stop it. Do not remove the lock unless you have confirmed its owner has stopped.");
   }
   if (alive) {
     throw lockError("home_in_use",
-      `another aamio (pid ${last.pid}) is using ${home}. Use a home of your own: --home DIR or AAMIO_HOME. Stop the other aamio only if it is yours. If no aamio is running, ` +
+      `another aamio (pid ${last.pid}) is using ${home}. Use a home of your own: --home DIR or AAMIO_HOME. A new home is a separate identity: if you need this one, wait for its owner. Stop the other aamio only if it is yours. If no aamio is running, ` +
       `the one that took the lock stopped without letting go of it: delete ${join(home, PID_FILE)} and start again.`);
   }
 }
@@ -222,7 +222,7 @@ export async function takeHome(home, { host = process.env.AAMIO_HOST || DEFAULT_
     const named = Number.isSafeInteger(last?.pid) ? ` (pid ${last.pid})` : "";
     // The other one may be someone else's, as a board agent on a shared machine: a home of your own comes first, and
     // stopping it only when it is yours (a field report of 22 November 2026, where "Stop it" was the advice).
-    throw lockError("home_in_use", `another aamio${named} is using ${home}. Use a home of your own: --home DIR or AAMIO_HOME. Stop the other aamio only if it is yours.`);
+    throw lockError("home_in_use", `another aamio${named} is using ${home}. Use a home of your own: --home DIR or AAMIO_HOME. A new home is a separate identity: if you need this one, wait for its owner. Stop the other aamio only if it is yours.`);
   }
   try {
     await checkOlderOwner(home);

@@ -96,6 +96,21 @@ AAMIO_TAGS. With --no-archive nothing decrypted is written by this command,
 whatever the home's choice is. Run with --version to print the version.
 `;
 
+/**
+ * One command's entry in the usage and the lines under it: what aamio COMMAND --help says. board answer --help was
+ * refused with 2, so the route the usage gives was out of reach where it was asked for (a review of 22 November 2026).
+ */
+function helpOf(topic) {
+  const lines = help.split("\n");
+  const entry = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i] !== `  ${topic}` && !lines[i].startsWith(`  ${topic} `)) continue;
+    entry.push(lines[i]);
+    while (i + 1 < lines.length && /^ {31}\S/.test(lines[i + 1])) entry.push(lines[++i]);
+  }
+  return entry.length ? `Usage: aamio [--home DIR] [--host URL] [--no-archive]\n\n${entry.join("\n")}\n` : help;
+}
+
 // What each command takes. A group is two words: partner add, outbox pending.
 // optional says how many of the last positional arguments may be left out.
 const SPEC = {
@@ -179,6 +194,11 @@ function parse(argv) {
   if (SUBGROUPS.includes(command)) command = `${command} ${args[2] ?? ""}`.trim();
   const spec = SPEC[command];
   if (!spec) throw new Error(`Expected one of: ${Object.keys(SPEC).join(", ")}. Run aamio --help for usage.`);
+  // A command's own help, before its words are counted and before a home is opened. After -- an argument is the
+  // command's own, as everywhere else.
+  const rest = args.slice(command.split(" ").length);
+  const stop = rest.indexOf("--");
+  if ((stop === -1 ? rest : rest.slice(0, stop)).some((arg) => arg === "--help" || arg === "-h")) return { command: "help", topic: command };
   const positional = [];
   const options = {};
   let ended = false;
@@ -601,7 +621,7 @@ async function main() {
     return 2;
   }
   const { command, home, host, archive } = options;
-  if (command === "help") process.stdout.write(help);
+  if (command === "help") process.stdout.write(options.topic ? helpOf(options.topic) : help);
   // As aamio-python and aamio-php say it.
   else if (command === "version") process.stdout.write(`aamio ${version}\n`);
   else if (command === "addon") return addon(home, options.words, archive, host);

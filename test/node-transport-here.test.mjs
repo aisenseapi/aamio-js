@@ -99,7 +99,7 @@ const failure = (promise) => promise.then(() => null, (error) => error);
 // ------------------------------------------------------------- here, in the host
 
 test("here is a short list of the transport's own addresses", () => {
-  assert.deepEqual(hereOf(["bt:8C:1D:55:03:7B:53"], "bt"), ["bt:8C:1D:55:03:7B:53"]);
+  assert.deepEqual(hereOf(["bt:00:00:5E:00:53:01"], "bt"), ["bt:00:00:5E:00:53:01"]);
   assert.deepEqual(hereOf(["lan:10.0.0.7:47474", "lan:10.0.0.8:47474"], "lan"), ["lan:10.0.0.7:47474", "lan:10.0.0.8:47474"]);
   assert.deepEqual(hereOf([], "bt"), []);
   for (const bad of [["lan:10.0.0.7:47474"], ["bt:"], ["bt:a b"], ["bt:x", "bt:x"], [0, 1, 2, 3, 4].map((n) => `bt:${n}`), "bt:x", [7], ["bt:" + "x".repeat(126)], null, ["bt:ø"]]) {
@@ -116,14 +116,14 @@ test("a ready with here is said once, and a here that cannot be taken stops noth
     return transport.poll(0);
   };
   assert.equal(transport.readied, false);
-  assert.deepEqual(await take({ here: ["bt:8C:1D:55:03:7B:53"] }), [["here", ["bt:8C:1D:55:03:7B:53"]]]);
+  assert.deepEqual(await take({ here: ["bt:00:00:5E:00:53:01"] }), [["here", ["bt:00:00:5E:00:53:01"]]]);
   assert.equal(transport.readied, true);
-  assert.deepEqual(await take({ here: ["bt:8C:1D:55:03:7B:53"] }), [], "the same again is nothing new");
+  assert.deepEqual(await take({ here: ["bt:00:00:5E:00:53:01"] }), [], "the same again is nothing new");
   assert.deepEqual(await take({ here: ["lan:10.0.0.7:47474"] }), []);
   assert.ok(logged.at(-1).includes("here is not taken"), logged.at(-1));
-  assert.deepEqual([transport.here, transport.room(), transport.failed], [["bt:8C:1D:55:03:7B:53"], 1, null], "a hint never stops a transport");
+  assert.deepEqual([transport.here, transport.room(), transport.failed], [["bt:00:00:5E:00:53:01"], 1, null], "a hint never stops a transport");
   assert.deepEqual(await take(), []);
-  assert.deepEqual(transport.here, ["bt:8C:1D:55:03:7B:53"], "a ready without here leaves it as it was");
+  assert.deepEqual(transport.here, ["bt:00:00:5E:00:53:01"], "a ready without here leaves it as it was");
   assert.deepEqual(await take({ here: ["bt:DC:FB:48:D5:EA:C0"] }), [["here", ["bt:DC:FB:48:D5:EA:C0"]]], "another day, another address");
 });
 
@@ -447,7 +447,7 @@ test("an add-on that needs here gets it learned by a start of a moment when noth
 
 test("bind with an address checks it, and sets it for a partner bound already", async (t) => {
   const { a } = await lanHomes(t);
-  const wrong = await failure(transports.bind(a, "b", "lan", null, "bt:8C:1D:55:03:7B:53"));
+  const wrong = await failure(transports.bind(a, "b", "lan", null, "bt:00:00:5E:00:53:01"));
   assert.equal(wrong?.code, "transport_address_invalid");
   assert.equal(wrong.message, "an address on lan is lan: and then where the partner is reached, as its card or aamio transport here on its machine says it, at most 128 characters of printable ASCII without spaces");
   assert.deepEqual(new transports.Config(a.home).bindings(), {}, "nothing was bound");
@@ -556,7 +556,7 @@ test("the command line says where a transport is reached, and binds a partner to
   assert.ok(await portIsFree(port), "the port is given back");
   assert.equal(cli("transport", "here").status, 2, "transport here takes TRANSPORT");
   assert.equal(cli("partner", "add", "b", B.public).status, 0);
-  const wrong = cli("transport", "bind", "b", "lan", "--address", "bt:8C:1D:55:03:7B:53");
+  const wrong = cli("transport", "bind", "b", "lan", "--address", "bt:00:00:5E:00:53:01");
   assert.equal(wrong.status, 1, wrong.stderr);
   assert.equal(JSON.parse(wrong.stdout).error_code, "transport_address_invalid", wrong.stdout);
   const bound = cli("transport", "bind", "b", "lan", "--address", "lan:127.0.0.1:47474");
