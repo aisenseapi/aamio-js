@@ -3471,6 +3471,12 @@ export class NodeRuntime {
       return true;
     });
     this.attention.splice(noted, this.attention.length - noted, ...fresh);
+    // In the order the messages arrived, across the channels, as aamio-python and aamio-php give them. A read gave them
+    // channel by channel, so an answer that came on a board inbox stood apart from the rest, and one on an older board
+    // inbox apart again (a field report of 22 November 2026). The sort keeps equals in the order they came; one
+    // without a time goes last.
+    const arrival = (message) => (typeof message?.at === "number" && Number.isFinite(message.at) ? message.at : Infinity);
+    messages.sort((a, b) => (arrival(a) === arrival(b) ? 0 : arrival(a) < arrival(b) ? -1 : 1));
     await this.#carriedHandedOver(messages);
     return messages;
   }

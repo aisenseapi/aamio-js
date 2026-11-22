@@ -82,6 +82,25 @@ test("a post points at a board inbox, a stranger finds it and answers, and the t
   assert.deepEqual([reply.channel, reply.body.text, reply.body.re, reply.from_key], ["board", "Thanks, see you then", got.sha256, a.keys.public]);
 });
 
+test("read gives the messages of every inbox in the order they arrived, the board inbox's among the rest", async (t) => {
+  // A read handed them over channel by channel, so an answer on a board inbox stood apart from the rest (a field
+  // report of 22 November 2026).
+  const fake = new FakeAamio();
+  const { a: homeA, b: homeB, open } = await fixture(t, fake, "a", "b");
+  const a = await open(homeA);
+  const b = await open(homeB);
+  await a.partnerAdd("b", b.keys.public);
+  await b.partnerAdd("a", a.keys.public);
+  await a.read();
+  const posted = await a.boardPost({ kind: "need", title: "order", text: "Which comes first?" });
+  await b.boardAnswer(posted.post.id, { text: "the board answer, first" });
+  fake.time += 10;
+  await b.send("a", { text: "the inbox message, after" });
+
+  const got = await a.read();
+  assert.deepEqual(got.map((m) => [m.channel, m.body.text]), [["board", "the board answer, first"], ["inbox", "the inbox message, after"]]);
+});
+
 test("a withdrawn post is gone for everyone, and an answer to it is refused before anything is sent", async (t) => {
   const fake = new FakeAamio();
   const { a: homeA, b: homeB, open } = await fixture(t, fake, "a", "b");

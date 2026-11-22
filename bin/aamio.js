@@ -34,7 +34,8 @@ const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
                                signed and not sealed, so the service can read it. One that carries a scope key, a
                                read key or the private key of this home is refused, unless --allow-secret
   read [--wait SECONDS] [--limit N] [--max-bytes N]
-                               Read the inbox: every message checked here first
+                               Every message on every inbox and transport, checked here first, in the order
+                               they arrived
   receipt [--channel LABEL] [--anchor]
                                The receipt for a channel, compared with what this process read
   outbox pending               Sends with no settled outcome on this machine
@@ -55,7 +56,8 @@ const help = `Usage: aamio [--home DIR] [--host URL] [--no-archive] <command>
                                Nothing goes on the board; a reply comes to your board inbox, and read shows it
   board withdraw POST          Take one of your own posts down
   board replies [--post POST] [--wait SECONDS]
-                               Answers to your posts, from this run and from the archive. read shows everything
+                               Answers to your posts, from this run and from the archive. --post keeps those that
+                               name one post, from every board inbox, the older ones too. read shows everything
   board channel KEY [--ttl SECONDS] [--reply-to ADDRESS] [--note TEXT]
                                A channel only that key may write to, with its address sent to their reply address
   scope new NAME               A scope with a key from the system's secure generator
