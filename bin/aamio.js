@@ -160,6 +160,12 @@ const GROUPS = ["partner", "outbox", "board", "scope", "channel", "transport"];
 // Commands one word deeper, as aamio-python and aamio-php have them: transport profile add and transport profile remove.
 const SUBGROUPS = ["transport profile"];
 
+// A key: 43 characters of base64url, of which one in 64 begins with a dash and one in 4096 with two. Such a word is a
+// word, never an option, as aamio-python reads it: a key with two dashes first was taken for an option nobody has, and the
+// advice a refusal gives names a partner by its key when its name is not one word to a shell (the review of 23 November
+// 2026). No option is 43 characters of base64url.
+const KEY_WORD = /^-[A-Za-z0-9_-]{42}$/;
+
 function parse(argv) {
   let home;
   // The service, as aamio-python and aamio-php take it: --host, else AAMIO_HOST, else aamio.at.
@@ -209,7 +215,7 @@ function parse(argv) {
     const arg = args[i];
     if (!ended && arg === "--") {
       ended = true;
-    } else if (!ended && arg.startsWith("--")) {
+    } else if (!ended && arg.startsWith("--") && !KEY_WORD.test(arg)) {
       const [name, inline] = arg.includes("=") ? [arg.slice(0, arg.indexOf("=")), arg.slice(arg.indexOf("=") + 1)] : [arg, undefined];
       // A switch is there or not, and takes no value: receipt --anchor.
       if ((spec.switches ?? []).includes(name)) {

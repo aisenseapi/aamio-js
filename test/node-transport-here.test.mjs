@@ -455,6 +455,50 @@ test("a partner bound to no transport while one is enabled is refused with why t
   });
 });
 
+test("a name a shell would not take as one word is given by its key in the command that binds it", async (t) => {
+  // A partner's name may hold what a shell splits or reads as its own, and the command gave it as it was: "Ada Lovelace"
+  // was two words to bind (the review of 23 November 2026).
+  const { a } = await lanHomes(t, { partners: false });
+  const names = ["Ada Lovelace", "O'Hara", 'say "hi"', "$HOME;ls", "Åse", "-ada", "1kb", "ada,bob", "a`b", "ada&bob", "ada-l_2.x"];
+  for (const [n, name] of names.entries()) {
+    const key = Keys.fromSeedHex((0x40 + n).toString(16).repeat(32)).public;
+    await a.partnerAdd(name, key);
+    const advice = name === "ada-l_2.x" ? `, which is enabled here: aamio transport bind ${name} lan`
+      : `, which is enabled here, naming the partner by its key: aamio transport bind ${key} lan`;
+    await assert.rejects(a.addressFor(a.partnerByName(name)), (error) => {
+      assert.equal(error.code, "partner_offline");
+      assert.ok(error.message.endsWith(`. To reach ${name} over lan${advice}`), error.message);
+      return true;
+    });
+  }
+});
+
+test("the command a refusal gives binds the partner it names when it is run as given, also by a key that begins with two dashes", async (t) => {
+  // The advice in a refusal is a command an agent runs. A key with two dashes first was taken for an option here until
+  // the review of 23 November 2026.
+  const dir = mkdtempSync(join(tmpdir(), "aamio-advice-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  stateFolder(t, dir);
+  const home = await homeWithLan(dir, "home");
+  await enable(home, "lan", { probe });
+  const key = Buffer.from([0xfb, 0xef, ...Array.from({ length: 30 }, (_, i) => i)]).toString("base64url");
+  assert.ok(key.startsWith("--"), key);
+  const cli = (...args) => spawnSync(process.execPath, [bin, "--home", home, "--host", NOWHERE, ...args], { encoding: "utf8", timeout: 60_000 });
+  const added = cli("partner", "add", "Ada Lovelace", key);
+  assert.equal(added.status, 0, added.stdout + added.stderr);
+  const sent = cli("send", "Ada Lovelace", "hei");
+  const told = JSON.parse(sent.stdout);
+  assert.equal(told.error_code, "partner_offline", sent.stdout + sent.stderr);
+  const words = told.error.slice(told.error.lastIndexOf(": ") + 2).split(" ");
+  assert.deepEqual(words, ["aamio", "transport", "bind", key, "lan"], told.error);
+
+  const bound = cli(...words.slice(1));
+
+  assert.equal(bound.status, 0, bound.stdout + bound.stderr);
+  const answer = JSON.parse(bound.stdout);
+  assert.deepEqual([answer.partner, answer.key, answer.routes.map((route) => route.transport)], ["Ada Lovelace", key, ["lan"]]);
+});
+
 test("an address that stopped answering gives way to the peers on every second ask", async (t) => {
   const { a, b, ports } = await lanHomes(t);
   await transports.bind(a, "b", "lan", null, `lan:127.0.0.1:${ports.gone}`);

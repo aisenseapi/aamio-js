@@ -115,6 +115,12 @@ const ADDRESS = /^[a-z2-7]{20}$/;
 // the u flag a name of 33 emoji was 66 units here and refused, and taken there
 // (a check of 13 November 2026).
 const NAME = /^[^\u0000-\u001f\u007f]{1,64}$/u;
+// A name a command line takes as one word in every shell: a letter first, so that neither an option nor a number is read
+// into it, then letters, digits, dots, dashes and underscores. Any other name is given in a command as the partner's key,
+// which is 43 characters of base64url: a partner's name may hold spaces, quotes and what a shell reads as its own, and
+// "Ada Lovelace" was two words (the review of 23 November 2026). A key that begins with a dash is a key on the command
+// line here and in the other two runtimes.
+const BARE_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 
 // ------------------------------------------------------------- the outbox --
 //
@@ -1603,8 +1609,9 @@ export class NodeRuntime {
     }
     if (enabled.length === 0 || bound) return said;
     const unbound = `${said}. ${name} is bound to no transport, so it was only looked up over the internet`;
-    if (enabled.length === 1) return `${unbound}. To reach ${name} over ${enabled[0]}, which is enabled here: aamio transport bind ${name} ${enabled[0]}`;
-    return `${unbound}. To reach ${name} over one of the transports enabled here, ${enabled.join(", ")}: aamio transport bind ${name} NAME`;
+    const [word, by] = BARE_NAME.test(name) ? [name, ""] : [partner.key, ", naming the partner by its key"];
+    if (enabled.length === 1) return `${unbound}. To reach ${name} over ${enabled[0]}, which is enabled here${by}: aamio transport bind ${word} ${enabled[0]}`;
+    return `${unbound}. To reach ${name} over one of the transports enabled here, ${enabled.join(", ")}${by}: aamio transport bind ${word} NAME`;
   }
 
   /**

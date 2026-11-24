@@ -8,11 +8,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Keys } from "../src/aamio.js";
 import * as carry from "../src/carry.js";
 import { Carrier, REFUSALS_KEPT } from "../src/node-carrier.js";
 import { CarryState, profile } from "../src/node-carry-state.js";
+import { initIdentity } from "../src/node-identity.js";
+import { NodeRuntime } from "../src/node-runtime.js";
 
 const parties = JSON.parse(readFileSync(new URL("./carry_v1_vectors.json", import.meta.url), "utf8")).parties;
 const keys = (name) => Keys.fromSeedHex(parties[name].seed);
@@ -137,4 +141,61 @@ test("the list of refusal codes keeps only the newest", async () => {
 
   assert.deepEqual(at.carrier.refused, Array(REFUSALS_KEPT).fill("frame_bad_length"), "a long aamio serve kept every code for as long as it ran");
   assert.equal(at.lines.filter((line) => line.includes("before a sender was known")).length, 1);
+});
+
+test("a refusal said again keeps what another partner said unread, through the coupling a running carrier is given", async (t) => {
+  // alice, then carol, then alice in her other session: alice's text waited there already, and in aamio-python and
+  // aamio-php it replaced what waited, so carol's was gone before anyone read it (the review of 23 November 2026). Here
+  // each waits as a note of its own, and a read takes them once.
+  const dir = mkdtempSync(join(tmpdir(), "aamio-refusals-"));
+  const home = join(dir, "b");
+  await initIdentity(home);
+  const runtime = await NodeRuntime.open({ home, host: "http://127.0.0.1:9" });
+  t.after(async () => {
+    await runtime.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await runtime.partnerAdd("alice", keys("A").public);
+  await runtime.partnerAdd("carol", keys("C").public);
+  const lines = [];
+  runtime.log = (line) => lines.push(line);
+  const known = [pk("A"), pk("C")];
+  const atB = new CarryState(keys("B"));
+  const opened = (sender) => {
+    const [session, ask] = sender.ask(pk("B"), PROFILE, 0);
+    const [, challenge] = atB.deliver(ask, known, PROFILE, 0, NOW);
+    const [, opening] = sender.deliver(challenge, [pk("B")], PROFILE, 0, NOW);
+    assert.equal(atB.deliver(opening, known, PROFILE, 0, NOW)[0], "accepted");
+    return session;
+  };
+  const atA = new CarryState(keys("A"));
+  const atC = new CarryState(keys("C"));
+  const [first, second, carols] = [opened(atA), opened(atA), opened(atC)];
+  atB.restart();
+  const medium = new Medium();
+  const carrier = new Carrier(atB, medium, PROFILE, known, {
+    clock: () => 1000, wall: () => NOW, log: (line) => lines.push(line),
+    nameOf: (key) => (same(key, pk("A")) ? "alice" : "carol"),
+    attention: runtime.transportService().attentionFor("stub"),
+  });
+  const at = { carrier, medium };
+  const stub = async () => (await runtime.attentionTaken()).filter((note) => note.channel === "stub");
+
+  await hear(at, atA.send(pk("B"), first, new TextEncoder().encode("1"), PROFILE));
+  await hear(at, atC.send(pk("B"), carols, new TextEncoder().encode("2"), PROFILE));
+  await hear(at, atA.send(pk("B"), second, new TextEncoder().encode("3"), PROFILE));
+
+  assert.deepEqual(carrier.refused, Array(3).fill("carry_session_expired"));
+  const taken = await stub();
+  assert.deepEqual(taken.map((note) => note.state), ["session_expired", "session_expired"], JSON.stringify(taken));
+  assert.ok(taken[0].what.startsWith("a message from alice") && taken[1].what.startsWith("a message from carol"), JSON.stringify(taken));
+  assert.ok(lines.at(-1).startsWith("transport stub: a message from alice"), "the third is in the log: " + lines.join("\n"));
+  assert.deepEqual(await stub(), [], "read once, and then gone");
+
+  const third = opened(atA);
+  atB.restart();
+  await hear(at, atA.send(pk("B"), third, new TextEncoder().encode("4"), PROFILE));
+  const again = await stub();
+  assert.equal(again.length, 1, JSON.stringify(again));
+  assert.ok(again[0].what.startsWith("a message from alice"), again[0].what);
 });

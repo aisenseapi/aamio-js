@@ -526,6 +526,14 @@ export class Service {
   }
 
   /**
+   * What a carrier on this transport has to tell the user once, as attention under the transport's name and the state it
+   * gives. The one a running carrier is given, and the one a test can give its own.
+   */
+  attentionFor(name) {
+    return (state, text) => this.#attention(name, state, text);
+  }
+
+  /**
    * Who each running carrier takes messages from, read again; a transport no partner is bound to any more is stopped, so
    * it no longer holds its port and is not started again after a stop, and one bound meanwhile is started (the follow-up
    * check of 15 November 2026).
@@ -747,7 +755,7 @@ export class Service {
         entry.carrier = new Carrier(this.carry(), transport, (pk) => this.profileFor(pk), this.knownFor(name),
           { log: (line) => this.runtime.log?.(line), note: (text) => this.#say(name, text), addresses: this.#addressesFor(name),
             heard: (pk, address) => this.#heard(name, pk, address), nameOf: (pk) => this.#nameOf(pk), onHere: (here) => this.#here(name, medium, here, version),
-            attention: (state, text) => this.#attention(name, state, text) });
+            attention: this.attentionFor(name) });
         entry.process = transport;
         this.runtime.log?.(`transport ${name}: up`);
         this.checkWindows(name, entry.carrier);
