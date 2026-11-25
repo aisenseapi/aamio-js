@@ -915,3 +915,40 @@ test("a bound message whose open was lost opens its session, and the challenge g
   assert.equal(carrier.control.size, 0, "the challenge is not sent again: the message opened the session");
 });
 
+// ------------------------------------------------------------------ the field report of 25 November 2026
+
+for (const opening of ["open", "bound message"]) {
+  test(`an open ends every challenge to that partner and none goes again (${opening})`, async () => {
+    // Finding 10: a device asked twice, the first answer being slow, and got two challenges. It opened its session with
+    // the first, and the second went again about every 2 seconds through the whole challenge window of 480 seconds, taking
+    // the turns of receipts and answers on a slow line. An open ends every challenge to the partner, as a challenge ends
+    // every ask to it, and so does a bound message whose open was lost.
+    const clock = new Clock();
+    const atA = new CarryState(A);
+    const medium = new Medium(1000, 128);
+    const carrier = new Carrier(new CarryState(B), medium, sealed, [A.publicRaw], { clock: clock.read, wall: () => NOW });
+    const [first, ask] = atA.ask(B.publicRaw, sealed, 0);
+    heard(medium, ask);
+    await carrier.pump(0);
+    const firstChallenge = carry.reassemble(medium.given);
+    let given = medium.given.length;
+    clock.now += 1;
+    const [, askedAgain] = atA.ask(B.publicRaw, sealed, 1);
+    heard(medium, askedAgain);
+    await carrier.pump(0);
+    assert.deepEqual([...carrier.control.values()].map((entry) => entry.kind), ["challenge", "challenge"]);
+    assert.ok(medium.given.length > given, "the second ask has a challenge of its own");
+    let [, opens] = atA.deliver(firstChallenge, [B.publicRaw], sealed, 1.5, NOW);
+    if (opening === "bound message") opens = atA.send(B.publicRaw, first, bytes("hei"), sealed);
+    heard(medium, opens);
+    await carrier.pump(0);
+    assert.equal(carrier.control.size, 0, "the session is open: neither challenge goes again");
+    given = medium.given.length;
+    for (let round = 0; round < 10; round++) {
+      clock.now += 2.1;
+      await carrier.pump(0);
+    }
+    assert.equal(medium.given.length, given, "and nothing goes out again in the twenty seconds after");
+  });
+}
+

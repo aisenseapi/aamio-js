@@ -412,7 +412,12 @@ export class Carrier {
       return;
     }
     if (got.kind === carry.OPEN) {
-      this.#settled(pair, "challenge");
+      // A session the partner asked for is open: every challenge to it ends, the one this answers and any made since, as a
+      // challenge ends every ask (above). A device that asked twice, the first answer being slow, opened its session with
+      // the first challenge, and the second went again every two seconds through the whole window of 480 seconds, taking
+      // the turns of receipts and answers on a slow line (finding 10 of the field report of 25 November 2026). A copy of an
+      // open never comes this far: it is refused as carry_nonce_used.
+      this.#opened(got.sender);
       return;
     }
     if (got.kind === carry.ASK) {
@@ -428,9 +433,10 @@ export class Carrier {
       this.#settled(pair, "open");
       return;
     }
-    // A message: its receipt goes back. A bound one may have opened its session itself, its open lost (A6.2 point 6), so the
-    // challenge is not sent again either.
-    this.#settled(pair, "challenge");
+    // A message: its receipt goes back. A bound one may have opened its session itself, its open lost (A6.2 point 6), and
+    // then no challenge to the partner goes again, as after an open. One in a session that was open before ends nothing: a
+    // challenge asked for since may still be needed.
+    if (this.#pending(pair, "challenge")) this.#opened(got.sender);
     if (reply) this.#queue(reply, source);
     if (result === "accepted" && got.kind === carry.MESSAGE) {
       // Said where the owner keeps its log, as aamio serve's window: it said nothing when a message came, and a test
@@ -441,6 +447,16 @@ export class Carrier {
 
   #settled(pair, kind) {
     for (const [key, entry] of this.control) if (pairOf(entry.pk, entry.session) === pair && entry.kind === kind) this.control.delete(key);
+  }
+
+  #pending(pair, kind) {
+    for (const entry of this.control.values()) if (pairOf(entry.pk, entry.session) === pair && entry.kind === kind) return true;
+    return false;
+  }
+
+  // The partner has opened a session it asked for: no challenge to it goes again, for that session or another.
+  #opened(partnerPk) {
+    for (const [key, entry] of this.control) if (entry.kind === "challenge" && carry.equal(entry.pk, partnerPk)) this.control.delete(key);
   }
 
   #resend() {
