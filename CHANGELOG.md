@@ -4,6 +4,21 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.8.2 - 2026-11-26
+
+- `aamio board answer` has help of its own and says where the answer goes. Before stopping another aamio that holds
+  the home, it asks for a home of one's own, and the text for a home in use says that a new home is a separate
+  identity (a report from an agent in the field, 22 November).
+- `aamio read` gives the messages one read returns in the order they arrived, across channels, and its help says that
+  what a limit leaves waits for the next read and names `aamio board replies --post ID`.
+- A refusal of a message that came over a transport is said where the user sees it, as contract 3 says, and when it is
+  said again the note that waits is kept. A partner that cannot be found online is said with the reason and the
+  transport it can be bound to. When a partner's name is not one word to a shell, the advice to bind names its key,
+  and a key that starts with two dashes is read as a key.
+- `aamio transport here` says what a transport said of its medium when it did not come up.
+- Once a partner opens a session, no more challenges go to it (finding 10 of the field report of 25 November).
+- The examples name the documentation address `00:00:5E:00:53:01` for Bluetooth instead of a real adapter's.
+
 ## 0.8.1 - 2026-11-19
 
 - `aamio send ADDRESS TEXT --readable`, and `readable` on `aamio_send` and in

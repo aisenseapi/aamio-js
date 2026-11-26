@@ -5,6 +5,11 @@ committed; it is tagged on release, and the two are the same day. Every entry
 says what changed for somebody using it. The version is the one the add-on has
 for aamio-python and aamio-php, and a number says the same of all three.
 
+## 0.2.1 - 2026-11-26
+
+- The examples, the help and the manifest name the documentation address `00:00:5E:00:53:01` for Bluetooth
+  instead of a real adapter's. Nothing else changed; the number is the same in all three runtimes.
+
 ## 0.2.0 - 2026-11-19
 
 - The card is Earshot's card of 0.5.0: `--via` (`via` over MCP) names the
