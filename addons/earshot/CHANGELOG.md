@@ -6,7 +6,7 @@ aisenseapi/aamio-earshot, whose changelogs say what each version changed.
 Dates are the day the version was committed. Every entry says what changed for
 somebody using it.
 
-## 0.5.1 - 2026-11-26
+## 0.5.1 - 2026-11-27
 
 - The examples, the help and the manifest name the documentation address `00:00:5E:00:53:01` for Bluetooth
   instead of a real adapter's. Nothing else changed; the number is the same in all three runtimes.
